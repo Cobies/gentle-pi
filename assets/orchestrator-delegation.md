@@ -124,8 +124,8 @@ Keep one writer and a short synthesized handoff. Delegation is mandatory at the 
 These are parent-orchestrator routing boundaries. Use the smallest useful topology and keep the safety machinery behind the outcome-first interaction. Do not pass these rules to child agents as permission to orchestrate.
 
 1. **Bounded read rule**: read 1–3 files inline to decide or verify.
-2. **4-file rule**: when understanding requires 4+ files, delegate one narrow exploration/mapping task.
-3. **Write rule**: keep one mechanical, already-understood file inline only when it needs no research or unresolved design work; delegate one writer for 2+ non-trivial files.
+2. **4-file rule (Circuit Breaker)**: when understanding requires 4+ files or more than 2 exploratory reads/sweeps across components, delegate one narrow exploration/mapping task to `gentle-ai-explore` (or CodeGraph). Inline exploration beyond 2 reads is strictly prohibited; stop and delegate.
+3. **Write rule**: keep one mechanical, already-understood file inline only when it needs no research or unresolved design work; delegate one writer for 2+ non-trivial files (`gentle-ai-worker`). Inline multi-file writes are strictly prohibited.
 4. **Context rule**: delegate reading that prepares a write and broad research/context compression.
 5. **Per-action rule**: tests, builds, and installs may use fresh workers without changing the implementation route or creating SDD state.
 6. **Optional SDD rule**: retain SDD only after an explicit request or accepted proposal. Resolve organic uncertainty with optional research and a concise proposal only for a real decision; risk alone never forces SDD.
