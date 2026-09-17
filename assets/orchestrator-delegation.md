@@ -179,9 +179,15 @@ Route work through the smallest harness that is safe. "Smallest" means minimal s
 
 Use inline execution when the task is small, mechanical, and the parent already has enough context: a typo, rename, one-file mechanical edit, a small known bug, focused verification over 1–3 files, or bash for state. Do not add SDD ceremony. Do not use this exception to avoid delegation after the task stops being small.
 
-#### 2. Simple Delegation
+#### 2. Simple Delegation (Lean Fast-Path)
 
-Delegate when work would inflate parent context or requires focused exploration, validation, or multi-file implementation, but does not yet need a full SDD workflow. Examples include understanding an unfamiliar module, inspecting 4+ files, investigating a failing test, implementing a bounded multi-file change, or running focused tests/builds.
+Delegate when work would inflate parent context or requires focused exploration, validation, or multi-file implementation, but does not yet need a full SDD workflow. Examples include understanding an unfamiliar module, inspecting 4+ files, investigating a failing test, implementing a bounded multi-file change (2–4 files), or running focused tests/builds.
+
+**Lean Fast-Path (CodeGraph + Engram)**: For 2–4 bounded files in a single domain with zero architectural ambiguity, treat Simple Delegation as the Lean Fast-Path:
+1. **Explore first**: Use CodeGraph (`codegraph_explore`) or `gentle-ai-explore` to map symbol flows and references without dumping raw files into the parent context.
+2. **Persist discoveries**: Persist exploration insights and symbols in Engram via `mem_save` under `topic_key: odd/<feature>/explore` (or memory equivalent) to keep the orchestrator context thin (<20k tokens).
+3. **Track simply**: Record tasks in `odd/tasks/<feature>.md` without open-spec proposal/spec/design ceremony.
+4. **Delegate implementation & checks**: Launch `gentle-ai-worker` for edits and `gentle-ai-verify` for checks.
 
 Use the configured subagent runtime when available. Prefer the `subagent_*` tools (`subagent_run`, status/result helpers) when the Pi Subagents extension is installed, because they run the user's configured project/global subagent definitions and preserve history/background behavior.
 
