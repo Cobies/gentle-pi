@@ -129,6 +129,9 @@ These are parent-orchestrator routing boundaries. Use the smallest useful topolo
 4. **Context rule**: delegate reading that prepares a write and broad research/context compression.
 5. **Per-action rule**: tests, builds, and installs may use fresh workers without changing the implementation route or creating SDD state.
 6. **Optional SDD rule**: retain SDD only after an explicit request or accepted proposal. Resolve organic uncertainty with optional research and a concise proposal only for a real decision; risk alone never forces SDD.
+7. **Linguistic Mapping rule (HARD CONTRACT)**: any user prompt containing action verbs or defect reports ('arreglá', 'corregí', 'hacé', 'probá', 'revisá', 'fijate', 'tengo un detalle...') maps directly to delegating the execution to a subagent (`gentle-ai-explore` or `gentle-ai-worker`). The parent thread acts strictly as Pure Thinker and Coordinator.
+8. **Large-Context Window rule**: large context window capacity (1M+ tokens) NEVER overrides delegation rules. Absorbing multi-file reads or multi-file edits in the parent chat is strictly forbidden.
+9. **Post-Subagent Synthesis rule**: when a subagent returns its report, the parent orchestrator MUST synthesize the findings or propose the next action to the user. It is strictly forbidden for the parent to start reading files or running greps inline to re-verify, double-check, or expand the subagent's work. If additional exploration is needed, delegate a new focused subagent task.
 
 For bounded multi-file writes, prefer the installed package-owned `gentle-ai-worker`, then a user-configured `worker`. If neither worker definition exists, fall back to the native `Agent` even when `subagent_*` tools are available. If no delegation mechanism is available, stop and explain the blocker. Judgment Day phase roles are never generic fallbacks. If the generic writer chain is unavailable, use the documented native generic fallback or stop.
 
@@ -179,7 +182,7 @@ Route work through the smallest harness that is safe. "Smallest" means minimal s
 
 Use inline execution when the task is small, mechanical, and the parent already has enough context: a typo, rename, one-file mechanical edit, a small known bug, focused verification over 1–3 files, or bash for state. Do not add SDD ceremony. Do not use this exception to avoid delegation after the task stops being small.
 
-#### 2. Simple Delegation (Lean Fast-Path)
+#### 2. Simple Delegation
 
 Delegate when work would inflate parent context or requires focused exploration, validation, or multi-file implementation, but does not yet need a full SDD workflow. Examples include understanding an unfamiliar module, inspecting 4+ files, investigating a failing test, implementing a bounded multi-file change (2–4 files), or running focused tests/builds.
 

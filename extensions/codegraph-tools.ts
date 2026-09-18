@@ -242,10 +242,16 @@ export function findCodeGraphNodeScriptOnPath(): string | undefined {
 	return codeGraphNodeScriptsOnPath().next().value;
 }
 
+const CODEGRAPH_TOOL_TIMEOUT_MS = 60_000;
+
 const runCodeGraphCommand: CodeGraphRunner = async (args, options) => {
+	const timeoutSignal = AbortSignal.timeout(CODEGRAPH_TOOL_TIMEOUT_MS);
+	const effectiveSignal = options.signal
+		? AbortSignal.any([options.signal, timeoutSignal])
+		: timeoutSignal;
 	const runOptions = {
 		cwd: options.cwd,
-		signal: options.signal,
+		signal: effectiveSignal,
 		maxBuffer: options.maxBuffer,
 		windowsHide: true,
 	};
