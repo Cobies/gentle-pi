@@ -35,6 +35,15 @@ import type {
 import { Key, isKeyRelease, matchesKey, truncateToWidth, type KeybindingsManager, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { resolveGentlePiAgentHome, gentlePiConfigHome } from "../lib/agent-home.ts";
 import {
+	BACKGROUND_SUBAGENTS_FILE,
+	BACKGROUND_SUBAGENTS_SCHEMA,
+	loadBackgroundSubagentsPolicy,
+	parseBackgroundSubagentsPolicyFile,
+	resolveBackgroundSubagentsPolicy,
+	type BackgroundSubagentsPolicy,
+	type BackgroundSubagentsResolution,
+} from "../lib/background-subagents-policy.ts";
+import {
 	ensureSddPreflight,
 	getSddPreflightPreferences,
 	installPackageAssets,
@@ -158,7 +167,7 @@ import {
 } from "../lib/review-snapshot.ts";
 import { renderGentleAiLifecycleCall, renderGentleAiResult, type GentleAiRenderContext } from "../lib/gentle-ai-renderer.ts";
 import { sanitizeTerminalText, stripAnsi } from "../lib/terminal-theme.ts";
-import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView } from "../lib/review-candidate-view.ts";
+import { BASE_REF_ACCEPTED_FORMS, CandidateViewError, CandidateViewRegistry, injectReviewCandidateView, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView } from "../lib/review-candidate-view.ts";
 import {
 	GentleAiDevBinaryOverrideError,
 	GENTLE_AI_INSTALL_RECOVERY_COMMAND,
@@ -349,9 +358,16 @@ function localAgentOverrideCount(cwd: string, owner: PackageAssetOwner): number 
 
 // ---------------------------------------------------------------------------
 // Background subagents policy — project > global > env > default off
+//
+// The pure resolver (parseBackgroundSubagentsPolicyFile,
+// resolveBackgroundSubagentsPolicy, loadBackgroundSubagentsPolicy, and their
+// types/constants) lives in lib/background-subagents-policy.ts so the
+// runtime side (extensions/gentle-agents.ts) can read the effective policy
+// without importing the pi extension surface. Everything below this point
+// (capability probing, report rendering, the global-file writer) stays here
+// because it is specific to this extension's UI-facing surface.
 // ---------------------------------------------------------------------------
 
-type BackgroundSubagentsPolicy = "on" | "off";
 type BackgroundSubagentsCapability = "ready" | "absent";
 
 interface BackgroundSubagentsRendering {
@@ -359,141 +375,10 @@ interface BackgroundSubagentsRendering {
 	capability: BackgroundSubagentsCapability;
 }
 
-/** Which of the four sources decided the effective policy. */
-type BackgroundSubagentsSource =
-	| "project_file"
-	| "global_file"
-	| "environment"
-	| "default";
-
-interface BackgroundSubagentsResolution {
-	policy: BackgroundSubagentsPolicy;
-	source: BackgroundSubagentsSource;
-	/** The deciding file was present but failed the strict decode. */
-	malformed: boolean;
-	projectFile: string;
-	globalFile: string;
-	projectFileExists: boolean;
-	globalFileExists: boolean;
-	/** The raw env value, reported even when it is unrecognized and inert. */
-	envValue: string | undefined;
-}
-
-interface LoadBackgroundSubagentsOptions {
-	/** Override the config home directory (used in tests to avoid touching ~/.pi). */
-	gentlePiConfigHome?: string;
-	/** Override the environment lookup (used in tests). */
-	env?: Record<string, string | undefined>;
-}
-
-const BACKGROUND_SUBAGENTS_SCHEMA = "gentle-pi.background-subagents/v1";
-const BACKGROUND_SUBAGENTS_FILE = "background-subagents.json";
-
 const DEFAULT_BACKGROUND_SUBAGENTS_RENDERING: BackgroundSubagentsRendering = {
 	policy: "off",
 	capability: "absent",
 };
-
-/**
- * Strict decode of {"schema":"gentle-pi.background-subagents/v1","policy":"on"|"off"}.
- * Any malformed shape (bad JSON, wrong schema, unknown keys, invalid policy)
- * returns undefined so the caller fails closed to "off".
- */
-function parseBackgroundSubagentsPolicyFile(
-	raw: string,
-): BackgroundSubagentsPolicy | undefined {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch {
-		return undefined;
-	}
-	if (!isRecord(parsed)) return undefined;
-	if (parsed.schema !== BACKGROUND_SUBAGENTS_SCHEMA) return undefined;
-	if (parsed.policy !== "on" && parsed.policy !== "off") return undefined;
-	if (Object.keys(parsed).length !== 2) return undefined;
-	return parsed.policy;
-}
-
-/**
- * Resolve the background-subagents policy AND the source that decided it.
- *
- * Resolution order (first hit wins, mirroring loadRuntimeGuardrailsConfig):
- *   1. Project file `${cwd}/.pi/gentle-ai/background-subagents.json`
- *   2. Global file `${configHome}/background-subagents.json`
- *      (configHome honors GENTLE_PI_CONFIG_HOME, default ~/.pi/gentle-ai)
- *   3. Env var GENTLE_PI_BACKGROUND_SUBAGENTS ("on" | "off")
- *   4. Default "off"
- *
- * A present-but-malformed file fails closed to "off" instead of falling
- * through to a lower-priority source, and it stays attributed to that file:
- * "off decided by a broken project file" and "off by default" are different
- * situations, and only the first one is a mistake to fix.
- *
- * Four sources with first-hit-wins is exactly the shape that makes an edit
- * look like it did nothing, so the deciding source is part of the result
- * rather than something a caller has to re-derive.
- */
-function resolveBackgroundSubagentsPolicy(
-	cwd: string,
-	options: LoadBackgroundSubagentsOptions = {},
-): BackgroundSubagentsResolution {
-	const env = options.env ?? process.env;
-	const envValue = env.GENTLE_PI_BACKGROUND_SUBAGENTS;
-	let projectFile = "";
-	let globalFile = "";
-	try {
-		const configHome = options.gentlePiConfigHome ?? gentleAiConfigHome();
-		projectFile = join(cwd, ".pi", "gentle-ai", BACKGROUND_SUBAGENTS_FILE);
-		globalFile = join(configHome, BACKGROUND_SUBAGENTS_FILE);
-		const projectFileExists = existsSync(projectFile);
-		const globalFileExists = existsSync(globalFile);
-		const locations = { projectFile, globalFile, projectFileExists, globalFileExists, envValue };
-		for (const [source, path, present] of [
-			["project_file", projectFile, projectFileExists],
-			["global_file", globalFile, globalFileExists],
-		] as const) {
-			if (!present) continue;
-			let decoded: BackgroundSubagentsPolicy | undefined;
-			try {
-				decoded = parseBackgroundSubagentsPolicyFile(readFileSync(path, "utf8"));
-			} catch {
-				// Unreadable is indistinguishable from unusable at this layer, and
-				// both must fail closed on the file that claimed the decision.
-				decoded = undefined;
-			}
-			return decoded === undefined
-				? { policy: "off", source, malformed: true, ...locations }
-				: { policy: decoded, source, malformed: false, ...locations };
-		}
-		if (envValue === "on" || envValue === "off") {
-			return { policy: envValue, source: "environment", malformed: false, ...locations };
-		}
-		return { policy: "off", source: "default", malformed: false, ...locations };
-	} catch {
-		return {
-			policy: "off",
-			source: "default",
-			malformed: false,
-			projectFile,
-			globalFile,
-			projectFileExists: false,
-			globalFileExists: false,
-			envValue,
-		};
-	}
-}
-
-/**
- * The effective policy alone, for callers that do not report a source.
- * It delegates so the loader and the resolver can never disagree.
- */
-function loadBackgroundSubagentsPolicy(
-	cwd: string,
-	options: LoadBackgroundSubagentsOptions = {},
-): BackgroundSubagentsPolicy {
-	return resolveBackgroundSubagentsPolicy(cwd, options).policy;
-}
 
 /** Write the global policy file, creating the config home when needed. */
 function writeGlobalBackgroundSubagentsPolicy(
@@ -1388,14 +1273,14 @@ Organic Driven Development (ODD) is the predefined workflow of this orchestrator
 2. **Explore.** Explore existing code and requirements first, proportionately to the request, before proposing or writing anything. Pure Thinker mandate: inline exploration in the parent thread is capped at 2 reads; when understanding requires 3+ reads or cross-file inspection, delegate to a mapping subagent (\`gentle-ai-explore\` or CodeGraph) to keep orchestrator context thin (<20k tokens). Post-subagent synthesis rule: when a subagent finishes and returns its report, synthesize its findings directly for the user; do NOT start reading or grepping files inline to re-verify or continue exploring. If more exploration is needed, delegate a follow-up subagent.
 3. **Resolve uncertainty.** Recommend optional research only for a named uncertainty; ask one focused user question only for a real unresolved product decision, then stop and wait; use at most one scoped read-only assumption challenge for a high-consequence unproven premise.
 4. **Classify.** The work is substantial when exploration yields two or more meaningful implementation steps, or progress worth recovering after an interruption. Small, understood work stays small and creates no durable task artifacts.
-5. **Track before the first write.** For substantial authorized implementation, create \`odd/tasks/<feature-name>.md\` and its Engram mirror \`odd/<feature-name>/tasks\` automatically, before the first source write, without asking permission for tasks or storage. Tell the user in one line which feature document was created and how many tasks it holds.
-6. **Implement task by task.** Route each task through the orchestrator's Work Routing Ladder, with the configured TDD mode and applicable checks. Subagent delegation mandate: 2+ non-trivial files touched MUST delegate to \`gentle-ai-worker\`; inline multi-file writes in the parent thread are strictly forbidden. Default to background execution (\`mode: "background"\`) for independent tasks to run concurrently. Check an item off only after its outcome and checks were observed; update the file and the mirror after each task.
-7. **Close.** Report the verified outcome, every failed, skipped, or pending check, and the next step. Native review applies only at the deliverable boundary and only under the user-owned RDD switch.
+5. **Track before the first write.** For substantial authorized implementation, create \`odd/tasks/<feature-name>.md\` and its Engram mirror \`odd/<feature-name>/tasks\` automatically, then create or rebuild the visible \`todo\` list from the reconciled feature tasks, all before the first source write and without asking permission for tasks or storage. Tell the user in one line which feature document was created and how many tasks it holds.
+6. **Implement task by task.** Route each task through the orchestrator's Work Routing Ladder, honoring its mandatory delegation triggers, with the configured TDD mode and applicable checks. These triggers are mandatory, not advisory: executing past a fired trigger inline is a routing defect even if the work succeeds. Subagent delegation mandate: 2+ non-trivial files touched MUST delegate to \`gentle-ai-worker\`; inline multi-file writes in the parent thread are strictly forbidden. Default to background execution (\`mode: "background"\`) for independent tasks to run concurrently. Check an item off only after its outcome and checks were observed; update the file, mirror, and visible \`todo\` projection after every task transition and material plan change. Every task closes with at least one work-unit commit on the feature branch, branch first when on the default branch, with tests and docs alongside the behavior, using a Conventional Commit message; record the commit identity in the feature document as evidence. Work-unit commits on the feature branch are part of authorized substantial ODD implementation; push, pull request creation, and merge remain the user's decisions.
+7. **Close.** Report the verified outcome, every failed, skipped, or pending check, and the next step. The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch; native review runs only under the user-owned RDD switch.
 Resume an interrupted feature with \`mem_context\`, then project- and feature-scoped \`mem_search\`, then \`mem_get_observation\` for the full document, then the task file itself; reconcile before continuing the next unfinished task. Detail for steps 3–7: \`orchestrator-delegation.md\` and \`orchestrator-memory.md\`.
 
 Harness principles:
 - el Gentleman is not prompt engineering. It is runtime discipline around powerful agents.
-- Organic Driven Development (ODD) is the predefined workflow for every request: authorize, explore, resolve uncertainty, classify, track substantial work before the first write, implement task by task with proportionate checks, close. SDD is explicitly selected.
+- Organic Driven Development (ODD) is the predefined workflow for every request: authorize, explore, resolve uncertainty, classify, track substantial work before the first write, implement task by task with proportionate checks, close each task with a work-unit commit, and close. SDD is explicitly selected.
 - Linguistic Mapping (HARD CONTRACT): Any user action verb or defect report ('arreglá', 'corregí', 'hacé', 'probá', 'revisá', 'fijate', 'tengo un detalle...') maps directly to subagent delegation. The parent chat is a Pure Thinker and Coordinator; it NEVER performs multi-file edits or heavy codebase sweeps inline.
 - Large-Context Window Rule: A large context window (1M+ tokens) NEVER overrides delegation rules. Processing 3+ read files or 2+ write files in the parent thread is strictly forbidden and MUST be delegated to subagents.
 - Clarify scope, constraints, acceptance criteria, and non-goals before implementation.
@@ -4807,7 +4692,7 @@ const REVIEW_CONTROLLER_PARAMETERS = {
 		},
 		input: {
 			type: "string",
-			description: "A JSON-serialized object string, not a nested object. New native ordinary START uses {\"mode\":\"ordinary\"}; answer-consent uses exactly {\"consentBinding\":\"<opaque id>\",\"answer\":\"granted|declined\"}. Ordinary provider capture belongs only to gentle_review_capture. An explicit baseRef requires committedOnly: true and requests a committed range, while repository-local policyPath remains optional. ASSESS accepts an optional object with baseRef, committedOnly, writerModelId, writerEffort, and nativeReviewOutcome (gentle-pi#662/#668); omitting writerModelId and writerEffort assesses the ambient working tree and fails closed to a small writer profile (never large) because the writer's actual profile is unknown to this call. nativeReviewOutcome (one of closed, declined, unavailable, unknown) tells ASSESS whether the native review actually closed for this candidate: when Receipt-driven development reads on but the review was declined for this candidate, is unavailable, or its outcome is unknown, ASSESS falls back to the exact risk-gated plan it returns when RDD is off, re-enabling the separate verifier -- a decline is candidate-scoped and never lowers the bar below the RDD-off path. Omitting it lets ASSESS try to derive declined/unavailable from what this process itself recorded for this exact candidate (never a different one, and never from repository state alone), failing closed to unknown when it cannot; `closed` is never derived -- pass it explicitly, and only right after acknowledging the approved review for this same candidate. The returned outcome_source (explicit|derived|unknown) says which of these produced the value. Legacy controller input remains separate.",
+			description: "A JSON-serialized object string, not a nested object. New native ordinary START uses {\"mode\":\"ordinary\"}; answer-consent uses exactly {\"consentBinding\":\"<opaque id>\",\"answer\":\"granted|declined\"}. Ordinary provider capture belongs only to gentle_review_capture. An explicit baseRef requires committedOnly: true and requests a committed range, while repository-local policyPath remains optional. baseRef must be HEAD, a full 40- or 64-character commit id, or a ref name; abbreviated commit ids are rejected as base-ref-unresolvable. ASSESS accepts an optional object with baseRef, committedOnly, writerModelId, writerEffort, and nativeReviewOutcome (gentle-pi#662/#668); omitting writerModelId and writerEffort assesses the ambient working tree and fails closed to a small writer profile (never large) because the writer's actual profile is unknown to this call. nativeReviewOutcome (one of closed, declined, unavailable, unknown) tells ASSESS whether the native review actually closed for this candidate: when Receipt-driven development reads on but the review was declined for this candidate, is unavailable, or its outcome is unknown, ASSESS falls back to the exact risk-gated plan it returns when RDD is off, re-enabling the separate verifier -- a decline is candidate-scoped and never lowers the bar below the RDD-off path. Omitting it lets ASSESS try to derive declined/unavailable from what this process itself recorded for this exact candidate (never a different one, and never from repository state alone), failing closed to unknown when it cannot; `closed` is never derived -- pass it explicitly, and only right after acknowledging the approved review for this same candidate. The returned outcome_source (explicit|derived|unknown) says which of these produced the value. Legacy controller input remains separate.",
 		},
 		outputPath: { type: "string", description: "Retired with legacy bundle export; ignored. Export returns legacy-operation-retired." },
 		inputPath: { type: "string", description: "Repository-local JSON input file for the separate legacy controller flow (alternative to input). Legacy bundle import is retired." },
@@ -5842,6 +5727,12 @@ function validateNativeStartUntrackedSelection(value: Record<string, unknown>): 
 	};
 }
 
+const BASE_REF_REJECTION_REASONS = new Set(["base-ref-unresolvable", "base-ref-ambiguous", "base-ref-moved", "base-ref-invalid"]);
+
+function baseRefRejectionHint(reason: string): { hint?: string } {
+	return BASE_REF_REJECTION_REASONS.has(reason) ? { hint: BASE_REF_ACCEPTED_FORMS } : {};
+}
+
 function nativeStartRejection(reason: string, field?: string): Record<string, unknown> {
 	return {
 		operation: REVIEW_CONTROLLER_OPERATION.START,
@@ -5863,6 +5754,7 @@ function nativeStartRejection(reason: string, field?: string): Record<string, un
 									: "native-start-policy-path-invalid",
 		reason,
 		...(field === undefined ? {} : { field }),
+		...baseRefRejectionHint(reason),
 		...nativeStartPreAuthorityRejection(),
 	};
 }
@@ -5874,6 +5766,20 @@ function nativeStatusInputRejection(reason: string, field?: string): Record<stri
 		outcome: "native-status-input-invalid",
 		reason,
 		...(field === undefined ? {} : { field }),
+		...baseRefRejectionHint(reason),
+		mutation_performed: false,
+		mutation_outcome: "none",
+	};
+}
+
+function nativeInspectInputRejection(reason: string, field?: string): Record<string, unknown> {
+	return {
+		operation: REVIEW_CONTROLLER_OPERATION.INSPECT,
+		status: "blocked",
+		outcome: "native-inspect-input-invalid",
+		reason,
+		...(field === undefined ? {} : { field }),
+		...baseRefRejectionHint(reason),
 		mutation_performed: false,
 		mutation_outcome: "none",
 	};
@@ -7694,6 +7600,30 @@ async function executeReviewControllerOperation(
 		parameters.operation === REVIEW_CONTROLLER_OPERATION.INSPECT &&
 		nativeReviewCli !== null
 	) {
+		const rawInspect = parameters.input === undefined
+			? undefined
+			: parseControllerJson(parameters.input, REVIEW_CONTROLLER_OPERATION.INSPECT);
+		const unknownField = rawInspect === undefined
+			? undefined
+			: Object.keys(rawInspect).find((field) => !["baseRef", "committedOnly"].includes(field));
+		if (unknownField !== undefined) return nativeInspectInputRejection("unknown-field", unknownField);
+		const baseRef = rawInspect?.baseRef;
+		if (baseRef !== undefined && !isCanonicalProcessString(baseRef)) return nativeInspectInputRejection("base-ref-invalid");
+		if (baseRef !== undefined && rawInspect?.committedOnly !== true) return nativeInspectInputRejection("committed-only-required");
+		if (rawInspect !== undefined && baseRef === undefined) return nativeInspectInputRejection("committed-only-invalid");
+		let canonicalBaseRef: string | undefined;
+		if (typeof baseRef === "string") {
+			try {
+				canonicalBaseRef = resolveCanonicalCandidateBase(defaultCwd, baseRef).commit;
+			} catch (error) {
+				if (error instanceof CandidateViewError && error.diagnostics !== undefined) return nativeOperationFailure(parameters.operation, Object.assign(error, { candidateViewPreNative: true }));
+				if (error instanceof CandidateViewError && (error.reason === "base-ref-ambiguous" || error.reason === "base-ref-unresolvable" || error.reason === "base-ref-moved")) return nativeInspectInputRejection(error.reason);
+				return nativeInspectInputRejection("base-ref-unresolvable");
+			}
+		}
+		const inspectSelector = canonicalBaseRef === undefined
+			? {}
+			: { baseRef: canonicalBaseRef, committedOnly: true as const };
 		// A new inspect supersedes every pre-lineage selection before its first
 		// STATUS attempt. A failed or changed-candidate inspect cannot leave an
 		// older selection available for a later START.
@@ -7704,6 +7634,7 @@ async function executeReviewControllerOperation(
 					nativeReviewCli,
 					{
 						cwd: defaultCwd,
+						...inspectSelector,
 						...(signal === undefined ? {} : { signal }),
 					},
 					retainedUntrackedSelections,
@@ -7779,6 +7710,7 @@ async function executeReviewControllerOperation(
 					nativeReviewCli,
 					{
 						cwd: defaultCwd,
+						...inspectSelector,
 						untrackedScope: parameters.untrackedScope,
 						expectedUntrackedInventory: inventory,
 						intendedUntracked: selected.intendedUntracked,
@@ -8597,6 +8529,8 @@ export const __testing = {
 	loadRuntimeGuardrailsConfig,
 	buildGentlePrompt,
 	nativeStatusUnsupported,
+	nativeStartRejection,
+	nativeStatusInputRejection,
 	executeReviewControllerOperation,
 	executeReviewCaptureOperation,
 	executeReviewCaptureGroupOperation,

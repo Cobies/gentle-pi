@@ -12,6 +12,7 @@ import {
 	type ShellBarModel,
 	type ShellBarTheme,
 } from "../lib/shell-bar.ts";
+import { parseNanQuota } from "../lib/shell-usage.ts";
 
 // The Gentle Shell bar replaces pi's three-line footer with one line of
 // segments. Rendering is pure so it can be verified without a TUI.
@@ -52,6 +53,28 @@ function model(overrides: Partial<ShellBarModel> = {}): ShellBarModel {
 	};
 }
 
+// The grouped NaN fixture the panel test uses, so both surfaces are asserted
+// against the same payload, the same order and the same percentages.
+const GROUPED_NAN_QUOTA = {
+	periodEnd: "2026-10-01T00:00:00.000Z",
+	models: [
+		{ model: "glm5.3-flash", cap: 2_000_000_000, tokensUsed: 200_000_000 },
+		{ model: "glm5.3", cap: 3_000_000_000, tokensUsed: 0, periodEnd: "2026-10-17T05:53:20.000Z" },
+		{ model: "glm5.2", cap: 3_000_000_000, tokensUsed: 0, periodEnd: "2026-10-17T05:53:20.000Z" },
+		{ model: "deepseek-v4-flash", cap: 3_000_000_000, tokensUsed: 300_000_000 },
+	],
+};
+
+// The sidebar prints the card body between its borders; the Usage rows are the
+// metered block between the Usage heading and Integrations, minus the context
+// meter, which is not a subscription allowance.
+function sidebarUsageRows(lines: string[]): string[] {
+	const body = lines.filter((line) => line.startsWith("│ ")).map((line) => line.slice(2, -2).trim());
+	const start = body.indexOf("Usage");
+	const end = body.indexOf("Integrations");
+	return body.slice(start + 1, end).filter((line) => /[▰▱]/.test(line) && !line.startsWith("Context"));
+}
+
 test("renderGauge fills cells proportionally to the percentage", () => {
 	assert.equal(renderGauge(45, 8), "▰▰▰▰▱▱▱▱");
 	assert.equal(renderGauge(0, 8), "▱▱▱▱▱▱▱▱");
@@ -81,13 +104,13 @@ test("renderShellBar renders one line with the segments in order", () => {
 	assert.equal(rest.length, 0);
 	assert.equal(
 		line,
-		"✿ gentle-pi ⟡ ~/work/gentle-pi main ⟡ gpt-5.5 · medium ⟡ ctx ▰▰▰▰▱▱▱▱ 45% ⟡ $9.49 sub",
+		"✿ gentle shell ⟡ ~/work/gentle-pi main ⟡ gpt-5.5 · medium ⟡ ctx ▰▰▰▰▱▱▱▱ 45% ⟡ $9.49 sub",
 	);
 });
 
 test("renderShellBar colors the brand, model, effort, and gauge by role", () => {
 	const [line] = renderShellBar(model(), taggedTheme, 400);
-	assert.match(line, /<accent>✿ gentle-pi<\/accent>/);
+	assert.match(line, /<accent>✿ gentle shell<\/accent>/);
 	assert.match(line, /<text>gpt-5\.5<\/text>/);
 	assert.match(line, /<syntaxFunction>medium<\/syntaxFunction>/);
 	assert.match(line, /<accent>▰▰▰▰<\/accent><border>▱▱▱▱<\/border>/);
@@ -118,6 +141,133 @@ test("renderShellBar adds the subscription windows after the cost when usage is 
 	};
 	const [line] = renderShellBar(model({ usage }), plainTheme, 200);
 	assert.match(line, /\$9\.49 sub ⟡ codex 5h ▰▰▰▰▰▱▱▱ 62% · week 31%$/);
+});
+
+test("renderShellBar meters the model the session is using inside a multi-model provider", () => {
+	const usage = {
+		provider: "nan",
+		plan: undefined,
+		fetchedAt: 0,
+		limits: [
+			{ name: "deepseek-v4-flash", limitReached: false, windows: [{ label: "", usedPercent: 18, windowSeconds: 0, resetAt: null, used: 545_000_000, budget: 3_000_000_000 }] },
+			{ name: "glm5.3-flash", limitReached: false, windows: [{ label: "", usedPercent: 10, windowSeconds: 0, resetAt: null, used: 200_000_000, budget: 2_000_000_000 }] },
+		],
+	};
+	const [glm] = renderShellBar(model({ modelId: "glm5.3-flash", usage }), plainTheme, 200);
+	assert.match(glm, /glm5\.3-flash ▰▱▱▱▱▱▱▱ 10%$/);
+	assert.doesNotMatch(glm, /deepseek-v4-flash ▰/);
+	const [other] = renderShellBar(model({ modelId: "deepseek-v4-flash", usage }), plainTheme, 200);
+	assert.match(other, /deepseek-v4-flash ▰▱▱▱▱▱▱▱ 18%$/);
+	const sidebar = renderShellSidebarBar(model({ modelId: "glm5.3-flash", usage }), plainTheme, 60).join("\n");
+	assert.match(sidebar, /glm5\.3-flash +▰▱▱▱▱▱▱▱ +10%/, "the sidebar lists the session model's own allowance");
+});
+
+// The sidebar is the surface that never needs opening, so a provider with
+// per-model allowances shows the panel's model rows there too — most consumed
+// family first, its models inside it — and leaves the aggregate totals and the
+// reset dates to the bar and the panel.
+test("sidebar groups the NaN allowances by subscription without totals or resets", () => {
+	const usage = parseNanQuota(GROUPED_NAN_QUOTA, 0);
+	const lines = renderShellSidebarBar(model({ modelId: "glm5.3-flash", usage }), plainTheme, 60);
+	const rows = sidebarUsageRows(lines);
+	assert.deepEqual(rows.map((row) => row.replace(/\s*[▰▱].*$/, "")), ["deepseek-v4-flash", "glm5.3-flash"]);
+	assert.deepEqual(rows.map((row) => Number.parseInt(row.match(/(\d+)%$/)![1] ?? "", 10)), [10, 10]);
+	assert.equal(rows.some((row) => / 0%$/.test(row)), false, "a window that consumed nothing only spends space");
+	assert.equal(lines.join("\n").includes("total"), false, "an aggregate row only costs space");
+	assert.equal(lines.join("\n").includes("resets in"), false, "the reset dates belong to the panel");
+	for (const width of [24, 46, 60]) {
+		assert.ok(renderShellSidebarBar(model({ usage }), plainTheme, width).every((line) => visibleWidth(line) <= width));
+	}
+});
+
+test("sidebar treats one metered NaN allowance as a per-model provider", () => {
+	const usage = parseNanQuota({
+		periodEnd: "2026-10-01T00:00:00.000Z",
+		models: [{ model: "glm5.3-flash", cap: 2_000_000_000, tokensUsed: 400_000_000, windowHours: 4, windowTokens: 400_000_000, windowTokensUsed: 120_000_000, windowResetsAt: 1_788_620_161 }],
+	}, 0);
+	const lines = renderShellSidebarBar(model({ modelId: "glm5.3-flash", usage }), plainTheme, 60);
+	const rows = sidebarUsageRows(lines).map((row) => row.replace(/\s+/g, " "));
+	// A single allowance is still the panel's rows, not the bar's one-line meter:
+	// the rolling window it reports is a row of its own here too, and the reset
+	// stays in the panel.
+	assert.deepEqual(rows, ["glm5.3-flash ▰▰▱▱▱▱▱▱ 20%", "glm5.3-flash 4h ▰▰▱▱▱▱▱▱ 30%"]);
+	assert.equal(lines.join("\n").includes("resets in"), false);
+});
+
+test("sidebar keeps one aggregate line for a provider without raw allowances", () => {
+	const usage = {
+		provider: "openai-codex",
+		plan: "pro",
+		fetchedAt: 0,
+		limits: [{ name: "codex", limitReached: false, windows: [
+			{ label: "5h", usedPercent: 62, windowSeconds: 18_000, resetAt: null },
+			{ label: "week", usedPercent: 31, windowSeconds: 604_800, resetAt: null },
+		] }],
+	};
+	const lines = renderShellSidebarBar(model({ usage }), plainTheme, 60);
+	assert.deepEqual(sidebarUsageRows(lines), ["codex 5h ▰▰▰▰▰▱▱▱ 62% · week 31%"]);
+});
+
+test("sidebar drops an aggregate allowance that consumed nothing", () => {
+	const usage = {
+		provider: "openai-codex",
+		plan: "pro",
+		fetchedAt: 0,
+		limits: [{ name: "codex", limitReached: false, windows: [
+			{ label: "5h", usedPercent: 0, windowSeconds: 18_000, resetAt: null },
+			{ label: "week", usedPercent: 0, windowSeconds: 604_800, resetAt: null },
+		] }],
+	};
+	const lines = renderShellSidebarBar(model({ usage }), plainTheme, 60);
+	assert.deepEqual(sidebarUsageRows(lines), []);
+	const text = lines.join("\n");
+	assert.match(text, /Usage/);
+	assert.match(text, /Context/);
+	assert.match(text, /Cost/);
+	// The bar keeps its own contract: only the sidebar gives zero rows the boot.
+	assert.match(renderShellBar(model({ usage }), plainTheme, 200)[0], /codex 5h ▱▱▱▱▱▱▱▱ 0% · week 0%$/);
+});
+
+test("sidebar keeps the Usage group when nothing was consumed", () => {
+	const usage = parseNanQuota({
+		periodEnd: "2026-10-01T00:00:00.000Z",
+		models: [
+			{ model: "glm5.3", cap: 3_000_000_000, tokensUsed: 0 },
+			{ model: "glm5.2", cap: 3_000_000_000, tokensUsed: 0 },
+		],
+	}, 0);
+	const lines = renderShellSidebarBar(model({ usage }), plainTheme, 60);
+	const text = lines.join("\n");
+	assert.deepEqual(sidebarUsageRows(lines), []);
+	assert.match(text, /Usage/);
+	assert.match(text, /Context/);
+	assert.match(text, /Cost/);
+	assert.match(text, /Integrations/);
+});
+
+test("sidebar hides exactly the rows that would print 0%, rounding included", () => {
+	// The row's own rounding is the only threshold: a fraction below half a
+	// percent is a 0% row and leaves; half a percent keeps its row and prints 1%.
+	const usage = (usedPercent: number) => ({
+		provider: "openai-codex",
+		plan: "pro",
+		fetchedAt: 0,
+		limits: [{ name: "codex", limitReached: false, windows: [{ label: "5h", usedPercent, windowSeconds: 18_000, resetAt: null }] }],
+	});
+	assert.deepEqual(sidebarUsageRows(renderShellSidebarBar(model({ usage: usage(0.4) }), plainTheme, 60)), []);
+	assert.deepEqual(sidebarUsageRows(renderShellSidebarBar(model({ usage: usage(0.5) }), plainTheme, 60)), ["codex 5h ▱▱▱▱▱▱▱▱ 1%"]);
+});
+
+test("sidebar reads a limit without windows as nothing to draw, not as zero consumption", () => {
+	const usage = {
+		provider: "openai-codex",
+		plan: "pro",
+		fetchedAt: 0,
+		limits: [{ name: "codex", limitReached: false, windows: [] }],
+	};
+	const lines = renderShellSidebarBar(model({ usage }), plainTheme, 60);
+	assert.deepEqual(sidebarUsageRows(lines), []);
+	assert.match(lines.join("\n"), /Cost/);
 });
 
 test("renderShellBar shows an unknown context as a question mark after compaction", () => {
@@ -162,7 +312,7 @@ test("renderShellBar drops the session name, then trailing segments, before trun
 
 	const [atFifty] = renderShellBar(wide, plainTheme, 50);
 	assert.ok(visibleWidth(atFifty) <= 50, `line overflowed: ${visibleWidth(atFifty)}`);
-	assert.match(atFifty, /^✿ gentle-pi/);
+	assert.match(atFifty, /^✿ gentle shell/);
 });
 
 test("shellEnabled stays off inside a Gentle Agents child", () => {
