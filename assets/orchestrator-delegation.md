@@ -246,6 +246,18 @@ If the surface genuinely cannot be derived, do not launch the writer, and do not
 
 Relay a writer's `interaction_required` payload about edit surfaces the same way: present its derived candidate paths as the choice, and add or drop paths only on the human's explicit instruction.
 
+#### Skills to load before work (MANDATORY)
+
+Subagents refuse to rediscover the project/user skill registry during normal runtime. The parent owns skill selection:
+
+Before launching any subagent (`gentle-ai-worker`, `gentle-ai-explore`, `gentle-ai-verify`, or SDD executors):
+1. Check if `.atl/skill-registry.md` exists in the target project/workspace.
+2. If present, match the target files and technology stack of the task (e.g. Angular, Go, SQL, Docker, TypeScript, etc.) against the `Trigger / description` column in the registry.
+3. Include the matching absolute paths under a `## Skills to load before work` heading in the delegated task/prompt, one per line.
+4. If no skills match or the registry is absent, explicitly pass `## Skills to load before work: none`.
+
+Never omit this section when delegating: subagents depend on parent-injected paths to enforce stack conventions and architecture rules, and reporting `skill_resolution: none` when matching skills exist in `.atl/skill-registry.md` is an orchestration defect.
+
 #### Key Learnings closing block
 
 When delegating to a generic Explore/general worker (`gentle-ai-explore`, `gentle-ai-worker`, `gentle-ai-verify`) or their native `Agent` fallback, include the same `## Key Learnings` closing instruction in the delegated prompt: after the worker returns its normal result envelope or handoff, it closes its final response text with a `## Key Learnings` block of 1–5 numbered items, each a standalone factual sentence of at least 20 characters and at least 4 words, omitting the block when there is genuinely no reusable learning. The block layers on after the structured Return contract and does not alter its fields. This applies to final response text only — not intermediate tool output. The Engram memory provider automatically extracts and persists these items as passive capture; the worker does not parse the block or invoke passive-capture tools itself. This is separate from explicit `mem_save` artifact/decision persistence. Agents that must return strict JSON never receive this closing instruction; their required output shape remains unchanged.
