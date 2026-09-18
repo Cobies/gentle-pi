@@ -112,8 +112,7 @@ Core principle: **does this inflate the parent context without need?** If yes, u
 | Read to decide/verify (1–3 files) | ✅ | — |
 | Read to explore/understand (4+ files) | — | ✅ one narrow mapper |
 | Read as preparation for writing | — | ✅ together with the write |
-| Write one mechanical, already-understood file | ✅ | — |
-| Write 2+ non-trivial files | — | ✅ one writer |
+| Write/mutate code (1+ files) | — | ✅ one writer (requires explicit user permission) |
 | Bash for state (`git`, `gh`) | ✅ | — |
 | Tests, builds, or installs | allowed as a bounded action | ✅ fresh per-action worker without changing route |
 
@@ -125,19 +124,14 @@ Keep one writer and a short synthesized handoff. Delegation is mandatory at the 
 
 These are parent-orchestrator routing boundaries; do not pass these rules to child agents as permission to orchestrate. These triggers are mandatory, not advisory. When one fires, stop and delegate through the runtime's subagent mechanism before continuing; executing past a fired trigger inline is a routing defect even if the work succeeds. Delegation keeps the parent context thin enough to orchestrate; it does not slow the work down.
 
-#### Mandatory Delegation Triggers
-
-These are parent-orchestrator routing boundaries; do not pass these rules to child agents as permission to orchestrate. These triggers are mandatory, not advisory. When one fires, stop and delegate through the runtime's subagent mechanism before continuing; executing past a fired trigger inline is a routing defect even if the work succeeds. Delegation keeps the parent context thin enough to orchestrate; it does not slow the work down.
-
-1. **Bounded read rule:** read 1–3 files inline to decide or verify.
-2. **Mapping trigger (4-file rule / Circuit Breaker):** when understanding requires 4 or more files or more than 2 exploratory reads/sweeps across components, delegate one narrow exploration/mapping task to `gentle-ai-explore` (or CodeGraph). Inline exploration beyond 2 reads is strictly prohibited; stop and delegate.
-3. **Writer trigger (Multi-file write rule):** keep one mechanical, already-understood file inline only when it needs no research or unresolved design work; when implementation touches 2 or more non-trivial files, delegate one bounded writer (`gentle-ai-worker`). Inline multi-file writes are strictly prohibited.
-4. **Incident rule:** after wrong `cwd`, accidental repository/worktree mutation, failed merge recovery, confusing test command, or environment workaround, stop and diagnose the incident separately before resuming.
-5. **Long-session backstop (Long-session rule):** after about 20 tool calls, 5 exploratory reads, or 2 non-mechanical edits without any delegation, pause and delegate the next bounded unit of work.
-6. **Verification rule** (gentle-pi#661/#662, RDD-aware): executing or delegating verification commands goes to `gentle-ai-verify`; only the 1–3-file read-only check stays inline. The normative on/off/unknown routing is stated once under Pi Trigger Runtime Bindings below; reference it, do not restate it.
-7. **Linguistic Mapping rule (HARD CONTRACT):** any user prompt containing action verbs or defect reports ('arreglá', 'corregí', 'hacé', 'probá', 'revisá', 'fijate', 'tengo un detalle...') maps directly to delegating the execution to a subagent (`gentle-ai-explore` or `gentle-ai-worker`). The parent thread acts strictly as Pure Thinker and Coordinator.
-8. **Large-Context Window rule:** large context window capacity (1M+ tokens) NEVER overrides delegation rules. Absorbing multi-file reads or multi-file edits in the parent chat is strictly forbidden.
-9. **Post-Subagent Synthesis rule:** when a subagent returns its report, the parent orchestrator MUST synthesize the findings or propose the next action to the user. It is strictly forbidden for the parent to start reading files or running greps inline to re-verify, double-check, or expand the subagent's work. If additional exploration is needed, delegate a new focused subagent task.
+1. **Mapping trigger (4-file rule):** when understanding requires 4 or more files or more than 2 exploratory reads/sweeps across components, delegate one narrow exploration/mapping task to `gentle-ai-explore` (or CodeGraph). Inline exploration beyond 2 reads is strictly prohibited; stop and delegate.
+2. **Writer trigger (Multi-file write rule):** when implementation touches 1 or more files, delegate bounded writing to a subagent (`gentle-ai-worker`). All source code mutations and edits require explicit user permission before dispatch. Inline code edits or writes by the parent orchestrator are strictly prohibited.
+3. **Incident rule:** after wrong `cwd`, accidental repository/worktree mutation, failed merge recovery, confusing test command, or environment workaround, stop and diagnose the incident separately before resuming.
+4. **Long-session backstop (Long-session rule):** after about 20 tool calls, 5 exploratory reads, or 2 non-mechanical edits without any delegation, pause and delegate the next bounded unit of work.
+5. **Verification rule** (gentle-pi#661/#662, RDD-aware): executing or delegating verification commands goes to `gentle-ai-verify`; only the 1–3-file read-only check stays inline. The normative on/off/unknown routing is stated once under Pi Trigger Runtime Bindings below; reference it, do not restate it.
+6. **Linguistic Mapping rule (HARD CONTRACT):** any user prompt containing action verbs or defect reports ('arreglá', 'corregí', 'hacé', 'probá', 'revisá', 'fijate', 'tengo un detalle...') maps directly to delegating the execution to a subagent (`gentle-ai-explore` or `gentle-ai-worker`). The parent thread acts strictly as Pure Thinker and Coordinator.
+7. **Large-Context Window rule:** large context window capacity (1M+ tokens) NEVER overrides delegation rules. Absorbing multi-file reads or multi-file edits in the parent chat is strictly forbidden.
+8. **Post-Subagent Synthesis rule:** when a subagent returns its report, the parent orchestrator MUST synthesize the findings or propose the next action to the user. It is strictly forbidden for the parent to start reading files or running greps inline to re-verify, double-check, or expand the subagent's work. If additional exploration is needed, delegate a new focused subagent task.
 
 **Preparation trigger:** reading that prepares a write, and broad research or context compression, delegate together with or ahead of the write instead of filling the parent context.
 
@@ -227,6 +221,10 @@ When the policy is on and `subagent_run` is available:
 For generic non-SDD exploration and mapping, first attempt the installed package-owned `gentle-ai-explore`. If that individual role is missing or unusable, fall back to Pi's native `Agent` with the same read-only mapping constraints and report the fallback.
 
 For bounded multi-file writes, prefer the installed package-owned `gentle-ai-worker`, then a user-configured `worker`. If neither worker definition exists, fall back to the native `Agent` even when `subagent_*` tools are available. If no delegation mechanism is available, stop and explain the blocker. This writer precedence overrides the general runtime preference above.
+
+#### Dynamic Subagents (Last Resort)
+
+When a task, exploration, or phase genuinely does not fit standard SDD phases or existing workers (`gentle-ai-explore`, `gentle-ai-worker`, `gentle-ai-verify`), the orchestrator may define an ad-hoc dynamic subagent as a last resort. Define a custom agent markdown definition with YAML frontmatter in `.pi/agents/<name>.md` specifying the minimum required tools and specialized instructions, and dispatch it via `subagent_run(agent: "<name>")`. This dynamic pattern is strictly a last resort; always prefer existing canonical agents when available.
 
 Delegate generic non-SDD verification that executes or delegates commands per the RDD-aware Verification rule (trigger 5 under Mandatory Delegation Triggers, gentle-pi#661) -- the normative on/off/unknown routing lives there, not here: the bounded writer always self-verifies via `## Verification`, and `gentle-ai-verify` (or the native `Agent` fallback, with the same read-only verification constraints, exact parent-authorized commands, and fallback reporting) is on-demand only when the rendered `Receipt-driven development:` line reads `on`; when the line reads `off` or `unknown`, the `gentle_review` `assess` operation's returned plan decides it by native risk tier instead of a blanket non-trivial rule (gentle-pi#662). `## Known environmental failures` follows the same definition as `gentle-ai-worker`'s Verification contract: exact pre-existing base failures reported as evidence, never blockers -- any other failing required command still forces `status: partial`. Truly local read-only checking of 1–3 known files may remain inline. Separate exploration stays reserved for when the parent needs the map to decide or route; reading that prepares a write belongs with the writer making the change, consistent with the Delegation Rules table above.
 

@@ -18,6 +18,13 @@ proposal → spec ─┬→ tasks → apply → archive (verification optional)
 proposal → design ┘
 ```
 
+### Flow Tailoring (Full vs Adapted)
+
+The orchestrator assesses whether the full SDD cycle is required or if an adapted/trimmed flow is appropriate for the change:
+- **Full SDD flow**: Recommended for new capabilities, cross-cutting architectural changes, or complex features (`explore → proposal → spec → design → tasks → apply → archive`).
+- **Trimmed/Adapted flow**: For smaller or focused SDD changes, the orchestrator may indicate an adapted flow (e.g. skipping design or directly targeting spec/tasks when technical design is obvious).
+- **Dynamic Subagents (Last Resort)**: If a specific exploration or phase does not fit standard SDD phases or existing workers, the orchestrator may create and dispatch a dynamic ad-hoc subagent in `.pi/agents/<name>.md` as a last resort.
+
 `/gentle-sdd-status [change]` is the read-only status action for resolving the active change, artifact paths, task progress, dependency readiness, and action context before apply/verify/archive.
 
 ## Native SDD Dispatcher
@@ -122,6 +129,8 @@ Use the session's SDD preflight choice:
 
 - `auto`: phases run back-to-back without pausing, but the orchestrator gatekeeper validates after each phase before launching the next.
 - `interactive`: after each phase, show a concise summary and ask whether to adjust or continue.
+
+Phase Approval on Discretion: In either mode, the orchestrator may pause and require human approval before advancing to the next phase whenever deemed necessary or convenient based on risk, scope ambiguity, or architectural impact.
 
 If the user doesn't specify, default to `auto`. After scope approval, expect zero further prompts on the happy path and at most one actionable prompt per recoverable failure; the gatekeeper summarizes phase progress instead of interrupting except on a second consecutive gate failure or a genuine scope/product decision.
 
