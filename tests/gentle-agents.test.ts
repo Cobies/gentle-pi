@@ -1926,7 +1926,7 @@ test("subagent_list_agents and subagent_run in task mode launch a child with the
 	await fire("session_shutdown", ctx);
 	await tick();
 	assert.deepEqual(harness.children[1].killed, ["SIGTERM"], "closing pi stops the running children");
-	assert.match(tools.get("subagent_run")!.renderCall({ agent: "explore" }, plainTheme).render(60).join(""), /❀ agent run · explore/);
+	assert.match(tools.get("subagent_run")!.renderCall({ agent: "explore" }, plainTheme).render(60).join(""), /❀ Gentle AI · running · explore/);
 });
 
 test("background runs return at once; status, result, send_message, cancel, and continue follow the task", async () => {

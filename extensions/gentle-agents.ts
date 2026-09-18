@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { join, resolve, isAbsolute, sep } from "node:path";
-import { createBashToolDefinition, createLocalBashOperations, type BashOperations, keyHint, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, createLocalBashOperations, type BashOperations, keyHint, type AgentToolResult, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type TUI } from "@earendil-works/pi-tui";
 import { sidebarPart } from "../lib/shell-sidebar.ts";
 import { invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
@@ -30,6 +30,7 @@ import { AgentsView } from "../lib/agents-view.ts";
 import { PresencePublisher } from "../lib/orchestrator-presence.ts";
 import { createNativeFullscreenInteraction } from "../lib/native-fullscreen-interaction.ts";
 import { AGENTS_GLYPH, renderAgentsCard, widgetExpiryMs, widgetRows } from "../lib/agents-widget.ts";
+import { renderGentleAgentCall, renderGentleAgentResult, formatLiveTaskActivity, type GentleAgentRenderContext } from "../lib/agents-renderer.ts";
 import { CARD_TONE, renderCard } from "../lib/shell-card.ts";
 import { openInExternalEditor } from "./gentle-shell.ts";
 import { resolveGentlePiAgentHome, gentlePiConfigHome } from "../lib/agent-home.ts";
@@ -318,7 +319,7 @@ function text(value: string, details: Record<string, unknown> = {}, terminate = 
 }
 
 function taskDetails(task: TaskRecord): Record<string, unknown> {
-	return { gentleAgents: { taskId: task.id, agent: task.agent, status: task.status, mode: task.mode, cwd: task.cwd } };
+	return { gentleAgents: { taskId: task.id, agent: task.agent, status: task.status, mode: task.mode, cwd: task.cwd, model: task.model, thinking: task.thinking, turns: task.turns, toolCalls: task.toolCalls, tokens: task.tokens, cost: task.cost, error: task.error } };
 }
 
 export function describeTask(task: TaskRecord): string {
@@ -1075,7 +1076,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		};
 	};
 
-	const launch = async (ctx: ExtensionContext, request: TaskRequest, signal?: AbortSignal): Promise<ToolText> => {
+	const launch = async (ctx: ExtensionContext, request: TaskRequest, signal?: AbortSignal, onUpdate?: (result: AgentToolResult<unknown>) => void): Promise<ToolText> => {
 		if (ctx.mode === "print" && request.mode === AGENT_MODE.BACKGROUND) {
 			throw new Error("Background subagents are unavailable in print mode: pi -p exits before a parent session can receive results. Use task mode, RPC mode, or interactive Pi.");
 		}
@@ -1113,6 +1114,24 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		ownedTaskIds.add(task.id);
 		store.subscribe(task.id, () => { publishActivity(); requestRender(); });
 		if (request.mode === AGENT_MODE.BACKGROUND) return text(`Started ${task.agent} in the background as task ${task.id}. Use subagent_status or subagent_result with that id.`, taskDetails(task));
+
+		let unsubscribeUpdates: (() => void) | undefined;
+		if (onUpdate) {
+			unsubscribeUpdates = store.subscribe(task.id, (liveTask, thread) => {
+				const liveStep = formatLiveTaskActivity(liveTask, thread);
+				try {
+					onUpdate({
+						content: [{ type: "text", text: liveStep }],
+						details: {
+							gentleAgents: taskDetails(liveTask),
+							liveStep,
+						},
+					});
+				} catch {
+					// Safe: do not break execution if UI callback throws
+				}
+			});
+		}
 		// A tool call aborted by the host (a human interrupting the turn, a timeout)
 		// would otherwise leave the child running and end the call with no result and
 		// no recorded reason. Cancel through the runner so the lifecycle runs and the
@@ -1137,27 +1156,26 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			completions.consume(finished.id);
 			return text(finishedText(finished), taskDetails(finished));
 		} finally {
+			unsubscribeUpdates?.();
 			signal?.removeEventListener("abort", onAbort);
 		}
 	};
 
-	const tool = (name: string, description: string, parameters: Record<string, unknown>, execute: (params: Record<string, unknown>, ctx: ExtensionContext, signal?: AbortSignal) => Promise<ToolText>) => {
+	const tool = (name: string, description: string, parameters: Record<string, unknown>, execute: (params: Record<string, unknown>, ctx: ExtensionContext, signal?: AbortSignal, onUpdate?: (result: AgentToolResult<unknown>) => void) => Promise<ToolText>) => {
 		pi.registerTool({
 			name: `${TOOL_PREFIX}${name}`,
 			renderShell: "self",
 			label: `Agent ${name.replace(/_/g, " ")}`,
 			description,
 			parameters: { type: "object", additionalProperties: false, ...parameters } as never,
-			renderCall(args, theme) {
-				const params = args as { agent?: string; task_id?: string };
-				return new Text(theme.fg("toolTitle", `${AGENTS_GLYPH} agent ${name.replace(/_/g, " ")}${params.agent ? ` · ${params.agent}` : params.task_id ? ` · ${params.task_id}` : ""}`), 0, 0);
+			renderCall(args, theme, context) {
+				return renderGentleAgentCall(name, args as Record<string, unknown>, theme, context as GentleAgentRenderContext | undefined);
 			},
-			renderResult(result, options, theme) {
-				const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
-				return new Text(options.expanded ? body : theme.fg("muted", body.split("\n")[0] ?? ""), 0, 0);
+			renderResult(result, options, theme, context) {
+				return renderGentleAgentResult(result as AgentToolResult<unknown>, options, theme, context as GentleAgentRenderContext | undefined);
 			},
-			async execute(_id, params, signal, _onUpdate, ctx) {
-				return execute(params as Record<string, unknown>, ctx, signal);
+			async execute(_id, params, signal, onUpdate, ctx) {
+				return execute(params as Record<string, unknown>, ctx, signal, onUpdate);
 			},
 		});
 	};
@@ -1261,7 +1279,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 				mode: { type: "string", enum: ["task", "background"], description: "task waits for the result (default); background returns immediately." },
 			},
 		},
-		async (params, ctx, signal) => {
+		async (params, ctx, signal, onUpdate) => {
 			const { agents } = discoverAgents(roots(ctx));
 			const agent = agents.find((candidate) => candidate.name === params.agent);
 			if (!agent) return text(`Error: no subagent named "${String(params.agent)}". Known: ${agents.map((candidate) => candidate.name).join(", ") || "none"}`, { error: "unknown agent" });
@@ -1273,7 +1291,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			let sddChange: SddChangeSelection | undefined;
 			try { sddChange = parseSddChange(params.sdd_change, agent.name); }
 			catch (error) { return text(`Error: ${error instanceof Error ? error.message : String(error)}`, { error: "invalid sdd_change" }); }
-			return launch(ctx, buildRequest(ctx, agent, String(params.task ?? ""), typeof params.label === "string" ? params.label : undefined, typeof params.context === "string" ? params.context : undefined, mode, undefined, typeof params.workspace_root === "string" ? params.workspace_root : undefined, sddChange, params.research_selection, params.remediation), signal);
+			return launch(ctx, buildRequest(ctx, agent, String(params.task ?? ""), typeof params.label === "string" ? params.label : undefined, typeof params.context === "string" ? params.context : undefined, mode, undefined, typeof params.workspace_root === "string" ? params.workspace_root : undefined, sddChange, params.research_selection, params.remediation), signal, onUpdate);
 		},
 	);
 
@@ -1315,7 +1333,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		"continue",
 		"Resume a finished subagent task in its own session with a follow-up prompt.",
 		{ required: ["task_id", "prompt"], properties: { research_selection: RESEARCH_SELECTION_SCHEMA, task_id: { type: "string" }, prompt: { type: "string" }, label: { type: "string", description: "Three to six words naming the follow-up." }, remediation: REMEDIATION_SCHEMA, sdd_change: { type: "object", additionalProperties: false, required: ["changeName", "workspaceRoot", "phase"], properties: { changeName: { type: "string" }, workspaceRoot: { type: "string" }, failedEvidenceRevision: { type: "string" }, phase: { type: "string", enum: ["apply", "verify", "archive", "remediate"] } }, description: "Fresh launch-local selected SDD identity, required when continuing an SDD phase agent." }, mode: { type: "string", enum: ["task", "background"] } } },
-		async (params, ctx, signal) => {
+		async (params, ctx, signal, onUpdate) => {
 			const previous = await resolveTask(String(params.task_id));
 			if (!previous) return text(`Error: no task ${String(params.task_id)}`, { error: "unknown task" });
 			if (!isFinished(previous.status) || !previous.sessionPath) return text(`Error: task ${previous.id} cannot be continued yet (${previous.status}).`, { error: "not continuable" });
@@ -1330,7 +1348,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			catch (error) { return text(`Error: ${error instanceof Error ? error.message : String(error)}`, { error: "invalid sdd_change" }); }
 			if (sddPhaseForAgent(agent.name) && !sddChange) return text("Error: continuing an SDD phase agent requires a fresh sdd_change selection.", { error: "missing sdd_change" });
 
-			return launch(ctx, buildRequest(ctx, agent, String(params.prompt ?? ""), typeof params.label === "string" ? params.label : undefined, previous.sddPreflightContext, mode, previous.sessionPath, sddChange?.workspaceRoot ?? previous.cwd, sddChange, params.research_selection, params.remediation), signal);
+			return launch(ctx, buildRequest(ctx, agent, String(params.prompt ?? ""), typeof params.label === "string" ? params.label : undefined, previous.sddPreflightContext, mode, previous.sessionPath, sddChange?.workspaceRoot ?? previous.cwd, sddChange, params.research_selection, params.remediation), signal, onUpdate);
 		},
 	);
 
