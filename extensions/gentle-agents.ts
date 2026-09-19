@@ -13,12 +13,11 @@ import os from "node:os";
 import { join, resolve, isAbsolute, sep } from "node:path";
 import { createBashToolDefinition, createLocalBashOperations, type BashOperations, keyHint, type AgentToolResult, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type TUI } from "@earendil-works/pi-tui";
-import { sidebarPart } from "../lib/shell-sidebar.ts";
 import { invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
 import { createCompletionQueue } from "../lib/agents-completion-delivery.ts";
 import { AGENT_MODE, discoverAgents, parseAgentDefinition, loadAgentsConfig, resolveAgentProfile, withPinnedModelProfiles, type AgentDefinition, type AgentMode } from "../lib/agents-config.ts";
 import { resolveBackgroundSubagentsPolicy } from "../lib/background-subagents-policy.ts";
-import { isFinished, TASK_STATUS, TaskStore, type AskRequest, type TaskRecord } from "../lib/agents-protocol.ts";
+import { isFinished, TASK_EVENT, TASK_STATUS, TaskStore, type AskRequest, type TaskRecord } from "../lib/agents-protocol.ts";
 import { AgentRunner, piCommand, abortReasonText, plannedCommands, type RemediationPlan, type RemediationScope, REMEDIATION_PLAN_ENV, parseRemediationPlan, type AskAnswer, type RunnerDeps, type SddChangeSelection, type TaskRequest } from "../lib/agents-runner.ts";
 import { ChildMessenger, type IpcEndpoint } from "../lib/agents-messaging.ts";
 import { ActiveSessionClient, ActiveSessionListener, SessionPresenceRegistry, type PresenceRecord, type ReceivedNotification, type SentNotification, type SessionPresenceCandidate } from "../lib/agents-session-transport.ts";
@@ -500,6 +499,9 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	let renderQueued = false;
 	let cancelClock: (() => void) | undefined;
 	const ownedTaskIds = new Set<string>();
+	// One diagnostic note per (task, guard): a dropped mutation says why once,
+	// not once per file, so a chatty child cannot flood its own thread.
+	const droppedAttributionGuards = new Set<string>();
 	const stoppingTaskIds = new Set<string>();
 	const yieldedTaskIds = new Set<string>();
 	const metricsNow = deps.metricsNow ?? (() => performance.now());
@@ -745,16 +747,43 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			}
 		},
 		onSuccessfulMutation: (task, tool) => {
-			if (!sessions || !worktrees || task.parentSessionId !== activeSessionId() || !ownedTaskIds.has(task.id)) return;
-			const root = deps.resolveWorktree(tool.path, task.cwd)?.root;
-			const childRoot = deps.resolveWorktree(task.cwd, task.cwd)?.root;
-			if (!root || root !== childRoot || !worktrees.roots().includes(root)) return;
-			if (tool.evidence?.root === root) {
+			// Guard chain and posture are unchanged: only owned tasks of the
+			// active parent, inside registered roots, ever relay. The notes only
+			// explain a drop -- they never widen or narrow what gets attributed.
+			// The cheap session/ownership guards decide before any worktree
+			// resolution, so a foreign or stale mutation never reaches git.
+			let root: string | undefined;
+			let childRoot: string | undefined;
+			const noteDrop = (guard: string) => {
+				const key = `${task.id}:${guard}`;
+				if (droppedAttributionGuards.has(key)) return;
+				droppedAttributionGuards.add(key);
+				try { store.apply(task.id, { type: TASK_EVENT.NOTE, text: `changes not attributed: ${guard} (root=${root ?? "unknown"}, child=${childRoot ?? "unknown"})` }, deps.now()); }
+				catch { /* A note is best-effort explanation; it must never block the guard it is explaining. */ }
+			};
+			if (!sessions || !worktrees) return noteDrop("session-inactive");
+			if (task.parentSessionId !== activeSessionId()) return noteDrop("parent-session-mismatch");
+			if (!ownedTaskIds.has(task.id)) return noteDrop("not-owned");
+			root = deps.resolveWorktree(tool.path, task.cwd)?.root;
+			childRoot = deps.resolveWorktree(task.cwd, task.cwd)?.root;
+			if (!root) return noteDrop("root-unresolved");
+			if (root !== childRoot) return noteDrop("root-mismatch");
+			if (!worktrees.roots().includes(root)) return noteDrop("root-not-registered");
+			if (!tool.evidence) {
+				noteDrop("evidence-missing");
+			} else if (tool.evidence.root !== root) {
+				noteDrop("evidence-root-mismatch");
+			} else {
+				let path = tool.path.replace(/^@/, "");
+				if (path === "~" || path.startsWith("~/")) path = os.homedir() + path.slice(1);
+				let resolvedPath: string | undefined;
 				try {
-					let path = tool.path.replace(/^@/, "");
-					if (path === "~" || path.startsWith("~/")) path = os.homedir() + path.slice(1);
-					if (realpathSync(resolve(task.cwd, path)) === resolve(root, tool.evidence.path)) pi.events.emit(SESSION_CHANGE_RELAY, { sessionId: task.parentSessionId, evidence: { ...tool.evidence, id: `${task.id}:${tool.toolCallId}` } });
-				} catch { /* Missing or mismatched targets cannot supply session diffs. */ }
+					resolvedPath = realpathSync(resolve(task.cwd, path));
+				} catch {
+					noteDrop("evidence-path-unreadable");
+				}
+				if (resolvedPath === resolve(root, tool.evidence.path)) pi.events.emit(SESSION_CHANGE_RELAY, { sessionId: task.parentSessionId, evidence: { ...tool.evidence, id: `${task.id}:${tool.toolCallId}` } });
+				else if (resolvedPath !== undefined) noteDrop("evidence-path-mismatch");
 			}
 			recordReviewMutation(pi, sessions, root, { source: "subagent", taskId: task.id, toolName: tool.toolName, toolCallId: tool.toolCallId });
 		},
@@ -896,6 +925,33 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		return stored?.task;
 	};
 
+	// Restores this exact session's own finished subagents as visible history
+	// on an explicit resume, or on startup into a session that already has
+	// entries -- never on new, fork, or reload (see the session_start handler's
+	// preexisting check below, which is the actual gate). Marked in
+	// restoredTaskIds like any other disk restoration, so it stays
+	// non-cancellable (ownedTaskIds never gained the id either way) and is
+	// skipped if the id is somehow already live.
+	const restoreSessionHistory = async (ctx: ExtensionContext, sessionId: string): Promise<void> => {
+		let history: Awaited<ReturnType<typeof loadHistory>>;
+		try {
+			history = await loadHistory(tasksDir);
+		} catch {
+			return;
+		}
+		// The session may have moved on while disk was read; a stale restore
+		// must never land in the wrong session's store.
+		if (ctx.sessionManager.getSessionId() !== sessionId) return;
+		// Fire-and-forget from session_start: a throwing summary subscriber must
+		// never surface as an unhandled rejection. History is best-effort.
+		try {
+			for (const { task, thread } of history) {
+				if (task.parentSessionId !== sessionId) continue;
+				if (store.restore(task, thread)) restoredTaskIds.add(task.id);
+			}
+		} catch { /* Partial history is acceptable; the live session keeps running. */ }
+	};
+
 	const openOverlay = async (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
 		if (ctx.mode !== "tui") {
@@ -975,19 +1031,19 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		ui = ctx.hasUI ? ctx.ui : undefined;
 		sessions = ctx.sessionManager;
 		tickClock();
+		// Agents is not a rail part: the fullscreen sidebar only suppresses
+		// bottom components registered through sidebarPart, and this widget is
+		// the only Agents surface in every mode, so it stays a plain component.
 		ui?.setWidget(AGENTS_WIDGET_KEY, (tui, theme) => {
 			host = tui;
 			sidebarTui = tui;
-			return sidebarPart(tui, "agents", {
+			return {
 				render(width: number) {
 					const lines = renderAgentsCard(visibleTasks(), theme, width, deps.now(), { collapsed, collapseKey, maxRows: widgetRows(tui.terminal?.rows), viewKey });
 					return lines.length === 0 ? [] : [...lines, ""];
 				},
 				invalidate() {},
-			}, {
-				render: (width) => renderAgentsCard(visibleTasks(), theme, width, deps.now(), { collapsed, collapseKey, viewKey }),
-				invalidate() {},
-			});
+			};
 		});
 	};
 
@@ -1380,13 +1436,25 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		});
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		// A resumed, reloaded, or replaced session starts with an empty completion
 		// queue so nothing pending from another session can replay here.
 		completions.dropAll();
 		presence?.dispose();
 		registryFor(ctx);
 		showWidget(ctx);
+		// An explicit in-session /resume always brings this session's own
+		// finished subagents back from disk. Pi also reports "startup" (not
+		// "resume") when the CLI is launched directly into an existing session
+		// file, e.g. --continue or the --resume picker (agent-session.js:152
+		// defaults to "startup"); that case restores too, but only when the
+		// session actually has prior entries -- a brand-new session can also be
+		// announced as "startup", and a fresh session has none. "new", "fork",
+		// and "reload" never restore here, matching the existing on-demand
+		// resolveTask path for anything else.
+		const sessionId = ctx.sessionManager.getSessionId();
+		const preexisting = event.reason === "resume" || (event.reason === "startup" && ctx.sessionManager.getEntries().length > 0);
+		if (preexisting && sessionId) void restoreSessionHistory(ctx, sessionId);
 		try {
 			presence = PresencePublisher.start({ profile: agentHome, sessionId: activeSessionId() ?? "",
 				label: ctx.sessionManager.getSessionName?.() || ctx.sessionManager.getCwd().split(/[\\/]/).pop() || "Orchestrator", activity: [] });

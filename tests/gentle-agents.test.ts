@@ -5,11 +5,14 @@ import { homedir, tmpdir } from "node:os";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 import { pendingReviewMutation, REVIEW_REMINDER_RECEIPT } from "../lib/review-reminder-receipt.ts";
-import { SESSION_WORKTREE_ENTRY, SESSION_WORKTREE_CHANGED } from "../lib/session-worktree-registry.ts";
+import { SESSION_WORKTREE_ENTRY, SESSION_WORKTREE_CHANGED, resolveSessionWorktree } from "../lib/session-worktree-registry.ts";
+import { installSessionChangeCapture } from "../lib/session-change-capture.ts";
+import type { SessionChangeEvidence } from "../lib/session-changes.ts";
 import test, { after, afterEach, mock } from "node:test";
 import type { TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { visibleWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { sidebarState } from "../lib/shell-sidebar.ts";
 import gentleAgents, { agentRuntimePaths, agentsCollapseKey, agentsEnabled, agentsStopKey, agentsViewKey, answerThroughUi, completionText, createDefaultSessionTransport, legacySubagentsInstalled, type AgentsDeps, type SessionTransportFactory } from "../extensions/gentle-agents.ts";
 import { ActiveSessionClient, ActiveSessionListener, SessionPresenceRegistry } from "../lib/agents-session-transport.ts";
 import { WindowsActiveSessionClient, WindowsActiveSessionListener } from "../lib/windows-session-transport.ts";
@@ -461,6 +464,21 @@ const drainLifecycle = async (label: string, promise: Promise<LifecycleOutcome>)
 	try { return { label, outcome: await boundedLifecycle(promise, label) }; }
 	catch (error) { return { label, error }; }
 };
+
+// The disk history read behind restoreSessionHistory is fire-and-forget from
+// session_start, so nothing signals when it lands. Poll the overlay's own
+// render output (backed by the live, shared TaskStore) on setImmediate ticks
+// instead of sleeping a fixed guess: fast when the restore already landed,
+// bounded at 2s so a genuine regression still fails instead of hanging.
+async function waitForOverlayMatch(render: () => string, pattern: RegExp, timeoutMs = 2000): Promise<string> {
+	const deadline = Date.now() + timeoutMs;
+	let rendered = render();
+	while (!pattern.test(rendered) && Date.now() < deadline) {
+		await tick();
+		rendered = render();
+	}
+	return rendered;
+}
 
 test("overlapping session transport startups preserve ownership and shutdown waits for every pending operation", async (t: TestContext) => {
 	const h = fakePi();
@@ -1359,6 +1377,131 @@ for (const matching of [true, false]) {
  });
 }
 
+// Runs the CHILD half of installSessionChangeCapture against a real repo, the
+// same way an actual subagent process would: a tool_call/tool_result pair
+// with GENTLE_PI_AGENTS_CHILD set, using the real git-backed resolver rather
+// than a stub. Returns exactly the evidence object the child would put in
+// its tool result's details.gentleSessionChange.
+async function childSessionChangeEvidence(root: string, relPath: string, toolCallId: string, content: string): Promise<SessionChangeEvidence> {
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const childPi = {
+		on: (key: string, fn: (event: unknown, ctx: unknown) => unknown) => handlers.set(key, fn),
+		appendEntry: () => {},
+		events: { on: () => () => {}, emit: () => {} },
+	} as unknown as ExtensionAPI;
+	const childCtx = { cwd: root, sessionManager: { getSessionId: () => "child-session", getEntries: () => [] } } as unknown as ExtensionContext;
+	installSessionChangeCapture(childPi, { GENTLE_PI_AGENTS_CHILD: "1" }, resolveSessionWorktree);
+	await handlers.get("session_start")?.({}, childCtx);
+	const event = { toolCallId, toolName: "write", input: { path: relPath, content } };
+	await handlers.get("tool_call")?.(event, childCtx);
+	writeFileSync(join(root, relPath), content);
+	const result = (await handlers.get("tool_result")?.({ ...event, isError: false }, childCtx)) as { details: { gentleSessionChange: SessionChangeEvidence } } | undefined;
+	assert.ok(result?.details.gentleSessionChange, "the child must attach session-change evidence to its tool result");
+	return result.details.gentleSessionChange;
+}
+
+// C1 investigation (odd/tasks/usage-click-and-changes-attribution.md): tried
+// to reproduce the live session's "16 subagent_run calls, zero relayed"
+// evidence end to end — real repo, real git-backed resolver on both the
+// child and parent sides (not the trivial path-echoing stub the other
+// fixtures in this file use), a real child tool_call/tool_result pair
+// producing the session-change evidence, and the real onSuccessfulMutation
+// guard chain in extensions/gentle-agents.ts, round-tripped through actual
+// JSON serialization the same way agents-fake-child.ts's emit() does for
+// every other test here. With every guard input constructed faithfully, the
+// relay fires correctly: parentSessionId/ownedTaskIds, root === childRoot,
+// worktrees.roots().includes(root), tool.evidence.root === root, and the
+// realpath comparison all pass.
+//
+// The one drop this file could reproduce was a test-harness gap, not a
+// product bug: SessionWorktreeRegistry.start() is never called for this
+// extension's own registry (registryFor() in extensions/gentle-agents.ts),
+// so worktrees.roots() is empty until some subagent's onLaunch callback
+// registers a root on the real child process's "spawn" event. In production
+// that event always fires before any tool call can complete, so the root is
+// registered well before any mutation; the fake child here only reproduces
+// that if the test explicitly wires "spawn" (as this test does). Making
+// registryFor() call start() eagerly was tried and reverted: it makes the
+// parent's own cwd a registered root at session start regardless of whether
+// any subagent ever actually launches into it, which breaks two existing,
+// deliberate invariants — "child mutation attribution through registered
+// subagent_run: unregistered" (a queued-but-never-spawned task must not be
+// attributed) and "queueing and returning a child handle do not register
+// roots" / "delayed child spawn retains the originating session..." (merely
+// constructing the registry must not append an entry). Deciding whether the
+// session's own root should be trusted before any subagent proves it by
+// actually spawning is a product/security question, not a guard bug fix, so
+// it was left to the parent instead of guessed at here.
+test("C1 investigation: the relay mechanism is correct when every guard input is real", async () => {
+	// A real repository, spawned through the real (unstubbed) git-backed
+	// resolver on both the child and parent sides — the same resolver the
+	// live session used — rather than the trivial path-echoing stub the other
+	// fixtures in this file use.
+	const repoRoot = mkdtempSync(join(tmpdir(), "gentle-agents-c1-"));
+	// Isolate every git spawn below from the developer's own environment: no
+	// global/system config, no ambient $HOME gitconfig, no signing prompt, and
+	// no hooks -- only the identity this fixture supplies explicitly.
+	const gitHome = mkdtempSync(join(tmpdir(), "gentle-agents-c1-git-home-"));
+	const gitHooksDir = mkdtempSync(join(tmpdir(), "gentle-agents-c1-git-hooks-"));
+	const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", HOME: gitHome };
+	const gitIdentity = ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", `core.hooksPath=${gitHooksDir}`];
+	const runGit = (args: string[]) => execFileSync("git", [...gitIdentity, ...args], { env: gitEnv });
+	try {
+		runGit(["init", "--quiet", "-b", "main", repoRoot]);
+		writeFileSync(join(repoRoot, "README.md"), "seed\n");
+		runGit(["-C", repoRoot, "add", "README.md"]);
+		runGit(["-C", repoRoot, "commit", "--quiet", "-m", "seed"]);
+
+		const h = fakePi();
+		const d = deps();
+		const { ctx } = fakeContext();
+		ctx.sessionManager.getCwd = () => repoRoot;
+		ctx.sessionManager.getEntries = (() => h.entries) as typeof ctx.sessionManager.getEntries;
+		ctx.sessionManager.getBranch = (() => h.entries) as typeof ctx.sessionManager.getBranch;
+		d.deps.resolveWorktree = resolveSessionWorktree;
+		// Mirror a real child process: the OS "spawn" event fires as soon as the
+		// process starts, which is what triggers onLaunch -> registry.register.
+		const spawn = d.deps.spawn!;
+		d.deps.spawn = (...args) => {
+			const child = spawn(...args);
+			const on = child.on.bind(child);
+			child.on = ((event: string, listener: () => void) => {
+				if (event === "spawn") queueMicrotask(listener);
+				return on(event as "spawn", listener);
+			}) as typeof child.on;
+			return child;
+		};
+		gentleAgents(h.pi, {}, d.deps);
+		await h.fire("session_start", ctx);
+
+		const launched = await h.tools.get("subagent_run")!.execute("mutation", { agent: "explore", task: "Write a file", mode: "background" }, undefined, undefined, ctx);
+		await tick();
+		const gentleAgentsDetails = launched.details.gentleAgents as { taskId: string; cwd: string };
+		const taskId = gentleAgentsDetails.taskId;
+		// The task's cwd is whatever buildRequest resolved from the real
+		// resolver: confirming this here pins down which value onSuccessfulMutation
+		// will later compare against the freshly-resolved root.
+		const childCwd = gentleAgentsDetails.cwd;
+
+		const evidence = await childSessionChangeEvidence(childCwd, "notes.md", "write", "agent output\n");
+
+		d.children[0].emit({ type: "tool_execution_start", toolCallId: "write", toolName: "write", args: { path: "notes.md" } });
+		d.children[0].emit({ type: "tool_execution_end", toolCallId: "write", isError: false, result: { content: [], details: { gentleSessionChange: evidence } } });
+		await tick();
+
+		const relays = h.events.filter((event) => event.name === "gentle-pi:child-session-change");
+		assert.equal(relays.length, 1, `expected the child mutation to relay; evidence=${JSON.stringify(evidence)} childCwd=${childCwd}`);
+		assert.equal((relays[0].data as { evidence: { id: string } }).evidence.id, `${taskId}:write`);
+
+		await h.fire("session_shutdown", ctx);
+		await tick();
+	} finally {
+		rmSync(repoRoot, { recursive: true, force: true });
+		rmSync(gitHome, { recursive: true, force: true });
+		rmSync(gitHooksDir, { recursive: true, force: true });
+	}
+});
+
 for (const scenario of ["own", "other-root", "escaped", "sibling", "session-switch", "shutdown", "unregistered"] as const) {
 	test(`child mutation attribution through registered subagent_run: ${scenario}`, async () => {
 		const h = fakePi();
@@ -1370,7 +1513,11 @@ for (const scenario of ["own", "other-root", "escaped", "sibling", "session-swit
 		ctx.sessionManager.getSessionId = () => sessionId;
 		ctx.sessionManager.getEntries = (() => h.entries) as typeof ctx.sessionManager.getEntries;
 		ctx.sessionManager.getBranch = (() => h.entries) as typeof ctx.sessionManager.getBranch;
+		// The cheap session/ownership guards run before any worktree resolution:
+		// a mutation from a switched-away session must never reach git.
+		let resolutions = 0;
 		d.deps.resolveWorktree = (path, base) => {
+			resolutions++;
 			const absolute = resolve(base, path);
 			const worktree = [cwd, sibling].find((candidate) => containsResolvedPath(candidate, absolute));
 			return worktree ? { root: worktree, commonDir: "/fixture/common" } : undefined;
@@ -1403,6 +1550,254 @@ for (const scenario of ["own", "other-root", "escaped", "sibling", "session-swit
 		await tick();
 	});
 }
+
+// C1 diagnostics (odd/tasks/usage-click-and-changes-attribution.md): the
+// guard chain's posture is unchanged (spawn-gated registration stays, a
+// parent decision) -- these only verify each drop explains itself once, in
+// the task's own thread, naming the exact guard that fired.
+async function openTaskThread(commands: ReturnType<typeof fakePi>["commands"], ctx: ExtensionContext, overlays: Overlay[]): Promise<string> {
+	const opened = commands.get("gentle:agents")!.handler("", ctx);
+	for (let attempt = 0; attempt < 40 && overlays.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	const overlay = overlays[0];
+	const text = overlay ? stripAnsi(overlay.render(100).join("\n")) : "";
+	overlay?.handleInput("\x1b");
+	await opened;
+	overlays.length = 0;
+	return text;
+}
+
+for (const [scenario, guard] of [
+	["escaped", "root-unresolved"],
+	["sibling", "root-mismatch"],
+	["session-switch", "parent-session-mismatch"],
+	["unregistered", "root-not-registered"],
+] as const) {
+	test(`a dropped mutation explains itself in the task thread: ${scenario} -> ${guard}`, async () => {
+		const h = fakePi();
+		const d = deps();
+		const { ctx, overlays } = fakeContext();
+		let sessionId = "s1";
+		const sibling = join(root, `sibling-${scenario}`);
+		ctx.sessionManager.getSessionId = () => sessionId;
+		ctx.sessionManager.getEntries = (() => h.entries) as typeof ctx.sessionManager.getEntries;
+		ctx.sessionManager.getBranch = (() => h.entries) as typeof ctx.sessionManager.getBranch;
+		// The cheap session/ownership guards run before any worktree resolution:
+		// a mutation from a switched-away session must never reach git.
+		let resolutions = 0;
+		d.deps.resolveWorktree = (path, base) => {
+			resolutions++;
+			const absolute = resolve(base, path);
+			const worktree = [cwd, sibling].find((candidate) => containsResolvedPath(candidate, absolute));
+			return worktree ? { root: worktree, commonDir: "/fixture/common" } : undefined;
+		};
+		const spawn = d.deps.spawn!;
+		d.deps.spawn = (...args) => {
+			const child = spawn(...args);
+			const on = child.on.bind(child);
+			child.on = ((event: string, listener: () => void) => {
+				if (event === "spawn" && scenario !== "unregistered") queueMicrotask(listener);
+				return on(event as "spawn", listener);
+			}) as typeof child.on;
+			return child;
+		};
+		gentleAgents(h.pi, {}, d.deps);
+		await h.fire("session_start", ctx);
+		await h.tools.get("subagent_run")!.execute("mutation", { agent: "explore", task: "Write", mode: "background", workspace_root: cwd }, undefined, undefined, ctx);
+		await tick();
+		if (scenario === "session-switch") sessionId = "s2";
+		const path = scenario === "escaped" ? "../../outside.ts" : scenario === "sibling" ? join(sibling, "file.ts") : "file.ts";
+		resolutions = 0; // spawn-time registration may resolve; only the mutation matters here
+		d.children[0].emit({ type: "tool_execution_start", toolCallId: "write", toolName: "write", args: { path } });
+		d.children[0].emit({ type: "tool_execution_end", toolCallId: "write", isError: false, result: { content: [] } });
+		await tick();
+		if (scenario === "session-switch") assert.equal(resolutions, 0, "session mismatch is decided before resolving any worktree");
+		if (scenario === "session-switch") sessionId = "s1"; // back to the task's own session to inspect its thread
+		const rendered = await openTaskThread(h.commands, ctx, overlays);
+		assert.match(rendered, new RegExp(`changes not attributed: ${guard}\\b`), `expected the ${guard} guard to explain itself`);
+		// The same drop repeated for the same task must not add a second note.
+		d.children[0].emit({ type: "tool_execution_start", toolCallId: "write2", toolName: "write", args: { path } });
+		d.children[0].emit({ type: "tool_execution_end", toolCallId: "write2", isError: false, result: { content: [] } });
+		await tick();
+		const renderedAgain = await openTaskThread(h.commands, ctx, overlays);
+		assert.equal((renderedAgain.match(new RegExp(`changes not attributed: ${guard}`, "g")) ?? []).length, 1, "one note per (task, guard), not one per file");
+		await h.fire("session_shutdown", ctx);
+		await tick();
+	});
+}
+
+test("a mutation dropped for lacking any session-change evidence explains itself once", async () => {
+	const h = fakePi();
+	const d = deps();
+	const { ctx, overlays } = fakeContext();
+	ctx.sessionManager.getEntries = (() => h.entries) as typeof ctx.sessionManager.getEntries;
+	ctx.sessionManager.getBranch = (() => h.entries) as typeof ctx.sessionManager.getBranch;
+	d.deps.resolveWorktree = (path, base) => {
+		const full = resolve(base, path);
+		return full === cwd || full.startsWith(cwd + "/") ? { root: cwd, commonDir: "/fixture/common" } : undefined;
+	};
+	const spawn = d.deps.spawn!;
+	d.deps.spawn = (...args) => {
+		const child = spawn(...args);
+		const on = child.on.bind(child);
+		child.on = ((event: string, listener: () => void) => { if (event === "spawn") queueMicrotask(listener); return on(event as "spawn", listener); }) as typeof child.on;
+		return child;
+	};
+	gentleAgents(h.pi, {}, d.deps);
+	await h.fire("session_start", ctx);
+	await h.tools.get("subagent_run")!.execute("mutation", { agent: "explore", task: "Write", mode: "background", workspace_root: cwd }, undefined, undefined, ctx);
+	await tick();
+	// No details.gentleSessionChange at all -- the evidence never surfaced.
+	d.children[0].emit({ type: "tool_execution_start", toolCallId: "write", toolName: "write", args: { path: "file.ts" } });
+	d.children[0].emit({ type: "tool_execution_end", toolCallId: "write", isError: false, result: { content: [] } });
+	await tick();
+	const rendered = await openTaskThread(h.commands, ctx, overlays);
+	assert.match(rendered, /changes not attributed: evidence-missing\b/);
+	await h.fire("session_shutdown", ctx);
+	await tick();
+});
+
+test("a mutation dropped for evidence pointing at a different worktree root explains itself once", async () => {
+	const h = fakePi();
+	const d = deps();
+	const { ctx, overlays } = fakeContext();
+	const target = realpathSync(cwd);
+	(ctx as unknown as { cwd: string }).cwd = target;
+	ctx.sessionManager.getCwd = () => target;
+	ctx.sessionManager.getEntries = (() => h.entries) as typeof ctx.sessionManager.getEntries;
+	ctx.sessionManager.getBranch = (() => h.entries) as typeof ctx.sessionManager.getBranch;
+	d.deps.resolveWorktree = (path, base) => {
+		const full = resolve(base, path);
+		return full === target || full.startsWith(target + "/") ? { root: target, commonDir: "/fixture/common" } : undefined;
+	};
+	const spawn = d.deps.spawn!;
+	d.deps.spawn = (...args) => {
+		const child = spawn(...args);
+		const on = child.on.bind(child);
+		child.on = ((event: string, listener: () => void) => { if (event === "spawn") queueMicrotask(listener); return on(event as "spawn", listener); }) as typeof child.on;
+		return child;
+	};
+	gentleAgents(h.pi, {}, d.deps);
+	await h.fire("session_start", ctx);
+	await h.tools.get("subagent_run")!.execute("mutation", { agent: "explore", task: "Write", mode: "background", workspace_root: target }, undefined, undefined, ctx);
+	await tick();
+	writeFileSync(join(target, "evidence-root-mismatch-test.ts"), "agent\n");
+	// The evidence names a different root than the one the mutation actually
+	// resolved into -- distinct from having no evidence at all.
+	const evidence = { id: "write", root: join(target, "elsewhere"), path: "evidence-root-mismatch-test.ts", before: { kind: "text", text: "original\n" }, after: { kind: "text", text: "agent\n" } };
+	d.children[0].emit({ type: "tool_execution_start", toolCallId: "write", toolName: "write", args: { path: "evidence-root-mismatch-test.ts" } });
+	d.children[0].emit({ type: "tool_execution_end", toolCallId: "write", isError: false, result: { content: [], details: { gentleSessionChange: evidence } } });
+	await tick();
+	const rendered = await openTaskThread(h.commands, ctx, overlays);
+	assert.match(rendered, /changes not attributed: evidence-root-mismatch\b/);
+	await h.fire("session_shutdown", ctx);
+	await tick();
+});
+
+test("a mutation dropped for an unreadable evidence target explains itself once", async () => {
+	const h = fakePi();
+	const d = deps();
+	const { ctx, overlays } = fakeContext();
+	const target = realpathSync(cwd);
+	(ctx as unknown as { cwd: string }).cwd = target;
+	ctx.sessionManager.getCwd = () => target;
+	ctx.sessionManager.getEntries = (() => h.entries) as typeof ctx.sessionManager.getEntries;
+	ctx.sessionManager.getBranch = (() => h.entries) as typeof ctx.sessionManager.getBranch;
+	d.deps.resolveWorktree = (path, base) => {
+		const full = resolve(base, path);
+		return full === target || full.startsWith(target + "/") ? { root: target, commonDir: "/fixture/common" } : undefined;
+	};
+	const spawn = d.deps.spawn!;
+	d.deps.spawn = (...args) => {
+		const child = spawn(...args);
+		const on = child.on.bind(child);
+		child.on = ((event: string, listener: () => void) => { if (event === "spawn") queueMicrotask(listener); return on(event as "spawn", listener); }) as typeof child.on;
+		return child;
+	};
+	gentleAgents(h.pi, {}, d.deps);
+	await h.fire("session_start", ctx);
+	await h.tools.get("subagent_run")!.execute("mutation", { agent: "explore", task: "Write", mode: "background", workspace_root: target }, undefined, undefined, ctx);
+	await tick();
+	// The tool's own path never lands on disk -- realpathSync must throw
+	// rather than report a plain mismatch.
+	const evidence = { id: "write", root: target, path: "missing-target-test.ts", before: { kind: "text", text: "original\n" }, after: { kind: "text", text: "agent\n" } };
+	d.children[0].emit({ type: "tool_execution_start", toolCallId: "write", toolName: "write", args: { path: "missing-target-test.ts" } });
+	d.children[0].emit({ type: "tool_execution_end", toolCallId: "write", isError: false, result: { content: [], details: { gentleSessionChange: evidence } } });
+	await tick();
+	const rendered = await openTaskThread(h.commands, ctx, overlays);
+	assert.match(rendered, /changes not attributed: evidence-path-unreadable\b/);
+	await h.fire("session_shutdown", ctx);
+	await tick();
+});
+
+test("a mutation dropped for mismatched session-change evidence explains itself once", async () => {
+	const h = fakePi();
+	const d = deps();
+	const { ctx, overlays } = fakeContext();
+	const target = realpathSync(cwd);
+	(ctx as unknown as { cwd: string }).cwd = target;
+	ctx.sessionManager.getCwd = () => target;
+	ctx.sessionManager.getEntries = (() => h.entries) as typeof ctx.sessionManager.getEntries;
+	ctx.sessionManager.getBranch = (() => h.entries) as typeof ctx.sessionManager.getBranch;
+	d.deps.resolveWorktree = (path, base) => {
+		const full = resolve(base, path);
+		return full === target || full.startsWith(target + "/") ? { root: target, commonDir: "/fixture/common" } : undefined;
+	};
+	const spawn = d.deps.spawn!;
+	d.deps.spawn = (...args) => {
+		const child = spawn(...args);
+		const on = child.on.bind(child);
+		child.on = ((event: string, listener: () => void) => { if (event === "spawn") queueMicrotask(listener); return on(event as "spawn", listener); }) as typeof child.on;
+		return child;
+	};
+	gentleAgents(h.pi, {}, d.deps);
+	await h.fire("session_start", ctx);
+	await h.tools.get("subagent_run")!.execute("mutation", { agent: "explore", task: "Write", mode: "background", workspace_root: target }, undefined, undefined, ctx);
+	await tick();
+	writeFileSync(join(target, "evidence-mismatch-test.ts"), "agent\n");
+	const evidence = { id: "write", root: target, path: "different-file.ts", before: { kind: "text", text: "original\n" }, after: { kind: "text", text: "agent\n" } };
+	d.children[0].emit({ type: "tool_execution_start", toolCallId: "write", toolName: "write", args: { path: "evidence-mismatch-test.ts" } });
+	d.children[0].emit({ type: "tool_execution_end", toolCallId: "write", isError: false, result: { content: [], details: { gentleSessionChange: evidence } } });
+	await tick();
+	const rendered = await openTaskThread(h.commands, ctx, overlays);
+	assert.match(rendered, /changes not attributed: evidence-path-mismatch\b/);
+	await h.fire("session_shutdown", ctx);
+	await tick();
+});
+
+test("a successfully attributed mutation adds no drop note", async () => {
+	const h = fakePi();
+	const d = deps();
+	const { ctx, overlays } = fakeContext();
+	const target = realpathSync(cwd);
+	(ctx as unknown as { cwd: string }).cwd = target;
+	ctx.sessionManager.getCwd = () => target;
+	ctx.sessionManager.getEntries = (() => h.entries) as typeof ctx.sessionManager.getEntries;
+	ctx.sessionManager.getBranch = (() => h.entries) as typeof ctx.sessionManager.getBranch;
+	d.deps.resolveWorktree = (path, base) => {
+		const full = resolve(base, path);
+		return full === target || full.startsWith(target + "/") ? { root: target, commonDir: "/fixture/common" } : undefined;
+	};
+	const spawn = d.deps.spawn!;
+	d.deps.spawn = (...args) => {
+		const child = spawn(...args);
+		const on = child.on.bind(child);
+		child.on = ((event: string, listener: () => void) => { if (event === "spawn") queueMicrotask(listener); return on(event as "spawn", listener); }) as typeof child.on;
+		return child;
+	};
+	gentleAgents(h.pi, {}, d.deps);
+	await h.fire("session_start", ctx);
+	await h.tools.get("subagent_run")!.execute("mutation", { agent: "explore", task: "Write", mode: "background", workspace_root: target }, undefined, undefined, ctx);
+	await tick();
+	writeFileSync(join(target, "happy-path-test.ts"), "agent\n");
+	const evidence = { id: "write", root: target, path: "happy-path-test.ts", before: { kind: "text", text: "original\n" }, after: { kind: "text", text: "agent\n" } };
+	d.children[0].emit({ type: "tool_execution_start", toolCallId: "write", toolName: "write", args: { path: "happy-path-test.ts" } });
+	d.children[0].emit({ type: "tool_execution_end", toolCallId: "write", isError: false, result: { content: [], details: { gentleSessionChange: evidence } } });
+	await tick();
+	const rendered = await openTaskThread(h.commands, ctx, overlays);
+	assert.doesNotMatch(rendered, /changes not attributed/);
+	await h.fire("session_shutdown", ctx);
+	await tick();
+});
 
 test("worktree attribution containment respects Windows path boundaries", () => {
 	const candidate = win32.resolve("C:\\fixture", "project");
@@ -1929,6 +2324,32 @@ test("subagent_list_agents and subagent_run in task mode launch a child with the
 	assert.match(tools.get("subagent_run")!.renderCall({ agent: "explore" }, plainTheme).render(60).join(""), /❀ Gentle AI · running · explore/);
 });
 
+test("the Agents widget never registers a sidebar rail part and stays visible even while the fullscreen sidebar owns the host", async () => {
+	const { pi, tools, fire } = fakePi();
+	const harness = deps();
+	gentleAgents(pi, {}, harness.deps);
+	// A terminal-bearing host is what makes sidebarPart do anything at all
+	// (a host with no .terminal is already a passthrough); this is the host
+	// shape the fullscreen layout actually uses.
+	const terminalTui = { requestRender() {}, terminal: { columns: 160, rows: 40 } };
+	const { ctx, widget } = fakeContext(terminalTui);
+	await fire("session_start", ctx);
+	await tools.get("subagent_run")!.execute("c1", { agent: "explore", task: "Map lib/", label: "map lib modules", mode: "background" }, undefined, undefined, ctx);
+	await tick();
+
+	// The factory only runs (and only then could register a rail part) once
+	// something actually renders the widget, exactly like the real host.
+	assert.match(widget()![1]!, /explore  map lib modules/);
+	const state = sidebarState(terminalTui as unknown as TUI);
+	assert.equal(state.parts.has("agents"), false, "Agents never claims a rail slot; the above-editor widget is its only surface");
+
+	// Simulate the fullscreen sidebar actively owning the host, the same
+	// condition sidebarPart used to suppress a registered bottom widget under.
+	state.active = true;
+	state.ownsHost = () => true;
+	assert.match(widget()![1]!, /explore  map lib modules/, "the widget keeps rendering regardless of sidebar ownership");
+});
+
 test("background runs return at once; status, result, send_message, cancel, and continue follow the task", async () => {
 	const { pi, tools, fire, sent, renderers } = fakePi();
 	const harness = deps();
@@ -2184,7 +2605,7 @@ test("AgentsView production footer uses rendered bounds and invalidates them bef
 	}
 });
 
-test("finished tasks remain available through resolveTask but never reappear in the live-only overlay", async () => {
+test("a task that finishes live stays visible as history, in both scopes, and its result also resolves after a restart", async () => {
 	const { pi, tools, fire, commands, shortcuts } = fakePi();
 	const harness = deps();
 	gentleAgents(pi, {}, harness.deps);
@@ -2204,21 +2625,25 @@ test("finished tasks remain available through resolveTask but never reappear in 
 	}
 	assert.ok(stored.some((entry) => entry.task.id === id && entry.task.result === "Kept."), "the finished task is on disk");
 
+	// A completely different session still resolves it by id on demand, with
+	// nothing restored in advance.
 	const fresh = fakePi();
 	gentleAgents(fresh.pi, {}, deps().deps);
 	const again = fakeContext();
 	await fresh.fire("session_start", again.ctx);
 	assert.equal((await fresh.tools.get("subagent_result")!.execute("c2", { task_id: id }, undefined, undefined, again.ctx)).content[0].text, "Kept.");
 
+	// Back in the session where it actually finished, it stays listed as
+	// history -- in the current-session view and under "all sessions" too.
 	assert.ok(commands.has("gentle:agents") && shortcuts.has("alt+a"));
 	const opened = commands.get("gentle:agents")!.handler("", ctx);
 	for (let attempt = 0; attempt < 40 && overlays.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 25));
 	const overlay = overlays[0];
 	assert.ok(overlay, "the overlay component was created");
-	assert.doesNotMatch(overlay.render(80).map(stripAnsi).join("\n"), /finished|Subagent explore|Current orchestrator/);
+	assert.match(overlay.render(80).map(stripAnsi).join("\n"), /finished|Subagent explore/, "the task that finished in this session stays visible as history");
 	overlay.handleInput("a");
 	overlay.handleInput("\x1b[C");
-	assert.doesNotMatch(overlay.render(80).map(stripAnsi).join("\n"), /✓ Subagent explore/, "all sessions is not a historical-task browser");
+	assert.match(overlay.render(80).map(stripAnsi).join("\n"), /Subagent explore/, "the current session's own history shows under all sessions too");
 	overlay.handleInput("\x1b");
 	await opened;
 });
@@ -2331,6 +2756,104 @@ test("restored task history cannot enter the live panel or execute stop even wit
 	assert.deepEqual(dialogs, []);
 	overlays[0]!.handleInput("\x1b");
 	await opened;
+});
+
+// A1 (odd/tasks/usage-click-and-changes-attribution.md): resuming a session
+// brings its own finished subagents back as visible history, never another
+// session's, and a brand-new session starts with none restored.
+test("resuming a session restores its own finished tasks as history, never another session's", async () => {
+	const { pi, fire, commands } = fakePi();
+	const harness = deps();
+	const historyHome = join(root, "resume-history-home");
+	const base: TaskRecord = { id: "own-1", agent: "explore-a", mode: "background", prompt: "p", label: "p", cwd, parentSessionId: "resumed-session", status: TASK_STATUS.COMPLETED, createdAt: 1, startedAt: 1, endedAt: 100, model: "m", thinking: undefined, sessionPath: null, error: null, result: "done", lastStep: "responded", lastActivityAt: 100, turns: 1, toolCalls: 0, tokens: 0, cost: 0 };
+	const own1 = base;
+	const own2: TaskRecord = { ...base, id: "own-2", agent: "explore-b", status: TASK_STATUS.FAILED, endedAt: 200, error: "boom", result: null };
+	const other: TaskRecord = { ...base, id: "not-mine", agent: "explore-other", parentSessionId: "other-session" };
+	await saveTask(historyDir(historyHome), own1, emptyThread());
+	await saveTask(historyDir(historyHome), own2, emptyThread());
+	await saveTask(historyDir(historyHome), other, emptyThread());
+	harness.deps.home = historyHome;
+	gentleAgents(pi, {}, harness.deps);
+	const { ctx, overlays } = fakeContext();
+	ctx.sessionManager.getSessionId = () => "resumed-session";
+	await fire("session_start", ctx, { reason: "resume" });
+	const opened = commands.get("gentle:agents")!.handler("", ctx);
+	for (let attempt = 0; attempt < 40 && overlays.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+	// The disk history read behind restoreSessionHistory is fire-and-forget,
+	// so poll the overlay's own render output instead of sleeping a guess.
+	const rendered = await waitForOverlayMatch(() => stripAnsi(overlays[0]!.render(100).join("\n")), /Subagent explore-a/);
+	assert.match(rendered, /Subagent explore-a/, "the resumed session's own finished task is restored");
+	assert.match(rendered, /Subagent explore-b/, "a second finished task of the same session is restored too");
+	assert.doesNotMatch(rendered, /explore-other/, "another session's finished task never restores here");
+	overlays[0]!.handleInput("\x1b");
+	await opened;
+	await fire("session_shutdown", ctx);
+
+	const { pi: freshPi, fire: freshFire, commands: freshCommands } = fakePi();
+	gentleAgents(freshPi, {}, harness.deps);
+	const { ctx: freshCtx, overlays: freshOverlays } = fakeContext();
+	freshCtx.sessionManager.getSessionId = () => "brand-new-session";
+	await freshFire("session_start", freshCtx, { reason: "new" });
+	await tick();
+	const freshOpened = freshCommands.get("gentle:agents")!.handler("", freshCtx);
+	for (let attempt = 0; attempt < 40 && freshOverlays.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+	assert.doesNotMatch(stripAnsi(freshOverlays[0]!.render(100).join("\n")), /explore/, "a brand-new session restores nothing");
+	freshOverlays[0]!.handleInput("\x1b");
+	await freshOpened;
+	await freshFire("session_shutdown", freshCtx);
+});
+
+// A1 follow-up: Pi reports "startup" (not "resume") when the CLI is launched
+// directly into an existing session file (--continue / --resume picker,
+// agent-session.js:152) -- "resume" is only the in-session /resume switch.
+// A startup into a session that already has entries must restore its history
+// too; a "startup" with no entries (nothing pre-existing to restore) must not.
+test("starting up into an existing session also restores its own finished history; a startup with no prior entries does not", async () => {
+	const historyHome = join(root, "startup-history-home");
+	const finished: TaskRecord = { id: "startup-1", agent: "explore-startup", mode: "background", prompt: "p", label: "p", cwd, parentSessionId: "startup-session", status: TASK_STATUS.COMPLETED, createdAt: 1, startedAt: 1, endedAt: 100, model: "m", thinking: undefined, sessionPath: null, error: null, result: "done", lastStep: "responded", lastActivityAt: 100, turns: 1, toolCalls: 0, tokens: 0, cost: 0 };
+	await saveTask(historyDir(historyHome), finished, emptyThread());
+
+	{
+		// Startup into a session file that already has entries: restores.
+		const { pi, fire, commands } = fakePi();
+		const harness = deps();
+		harness.deps.home = historyHome;
+		gentleAgents(pi, {}, harness.deps);
+		const { ctx, overlays } = fakeContext();
+		ctx.sessionManager.getSessionId = () => "startup-session";
+		ctx.sessionManager.getEntries = (() => [{ type: "message" }]) as typeof ctx.sessionManager.getEntries;
+		await fire("session_start", ctx, { reason: "startup" });
+		const opened = commands.get("gentle:agents")!.handler("", ctx);
+		for (let attempt = 0; attempt < 40 && overlays.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+		// The disk history read behind restoreSessionHistory is fire-and-forget,
+		// so poll the overlay's own render output instead of sleeping a guess.
+		const rendered = await waitForOverlayMatch(() => stripAnsi(overlays[0]!.render(100).join("\n")), /Subagent explore-startup/);
+		assert.match(rendered, /Subagent explore-startup/, "startup into an existing session restores its own finished history");
+		overlays[0]!.handleInput("\x1b");
+		await opened;
+		await fire("session_shutdown", ctx);
+	}
+	{
+		// Startup reported for a session with no prior entries: nothing to
+		// restore, even though the reason is "startup" and the id matches.
+		const { pi, fire, commands } = fakePi();
+		const harness = deps();
+		harness.deps.home = historyHome;
+		gentleAgents(pi, {}, harness.deps);
+		const { ctx, overlays } = fakeContext();
+		ctx.sessionManager.getSessionId = () => "startup-session";
+		await fire("session_start", ctx, { reason: "startup" });
+		// getEntries defaults to [] here, so preexisting is false and
+		// restoreSessionHistory never runs -- nothing to wait for beyond
+		// letting the already-fired session_start handler settle.
+		await tick();
+		const opened = commands.get("gentle:agents")!.handler("", ctx);
+		for (let attempt = 0; attempt < 40 && overlays.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+		assert.doesNotMatch(stripAnsi(overlays[0]!.render(100).join("\n")), /explore-startup/, "a startup report with no prior entries restores nothing");
+		overlays[0]!.handleInput("\x1b");
+		await opened;
+		await fire("session_shutdown", ctx);
+	}
 });
 
 test("Alt+S confirms a snapshot of active subagents and suppresses their follow-up delivery", async () => {
