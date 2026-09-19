@@ -1,5 +1,6 @@
 import { consumeReviewMutation, pendingReviewMutation, recordReviewMutation } from "../lib/review-reminder-receipt.ts";
 import { resolveSessionWorktree } from "../lib/session-worktree-registry.ts";
+import { OddRuntimeDelegationGate } from "../lib/odd-runtime-delegation-gate.ts";
 import { resolveResearchCapabilities, renderResearchCapabilities } from "../lib/sdd-research-capabilities.ts";
 import { declareReviewRelayHandshake } from "../lib/review-relay-contract.ts";
 import { execFileSync } from "node:child_process";
@@ -116,6 +117,7 @@ import {
 	readOrchestratorSettings,
 	restoreOrchestratorSettings,
 	type OrchestratorSettingsReadResult,
+	parseOrchestratorModelRef,
 } from "../lib/profiles-orchestrator.ts";
 import { measureAgentsViewLayout, type AgentsViewLayout } from "../lib/agents-view-layout.ts";
 import { NativeChoiceList } from "../lib/native-choice-list.ts";
@@ -132,6 +134,7 @@ import {
 	REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
 	REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
 	ReviewHostRelayError,
+	reviewHostMediatedRoleSlots,
 	reviewHostRelaySlots,
 	reviewHostRelayUnachievableDetail,
 	reviewHostRelayUnachievableReason,
@@ -146,6 +149,7 @@ import {
 	type ReviewHostRelaySlot,
 	type ReviewProviderRoleVectorSlot,
 } from "../lib/review-host-relay.ts";
+import type { InProcessReviewerRegistry } from "../lib/inprocess-reviewer.ts";
 import {
 	JOURNAL_STATUS,
 	REVIEW_OPERATION,
@@ -4141,6 +4145,39 @@ function reportProfilesDrops(ctx: ExtensionContext, path: string, drops: Profile
 	}
 }
 
+/** Pi's own live-session controls: the ExtensionAPI's setModel/setThinkingLevel. */
+type LiveSession = Pick<ExtensionAPI, "setModel" | "setThinkingLevel">;
+
+/**
+ * Switch the running session to the profile's orchestrator. `settings.json`
+ * is the default for new sessions only; Pi's `setModel`/`setThinkingLevel`
+ * are what move the live one. Failures never undo the persisted default: the
+ * profile is applied for the next session either way, and the note says what
+ * this session did. Nothing here may throw — settings.json is already written
+ * and the apply must finish reporting.
+ */
+async function switchLiveOrchestrator(ctx: ExtensionContext, live: LiveSession, entry: AgentRoutingEntry): Promise<string> {
+	const reference = parseOrchestratorModelRef(entry.model);
+	if (reference === undefined) return "";
+	const label = `${reference.provider}/${reference.model}`;
+	const model = ctx.modelRegistry.find(reference.provider, reference.model);
+	if (model === undefined) return `\n${label} is not in the model catalog; this session keeps its current model.`;
+	let switched = false;
+	try {
+		switched = await live.setModel(model);
+	} catch (error) {
+		return `\nThis session could not switch to ${label}: ${sanitizeTerminalText(error instanceof Error ? error.message : String(error))}.`;
+	}
+	if (!switched) return `\nno authentication is configured for ${reference.provider}; this session keeps its current model.`;
+	if (entry.thinking === undefined) return `\nThis session now runs on ${label}.`;
+	try {
+		live.setThinkingLevel(entry.thinking);
+	} catch (error) {
+		return `\nThis session now runs on ${label}, but its thinking level could not be set to ${entry.thinking}: ${sanitizeTerminalText(error instanceof Error ? error.message : String(error))}.`;
+	}
+	return `\nThis session now runs on ${label} · ${entry.thinking}.`;
+}
+
 function profileSnapshotFrom(
 	current: AgentModelConfig,
 	settings: OrchestratorSettingsReadResult,
@@ -4154,6 +4191,7 @@ function profileSnapshotFrom(
 
 async function runProfilesPanelAction(
 	ctx: ExtensionContext,
+	live: LiveSession,
 	path: string,
 	file: AgentProfilesFile,
 	result: Exclude<ProfilesPanelResult, { type: "close" }>,
@@ -4295,6 +4333,10 @@ async function runProfilesPanelAction(
 					orchestratorRollback = () => restoreOrchestratorSettings(settingsPath, previous);
 					orchestratorNote = `\nOrchestrator set to ${formatOrchestratorSelection(orchestratorEntry)} in ${sanitizeTerminalText(settingsPath)}.`;
 				}
+				// settings.json only governs future sessions. The session the user is
+				// sitting in keeps its model until told otherwise, which made a profile
+				// look applied while the orchestrator kept answering with the old one.
+				orchestratorNote += await switchLiveOrchestrator(ctx, live, orchestratorEntry);
 			}
 			// A pin that does not resolve changes nothing at launch, so the global apply
 			// above is what governs this repository. Saying so keeps a broken pin from
@@ -4541,7 +4583,7 @@ async function runProfilesPanelAction(
 	}
 }
 
-async function handleProfilesCommand(ctx: ExtensionContext): Promise<void> {
+async function handleProfilesCommand(ctx: ExtensionContext, live: LiveSession): Promise<void> {
 	const path = profilesFilePath(gentleAiConfigHome());
 	const read = readProfilesFileResult(path);
 	if (read.status === "invalid") {
@@ -4591,7 +4633,7 @@ async function handleProfilesCommand(ctx: ExtensionContext): Promise<void> {
 	);
 	while (result.type !== "close") {
 		selectedName = "name" in result ? result.name : undefined;
-		file = await runProfilesPanelAction(ctx, path, file, result);
+		file = await runProfilesPanelAction(ctx, live, path, file, result);
 		result = await showProfilesPanel(
 			ctx,
 			file,
@@ -6593,6 +6635,27 @@ function reviewHostRelayFailureReport(error: ReviewHostRelayError): Record<strin
 		// refusal reason lives (gentle-pi#524); dropping it hid every admission
 		// refusal behind "submission-refused".
 		...(error.stderr.length === 0 ? {} : { stderr: error.stderr }),
+		// gentle-shell#1156: what the reviewer child's own event stream revealed.
+		...(error.reviewerEvidence === undefined ? {} : { reviewer: error.reviewerEvidence }),
+	};
+}
+
+// gentle-pi#311 P2 (superseding gentle-shell#1136 / #1158): the lens's
+// completion selection comes from its entry in the agent model routing
+// config, keyed by its routing key (`review-<lens>`). There is no extension
+// allowlist and no ambient default model: the in-process completion resolves
+// its provider through the live model registry the caller supplies, or it is
+// refused before materialize ever runs (validateReviewerSelectionConfiguration
+// in lib/review-host-relay.ts).
+function reviewHostRelaySelection(lens: string | undefined, config: AgentModelConfig): { selection?: string; thinking?: string; routingKey: string } {
+	const routingKey = lens === undefined || lens.length === 0 ? "review capture" : lens.startsWith("review-") ? lens : `review-${lens}`;
+	const entry = config[routingKey];
+	const model = typeof entry === "object" && entry !== null && typeof (entry as AgentRoutingEntry).model === "string" && (entry as AgentRoutingEntry).model!.length > 0 ? (entry as AgentRoutingEntry).model : undefined;
+	const thinking = typeof entry === "object" && entry !== null && typeof (entry as AgentRoutingEntry).thinking === "string" ? (entry as AgentRoutingEntry).thinking : undefined;
+	return {
+		...(model === undefined ? {} : { selection: model }),
+		...(thinking === undefined ? {} : { thinking }),
+		routingKey,
 	};
 }
 
@@ -6695,6 +6758,7 @@ async function executeReviewHostRelayCapture(
 	selections: Map<string, RetainedNativeStatusSelection>,
 	route: RetainedNativeCaptureRoute | undefined,
 	signal?: AbortSignal,
+	modelRegistry?: InProcessReviewerRegistry,
 ): Promise<Record<string, unknown>> {
 	try {
 		if (slot.submission === undefined) {
@@ -6704,12 +6768,23 @@ async function executeReviewHostRelayCapture(
 				REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
 			);
 		}
-		const result = await activeReviewHostRelayRunner({
-			captureArgumentTokens: slot.captureArgumentTokens,
-			targetCwd: cwd,
-			submission: slot.submission,
-			...(signal === undefined ? {} : { signal }),
-		});
+		const result = await activeReviewHostRelayRunner((() => {
+			// gentle-pi#311 P2 / P3: the lens's (or, for a v9 host-mediated role
+			// slot, the fixed review-refuter/review-validator routing key's)
+			// user-owned completion selection rides the request alongside the
+			// live model registry; the relay validates and refuses a missing
+			// registry or a routing entry with no configured model typed before
+			// anything launches, never a fallback to a child.
+			const launch = reviewHostRelaySelection(slot.routingKey ?? slot.lens, readModelConfig(cwd));
+			return {
+				captureArgumentTokens: slot.captureArgumentTokens,
+				targetCwd: cwd,
+				submission: slot.submission,
+				...launch,
+				...(modelRegistry === undefined ? {} : { reviewerRegistry: modelRegistry }),
+				...(signal === undefined ? {} : { signal }),
+			};
+		})());
 		const closure = decodeRelayLastEventClosure(result.submission);
 		if (closure !== undefined) return mapAndClearLastEventClosure(closure, binding, selections, cwd);
 		return {
@@ -6722,6 +6797,7 @@ async function executeReviewHostRelayCapture(
 				...(slot.lens === undefined ? {} : { lens: slot.lens }),
 				...(slot.order === undefined ? {} : { order: slot.order }),
 				...(slot.subjectHash === undefined ? {} : { subject_hash: slot.subjectHash }),
+				...(slot.routingKey === undefined ? {} : { role: slot.name }),
 				prompt_bytes: result.promptByteLength,
 				result_bytes: result.resultByteLength,
 				submission: result.submission,
@@ -7303,6 +7379,11 @@ async function executeReviewCaptureOperation(
 	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
 	retainedUntrackedSelections: Map<string, RetainedNativeStatusSelection> = new Map(),
 	requireRegisteredRoute = false,
+	// gentle-pi#311 P2: the live model registry a lens materialize capture
+	// resolves its in-process completion through. Appended last (rather than
+	// inserted) so every existing positional call site — none of which pass an
+	// eighth argument — keeps compiling unchanged.
+	modelRegistry?: InProcessReviewerRegistry,
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewCaptureParameters(parametersValue);
 	if (nativeReviewCli === null || nativeReviewCli.targetStatus === undefined) {
@@ -7362,7 +7443,33 @@ async function executeReviewCaptureOperation(
 				mutation_outcome: "none",
 			};
 		}
-		return withCorrectionTarget(await executeReviewHostRelayCapture(hostRelaySlots[0]!, nativeReviewCli, cwd, selected.binding, retainedUntrackedSelections, route, signal));
+		return withCorrectionTarget(await executeReviewHostRelayCapture(hostRelaySlots[0]!, nativeReviewCli, cwd, selected.binding, retainedUntrackedSelections, route, signal, modelRegistry));
+	}
+
+	// gentle-pi#311 P3: gentle-ai's v9 contract renders the refuter and
+	// targeted-validator role captures host-mediated, exactly like the lens
+	// slot above — same relay machinery, only its fixed review-refuter /
+	// review-validator routing key (carried on the slot) and its own schema
+	// differ. An older gentle-ai's self-contained --execute=true vector still
+	// falls through to reviewProviderRoleVectorSlots below unchanged.
+	const hostMediatedRoleSlots = reviewHostMediatedRoleSlots([selected.input]);
+	if (hostMediatedRoleSlots.length === 1) {
+		if (parameters.correctionLines !== undefined) return captureBindingRejected("correctionLines is valid only for a correction-plan capture");
+		if (parameters.reviewerRunAcknowledged !== true) {
+			return {
+				tool: "gentle_review_capture",
+				status: "blocked",
+				outcome: "reviewer-model-run-forecast",
+				cost_forecast: {
+					transport: "pi_host_relay",
+					model_runs: 1,
+					roles: [hostMediatedRoleSlots[0]!.routingKey],
+				},
+				mutation_performed: false,
+				mutation_outcome: "none",
+			};
+		}
+		return withCorrectionTarget(await executeReviewHostRelayCapture(hostMediatedRoleSlots[0]!, nativeReviewCli, cwd, selected.binding, retainedUntrackedSelections, route, signal, modelRegistry));
 	}
 
 	if (selected.input.captureOperation === "review.capture-correction-plan") {
@@ -7441,6 +7548,8 @@ async function executeReviewCaptureGroupOperation(
 	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
 	retainedUntrackedSelections: Map<string, RetainedNativeStatusSelection> = new Map(),
 	requireRegisteredRoute = false,
+	// gentle-pi#311 P2: see executeReviewCaptureOperation's matching parameter.
+	modelRegistry?: InProcessReviewerRegistry,
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewCaptureGroupParameters(parametersValue);
 	if (nativeReviewCli === null || nativeReviewCli.targetStatus === undefined) return { ...captureGroupRejected("native target STATUS is unavailable"), outcome: "native-status-unsupported" };
@@ -7481,6 +7590,8 @@ async function executeReviewCaptureGroupOperation(
 		captureArgumentTokens: slot.captureArgumentTokens,
 		targetCwd: cwd,
 		submission: slot.submission!,
+		...reviewHostRelaySelection(slot.lens, readModelConfig(cwd)),
+		...(modelRegistry === undefined ? {} : { reviewerRegistry: modelRegistry }),
 		...(signal === undefined ? {} : { signal }),
 	}));
 	let prepared: readonly ReviewHostRelayPreparedResult[];
@@ -8627,6 +8738,11 @@ function createGentleAiExtensionForTesting(
 	const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
 	const herdrLifecycle = createHerdrConfirmationLifecycle(pi.events);
 	const permissionEnvironment = dependencies.processEnv ?? process.env;
+	const oddDelegationGate = new OddRuntimeDelegationGate();
+	const oddSessionId = (ctx: ExtensionContext): string => {
+		try { return ctx.sessionManager.getSessionId(); }
+		catch { return ""; }
+	};
 
 	const setReviewSessionPermissionStatus = (context: ExtensionContext, active: boolean): void => {
 		try {
@@ -8748,6 +8864,7 @@ function createGentleAiExtensionForTesting(
 				candidateViews,
 				((sessionKey: PendingReviewConsentSessionKey) => processRetainedNativeStatusSelections.get(sessionKey) ?? processRetainedNativeStatusSelections.set(sessionKey, new Map()).get(sessionKey)!)(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)),
 				true,
+				ctx.modelRegistry,
 			);
 			return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 		},
@@ -8761,7 +8878,7 @@ function createGentleAiExtensionForTesting(
 		promptSnippet: "Use one exact current STATUS collectBinding for one ordinary native capture; call fresh STATUS before every additional capture.",
 		promptGuidelines: [
 			"Pass only lineageId, the JSON-serialized exact collectBinding from current STATUS, and the route-specific optional acknowledgement or correctionLines value. Never compose provider argument tokens, prompts, results, verdicts, or lens arrays.",
-			"A materialize reviewer slot first forecasts one model run; re-submit that same exact binding with reviewerRunAcknowledged: true to authorize one host relay. Correction-plan slots require correctionLines inside the provider-issued bounds, counted in diff lines (one replaced source line is one deletion plus one addition) — a different unit from the frozen logical correction budget. Refuter and validation vectors execute exactly once as provider-rendered.",
+			"A materialize reviewer slot first forecasts one model run; re-submit that same exact binding with reviewerRunAcknowledged: true to authorize one host relay. Correction-plan slots require correctionLines inside the provider-issued bounds, counted in diff lines (one replaced source line is one deletion plus one addition) — a different unit from the frozen logical correction budget. A refuter or targeted-validator slot forecasts and runs the same way when the provider renders it host-mediated; an older provider's self-contained refuter/validation vector still executes exactly once as provider-rendered.",
 			"A native terminal closure or nonterminal capture returns directly. Do not expect automatic STATUS, FINALIZE, receipt, delivery, or another capture; call fresh STATUS before any next capture.",
 		],
 		parameters: REVIEW_CAPTURE_PARAMETERS,
@@ -8786,6 +8903,7 @@ function createGentleAiExtensionForTesting(
 				candidateViews,
 				((sessionKey: PendingReviewConsentSessionKey) => processRetainedNativeStatusSelections.get(sessionKey) ?? processRetainedNativeStatusSelections.set(sessionKey, new Map()).get(sessionKey)!)(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)),
 				true,
+				ctx.modelRegistry,
 			);
 			return {
 				content: [{ type: "text", text: JSON.stringify(details) }],
@@ -9022,6 +9140,10 @@ function createGentleAiExtensionForTesting(
 		const retiredSync = readAgentStartNames(event).includes("sdd-sync") || /\bSDD sync executor\b/i.test(event.systemPrompt ?? "");
 		const isSddAgent = retiredSync || isSddAgentStartEvent(event);
 		const isNamedAgent = isNamedAgentStartEvent(event);
+		oddDelegationGate.start(
+			oddSessionId(ctx),
+			!isNamedAgent && !isSddAgent && permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1",
+		);
 		const subagentDepthKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
 		if (isSddAgent || isNamedAgent) {
 			processAgentEndSubagentDepth.set(subagentDepthKey, (processAgentEndSubagentDepth.get(subagentDepthKey) ?? 0) + 1);
@@ -9131,6 +9253,7 @@ function createGentleAiExtensionForTesting(
 	// consent, or chooses a partial candidate. Durable own-mutation receipts
 	// gate STATUS and consume only the generation captured before that await.
 	pi.on("agent_end", async (_event, ctx) => {
+		oddDelegationGate.endChild(oddSessionId(ctx));
 		if (nativeReviewCli?.reviewMode === undefined || nativeReviewCli.targetStatus === undefined) return;
 		if (ctx.hasUI !== true || !reminderSessionActive) return;
 		const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
@@ -9166,6 +9289,7 @@ function createGentleAiExtensionForTesting(
 	pi.on("tool_result", (event, ctx) => {
 		if (!reminderSessionActive || event.isError !== false || (event.toolName !== "write" && event.toolName !== "edit")) return;
 		if (!isRecord(event.input) || typeof event.input.path !== "string" || !event.input.path.trim()) return;
+		oddDelegationGate.recordSuccess(oddSessionId(ctx), event.toolName, event.input, ctx.cwd);
 		try {
 			const root = resolveSessionWorktree(event.input.path, ctx.cwd)?.root;
 			if (root) recordReviewMutation(pi, ctx.sessionManager, root, { source: "direct", toolName: event.toolName, toolCallId: event.toolCallId });
@@ -9179,6 +9303,10 @@ function createGentleAiExtensionForTesting(
 			event.input,
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
+		const oddDelegationDenied = oddDelegationGate.beforeTool(
+			oddSessionId(ctx), event.toolName, event.input, ctx.cwd, readActiveToolNames(pi),
+		);
+		if (oddDelegationDenied) return oddDelegationDenied;
 		if (event.toolName === "subagent_run") {
 			const sddAgent = sddDispatchAgentName(event.input);
 			if (sddAgent === "invalid") {
@@ -9352,7 +9480,7 @@ function createGentleAiExtensionForTesting(
 	pi.registerCommand("gentle:profiles", {
 		description: "Create, switch, and manage global agent-model profiles for el Gentleman.",
 		handler: async (_args, ctx) => {
-			await handleProfilesCommand(ctx);
+			await handleProfilesCommand(ctx, pi);
 		},
 	});
 

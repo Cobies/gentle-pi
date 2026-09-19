@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync, execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext, type SlashCommandInfo, type SourceInfo } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
-import installGentleShell, { buildShellBarModel, createActiveProfileReader, changesShortcut, devBinaryCard, fetchCodexUsage, fetchNanUsage, loadFileDiff, shellGitRunner, openInExternalEditor, type GentlePromptEditor } from "../extensions/gentle-shell.ts";
+import type { TUI, TuiMouseEvent } from "@earendil-works/pi-tui";
+import installGentleShell, { buildShellBarModel, createActiveProfileReader, changesShortcut, devBinaryCard, extractQueuedText, fetchCodexUsage, fetchNanUsage, loadFileDiff, shellGitRunner, openInExternalEditor, usageShortcut, type GentlePromptEditor } from "../extensions/gentle-shell.ts";
 import { CHANGE_STATUS } from "../lib/shell-changes.ts";
 import { sidebarState, type SidebarRail } from "../lib/shell-sidebar.ts";
 import type { ShellBarTheme } from "../lib/shell-bar.ts";
@@ -53,6 +53,7 @@ interface GitScript {
 }
 
 interface CommandRegistration {
+	description?: string;
 	handler: (args: string, ctx: ExtensionContext) => Promise<void>;
 }
 
@@ -128,7 +129,7 @@ async function fire(handlers: Map<string, Array<(event: unknown, ctx: ExtensionC
 	for (const handler of handlers.get(event) ?? []) await handler({}, ctx);
 }
 
-function fakeContext(options: { hasUI?: boolean; entries?: unknown[]; oauth?: boolean; pending?: boolean; editorFactory?: unknown; token?: string } = {}): { ctx: ExtensionContext; ui: FakeUi; overlayReady: Promise<void> } {
+function fakeContext(options: { hasUI?: boolean; entries?: unknown[]; oauth?: boolean; pending?: boolean; idle?: boolean; editorFactory?: unknown; token?: string } = {}): { ctx: ExtensionContext; ui: FakeUi; overlayReady: Promise<void> } {
 	const ui: FakeUi = { footerFactory: undefined, editorFactory: options.editorFactory, widgets: new Map(), widgetSets: 0, workingVisible: undefined, notices: [], overlay: undefined, overlayView: undefined, closeOverlay: undefined };
 	let resolveOverlay: () => void;
 	const overlayReady = new Promise<void>((resolve) => { resolveOverlay = resolve; });
@@ -136,6 +137,7 @@ function fakeContext(options: { hasUI?: boolean; entries?: unknown[]; oauth?: bo
 	const ctx = {
 		hasUI: options.hasUI ?? true,
 		hasPendingMessages: () => options.pending ?? false,
+		isIdle: () => options.idle ?? true,
 		cwd: "/repo",
 		model: { id: "gpt-5.5", provider: "openai-codex", reasoning: true, contextWindow: 272_000 },
 		sessionManager: {
@@ -253,12 +255,11 @@ test("gentleShell installs the footer on session_start when a UI exists", () => 
 	assert.match(lines[0], /main ⟡ gpt-5\.5 · medium/);
 });
 
-test("the fullscreen Status rail carries a live digest so a model switch refreshes it", async () => {
+test("the fullscreen Status rail carries a live digest so a profile switch refreshes it", async () => {
 	const { pi, handlers } = fakePi();
 	let profile: string | undefined = "team";
 	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { activeProfile: () => profile });
-	const entries: unknown[] = [];
-	const { ctx, ui } = fakeContext({ entries });
+	const { ctx, ui } = fakeContext();
 	await fire(handlers, "session_start", ctx);
 
 	const statuses = new Map<string, string>();
@@ -270,7 +271,7 @@ test("the fullscreen Status rail carries a live digest so a model switch refresh
 		const rail = sidebarState(tui as unknown as TUI).parts.get("footer") as SidebarRail;
 		const live = () => rail.digest?.();
 		assert.equal(typeof rail.digest, "function", "the Status card paints live state and must declare a digest");
-		assert.match(rail.render(46).join("\n"), /gpt-5\.5/);
+		assert.doesNotMatch(rail.render(46).join("\n"), /gpt-5\.5/, "model now lives in the header, not the Status card");
 
 		assert.match(rail.render(46).join("\n"), /Profile.*team/);
 		const beforeProfile = live();
@@ -280,26 +281,79 @@ test("the fullscreen Status rail carries a live digest so a model switch refresh
 		profile = undefined;
 		assert.doesNotMatch(rail.render(46).join("\n"), /Profile/);
 
-		const beforeModel = live();
-		(ctx.model as { id: string }).id = "gpt-5.6";
-		assert.notEqual(live(), beforeModel, "/model must change the digest");
-		assert.match(rail.render(46).join("\n"), /gpt-5\.6/);
-
-		const beforeUsage = live();
-		(ctx as unknown as { getContextUsage: () => unknown }).getContextUsage = () => ({ tokens: 200_000, contextWindow: 272_000, percent: 74 });
-		assert.notEqual(live(), beforeUsage, "context usage must change the digest");
-		assert.match(rail.render(46).join("\n"), /74%/);
-
-		const beforeCost = live();
-		entries.push(assistantEntry({ input: 100, output: 20, cost: 0.42 }));
-		assert.notEqual(live(), beforeCost, "session cost must change the digest");
-		assert.match(rail.render(46).join("\n"), /\$0\.420/);
-
 		const beforeStatus = live();
 		statuses.set("mcp", "MCP: 3 servers enabled");
 		assert.notEqual(live(), beforeStatus, "extension statuses have no event and must change the digest");
 		assert.match(rail.render(46).join("\n"), /MCP: 3 servers enabled/);
 		assert.equal(live(), live(), "an unchanged digest still reuses the prepared rail");
+	} finally {
+		component.dispose();
+	}
+});
+
+test("the fullscreen header rail carries a live digest so model, context, and cost changes refresh it", async () => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" });
+	const entries: unknown[] = [];
+	const { ctx, ui } = fakeContext({ entries });
+	await fire(handlers, "session_start", ctx);
+
+	const liveFooterData = { getGitBranch: () => "main", getExtensionStatuses: () => new Map([["mcp", "MCP: 3 servers enabled"]]), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} };
+	const tui = { terminal: { rows: 40, columns: 160 }, requestRender() {} };
+	const factory = ui.footerFactory as (tui: unknown, theme: ShellBarTheme, footerData: unknown) => { render(width: number): string[]; dispose(): void };
+	const component = factory(tui, plainTheme, liveFooterData);
+	try {
+		const header = sidebarState(tui as unknown as TUI).parts.get("header") as SidebarRail;
+		assert.equal(typeof header.digest, "function", "the header paints live state every frame and must declare a digest");
+		const live = () => header.digest?.();
+		const text = () => header.render(160).join("\n");
+		assert.match(text(), /gpt-5\.5/);
+		assert.doesNotMatch(text(), /MCP: 3 servers/, "extension statuses never reach the header");
+		assert.doesNotMatch(text(), /working/i, "the working state never reaches the header");
+
+		const beforeModel = live();
+		(ctx.model as { id: string }).id = "gpt-5.6";
+		assert.notEqual(live(), beforeModel, "/model must change the header digest");
+		assert.match(text(), /gpt-5\.6/);
+
+		const beforeUsage = live();
+		(ctx as unknown as { getContextUsage: () => unknown }).getContextUsage = () => ({ tokens: 200_000, contextWindow: 272_000, percent: 74 });
+		assert.notEqual(live(), beforeUsage, "context usage must change the header digest");
+		assert.match(text(), /74%/);
+
+		const beforeCost = live();
+		entries.push(assistantEntry({ input: 100, output: 20, cost: 0.42 }));
+		assert.notEqual(live(), beforeCost, "session cost must change the header digest");
+		assert.match(text(), /\$0\.420/);
+		assert.equal(live(), live(), "an unchanged digest still reuses the prepared header");
+	} finally {
+		component.dispose();
+	}
+});
+
+test("clicking the header's usage segment opens the usage panel; other header clicks are ignored", async () => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" });
+	const { ctx, ui } = fakeContext();
+	await fire(handlers, "session_start", ctx);
+
+	const liveFooterData = { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} };
+	const tui = { terminal: { rows: 40, columns: 160 }, requestRender() {} };
+	const factory = ui.footerFactory as (tui: unknown, theme: ShellBarTheme, footerData: unknown) => { render(width: number): string[]; dispose(): void };
+	const component = factory(tui, plainTheme, liveFooterData);
+	try {
+		const header = sidebarState(tui as unknown as TUI).parts.get("header") as SidebarRail;
+		const line = header.render(160).join("");
+		const usageAt = line.indexOf("usage");
+		assert.ok(usageAt >= 0, "the header shows a standing usage segment");
+
+		const click = (x: number) => header.handleMouse?.({ type: "click", button: "left", x, y: 0, screenX: x, screenY: 0, width: 160, height: 1, shift: false, alt: false, ctrl: false } as TuiMouseEvent);
+		assert.equal(click(0), undefined, "a click on the brand does not open the panel");
+		const hit = click(usageAt + 1);
+		assert.equal(hit?.handled, true);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		assert.match(ui.overlayView!.render(90).join("\n"), /Subscriptions/);
+		ui.closeOverlay?.();
 	} finally {
 		component.dispose();
 	}
@@ -355,10 +409,15 @@ const fakeTui = { terminal: { rows: 40, columns: 120 }, requestRender() {} };
 const editorTheme = { borderColor: (text: string) => text, selectList: {} };
 const fakeKeybindings = { matches: () => false };
 
-function installedPrompt(ctx: ExtensionContext, ui: FakeUi, handlers: Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>): GentlePromptEditor {
+function installedPrompt(
+	ctx: ExtensionContext,
+	ui: FakeUi,
+	handlers: Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>,
+	keybindings: unknown = fakeKeybindings,
+): GentlePromptEditor {
 	for (const handler of handlers.get("session_start") ?? []) handler({}, ctx);
 	const factory = ui.editorFactory as (tui: unknown, theme: unknown, keybindings: unknown) => GentlePromptEditor;
-	return factory(fakeTui, editorTheme, fakeKeybindings);
+	return factory(fakeTui, editorTheme, keybindings);
 }
 
 test("gentleShell frames the editor with the petal prompt and a hint while empty", () => {
@@ -440,6 +499,673 @@ test("prompt uses the compact banner cadence and releases its unref timer at set
 	assert.equal(active, 0);
 });
 
+// ---------------------------------------------------------------------------
+// double-esc-cancel (issue #1163): opt-in, off by default. While the prompt
+// is working and autocomplete is hidden, the first Esc is swallowed and the
+// frame shows a hint; a second Esc within the window falls through to
+// CustomEditor's own handleInput so Pi's onEscape performs the abort exactly
+// as it always has. Idle double-Esc (tree/fork), bash-mode Esc, and
+// autocomplete cancel live entirely in Pi's own onEscape/CustomEditor and are
+// untouched by this gate.
+// ---------------------------------------------------------------------------
+
+const escapeKeybindings = { matches: (_data: string, keybinding: string) => keybinding === "app.interrupt" };
+
+test("double-esc-cancel default off: a single Esc while working still aborts immediately, exactly as before", (t) => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 1);
+	assert.doesNotMatch(stripAnsi(editor.render(60).join("\n")), /esc again to cancel/);
+	editor.dispose();
+});
+
+function scopedDoubleEscCancelConfigHome(t: { after(callback: () => void): void }): string {
+	const configHome = mkdtempSync(join(tmpdir(), "gp-esc-cfg-"));
+	t.after(() => rmSync(configHome, { recursive: true, force: true }));
+	return configHome;
+}
+
+test("double-esc-cancel enabled: the first Esc while working is swallowed and shows the hint instead of aborting", (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_DOUBLE_ESC_CANCEL: "on", GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 0, "the first Esc must be swallowed, not aborted");
+	assert.match(stripAnsi(editor.render(60).join("\n")), /esc again to cancel/);
+	editor.dispose();
+});
+
+test("double-esc-cancel enabled: a second Esc within the window falls through and aborts, clearing the hint", (t) => {
+	let now = 1_000_000;
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_DOUBLE_ESC_CANCEL: "on", GENTLE_PI_CONFIG_HOME: configHome }, { now: () => now });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 0);
+	now += 500;
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 1, "the second Esc within the window must fall through to abort");
+	assert.doesNotMatch(stripAnsi(editor.render(60).join("\n")), /esc again to cancel/);
+	editor.dispose();
+});
+
+test("double-esc-cancel enabled: an Esc after the window expires is a fresh first press, not an abort", (t) => {
+	let now = 1_000_000;
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_DOUBLE_ESC_CANCEL: "on", GENTLE_PI_CONFIG_HOME: configHome }, { now: () => now });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 0);
+	now += 1001;
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 0, "the window expired, so this must be treated as a new first press");
+	assert.match(stripAnsi(editor.render(60).join("\n")), /esc again to cancel/);
+	editor.dispose();
+});
+
+test("double-esc-cancel enabled: Esc while idle passes straight through, untouched by this gate", (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_DOUBLE_ESC_CANCEL: "on", GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	// agent_start never fired: the prompt stays idle.
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 1, "idle Esc must be unaffected by the policy");
+	editor.dispose();
+});
+
+test("double-esc-cancel enabled: Esc while autocomplete is visible bypasses this gate entirely", (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_DOUBLE_ESC_CANCEL: "on", GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	(editor as unknown as { isShowingAutocomplete(): boolean }).isShowingAutocomplete = () => true;
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	assert.doesNotMatch(stripAnsi(editor.render(60).join("\n")), /esc again to cancel/, "autocomplete must bypass the gate, matching CustomEditor's own guard");
+	editor.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Working-cancel keeps the queue moving (issue #1218). Pi's own onEscape
+// restores `[queuedText, currentText].filter(t => t.trim()).join("\n\n")`
+// into the editor and aborts. These tests fake that join in `onEscape` (the
+// same seam the double-esc-cancel tests above use), then check that the
+// user's own draft is all that is left in the editor and that the queued
+// text is sent exactly once, after the aborted run settles.
+// ---------------------------------------------------------------------------
+
+test("extractQueuedText reverses Pi's queued+draft join", () => {
+	assert.equal(extractQueuedText("follow up\n\ndraft reply", "draft reply"), "follow up");
+	assert.equal(extractQueuedText("draft reply", "draft reply"), "", "no queue: the join degenerates to the draft alone");
+	assert.equal(extractQueuedText("only queued", ""), "only queued", "empty draft: the join degenerates to the queue alone");
+	assert.equal(extractQueuedText("", ""), "", "both empty");
+	assert.equal(extractQueuedText("unrelated text", "draft reply"), undefined, "a shape that does not match the join is unrecognized, not an empty queue: Pi's own text must win, not be discarded");
+});
+
+test("extractQueuedText treats a whitespace-only draft as empty, matching Pi's own trim filter", () => {
+	assert.equal(extractQueuedText("only queued", "   "), "only queued", "a whitespace-only draft never survives Pi's filter, so the whole join is the queue");
+	assert.equal(extractQueuedText("", "   "), "", "whitespace-only draft with no queue is still no queue, not unrecognized");
+});
+
+test("working cancel: an aborted turn with a queued message sends it once settled and keeps the draft", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.onEscape = () => { editor.setText(`follow up\n\n${editor.getText()}`); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	assert.equal(editor.getText(), "draft reply", "the user's own draft stays in the editor");
+	assert.equal(sentMessages.length, 0, "nothing is sent until the aborted run settles");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.deepEqual(sentMessages.map((m) => m.content), ["follow up"]);
+	editor.dispose();
+});
+
+test("working cancel: an aborted turn with no queued messages behaves exactly as before, with no redundant setText", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	// Pi's own onEscape restore is the one real setText call on this path
+	// (it always writes the combined text, even when that equals the
+	// draft); the spy below counts every call, so it must see only that one
+	// and none added by abortAndDispatchQueued itself.
+	editor.onEscape = () => { editor.setText(editor.getText()); };
+	let setTextCalls = 0;
+	const originalSetText = editor.setText.bind(editor);
+	(editor as unknown as { setText(text: string): void }).setText = (text: string) => { setTextCalls++; originalSetText(text); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	assert.equal(setTextCalls, 1, "the no-queue path must not add its own write on top of Pi's own restore");
+	assert.equal(editor.getText(), "draft reply");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.equal(sentMessages.length, 0, "an empty queue must never trigger a send");
+	editor.dispose();
+});
+
+test("working cancel: an unrecognized restore shape leaves Pi's own text untouched and dispatches nothing", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	// Simulates a future Pi restore shape this code does not recognize.
+	editor.onEscape = () => { editor.setText("an unrecognized shape"); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	assert.equal(editor.getText(), "an unrecognized shape", "Pi's own restore wins on a shape mismatch; nothing here overwrites it");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.equal(sentMessages.length, 0, "an unrecognized shape must never be dispatched as if it were queued text");
+	editor.dispose();
+});
+
+test("working cancel: an empty draft with a queued message sends the whole queue and leaves the editor empty", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.onEscape = () => { editor.setText("only queued"); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	assert.equal(editor.getText(), "", "an empty draft stays empty");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.deepEqual(sentMessages.map((m) => m.content), ["only queued"]);
+	editor.dispose();
+});
+
+test("working cancel: the same dispatch applies to the confirming second Esc when double-esc-cancel is enabled", (t) => {
+	let now = 1_000_000;
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_DOUBLE_ESC_CANCEL: "on", GENTLE_PI_CONFIG_HOME: configHome }, { now: () => now });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.onEscape = () => { editor.setText(`follow up\n\n${editor.getText()}`); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	now += 500;
+	editor.handleInput("\x1b");
+	assert.equal(editor.getText(), "draft reply");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.deepEqual(sentMessages.map((m) => m.content), ["follow up"]);
+	editor.dispose();
+});
+
+test("working cancel: queued text is never sent twice even if agent_settled fires again", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.onEscape = () => { editor.setText(`follow up\n\n${editor.getText()}`); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.deepEqual(sentMessages.map((m) => m.content), ["follow up"]);
+	editor.dispose();
+});
+
+test("working cancel: a new agent_start before the aborted run settles keeps the pending text and sends it once that turn settles", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.onEscape = () => { editor.setText(`follow up\n\n${editor.getText()}`); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	// The user sent the draft (or another turn started) before the aborted
+	// run's own agent_settled fired. Nothing is sent from inside agent_start:
+	// Pi is mid-turn there, so the text waits for that turn to settle.
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	assert.equal(sentMessages.length, 0, "never send from inside agent_start");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.deepEqual(sentMessages.map((m) => ({ content: m.content, deliverAs: m.options?.deliverAs })), [{ content: "follow up", deliverAs: undefined }]);
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.equal(sentMessages.length, 1, "the pending text must not be delivered a second time");
+	editor.dispose();
+});
+
+test("working cancel: a whitespace-only recognized queue is treated as no queue and never dispatched", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.onEscape = () => { editor.setText(`   \n\n${editor.getText()}`); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.equal(sentMessages.length, 0, "whitespace is not a message");
+	assert.equal(editor.getText(), "draft reply", "the recognized whitespace prefix is stripped and the draft comes back alone");
+	editor.dispose();
+});
+
+test("working cancel: a failing sendUserMessage on settle is reported, not thrown, and the prompt still leaves the working state", (t) => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.onEscape = () => { editor.setText(`follow up\n\n${editor.getText()}`); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	(pi as unknown as { sendUserMessage: (content: string) => void }).sendUserMessage = () => { throw new Error("session is switching"); };
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.ok(ui.notices.some((notice) => /session is switching/.test(notice)), "the failure surfaces as a notice");
+	assert.equal(editor.getText(), "follow up\n\ndraft reply", "the queued text is put back in front of the draft, exactly as Pi's own restore would have left it");
+	assert.doesNotMatch(stripAnsi(editor.render(60).join("\n")), /esc again to cancel/, "the prompt is idle again");
+	editor.dispose();
+});
+
+test("working cancel: a failing send reported through a context without UI still restores the queued text into the editor", (t) => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const headless = fakeContext({ hasUI: false });
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.onEscape = () => { editor.setText(`follow up\n\n${editor.getText()}`); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	(pi as unknown as { sendUserMessage: (content: string) => void }).sendUserMessage = () => { throw new Error("session is switching"); };
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, headless.ctx);
+	assert.equal(headless.ui.notices.length, 0, "no UI, no notice");
+	assert.equal(editor.getText(), "follow up\n\ndraft reply", "with or without a UI to tell the user, the text is never dropped");
+	editor.dispose();
+});
+
+test("working cancel: agent_settled never sends while another turn is still in flight; the text waits for an idle settle", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const busy = fakeContext({ idle: false }).ctx;
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.onEscape = () => { editor.setText(`follow up\n\n${editor.getText()}`); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, busy);
+	assert.equal(sentMessages.length, 0, "a settle reported while not idle must not inject the text mid-turn");
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 1, "a run is still in flight, so the prompt stays working and Esc takes the cancel path");
+	assert.doesNotMatch(stripAnsi(editor.render(60).join("\n")), /esc again to clear/, "not the idle clear");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.deepEqual(sentMessages.map((m) => m.content), ["follow up"]);
+	editor.dispose();
+});
+
+test("working cancel: two aborts before an idle settle deliver both queued texts, in order, as one message", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const busy = fakeContext({ idle: false }).ctx;
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	let aborts = 0;
+	editor.onEscape = () => { aborts++; editor.setText(aborts === 1 ? "first" : "second"); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, busy);
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.deepEqual(sentMessages.map((m) => m.content), ["first\n\nsecond"], "nothing from the first abort is lost, and order is preserved");
+	editor.dispose();
+});
+
+test("working cancel: pending queued text never crosses a session boundary", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.onEscape = () => { editor.setText(`follow up\n\n${editor.getText()}`); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	for (const handler of handlers.get("session_shutdown") ?? []) handler({}, ctx);
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.equal(sentMessages.length, 0, "the old session's queued text must not be sent into the next session");
+});
+
+test("working cancel: agent_settled firing first delivers the pending text without a deliverAs override", (t) => {
+	const { pi, handlers, sentMessages } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.onEscape = () => { editor.setText(`follow up\n\n${editor.getText()}`); };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
+	assert.deepEqual(sentMessages.map((m) => ({ content: m.content, deliverAs: m.options?.deliverAs })), [{ content: "follow up", deliverAs: undefined }]);
+	// The next turn's own agent_start must not re-deliver the already-sent text.
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	assert.equal(sentMessages.length, 1);
+	editor.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Idle double-Esc clears the draft (issue #1218). With the prompt idle,
+// autocomplete hidden, and a non-empty draft, a first Esc shows a hint
+// instead of doing nothing; a second Esc within 500ms adds the draft to
+// history and clears it. An empty editor, autocomplete, or the working state
+// are all untouched: Pi's own idle double-Esc (tree/fork) and the
+// working-cancel gate above keep deciding those cases.
+// ---------------------------------------------------------------------------
+
+test("idle draft: the first Esc shows the clear hint and keeps the text", (t) => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 0, "the first Esc must be swallowed, not passed to Pi's own idle handler");
+	assert.equal(editor.getText(), "draft reply");
+	assert.match(stripAnsi(editor.render(60).join("\n")), /esc again to clear/);
+	editor.dispose();
+});
+
+test("idle draft: a second Esc within the window adds the draft to history and clears it", (t) => {
+	let now = 1_000_000;
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) }, { now: () => now });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	const history: string[] = [];
+	(editor as unknown as { addToHistory(text: string): void }).addToHistory = (text: string) => history.push(text);
+	editor.handleInput("\x1b");
+	now += 400;
+	editor.handleInput("\x1b");
+	assert.deepEqual(history, ["draft reply"]);
+	assert.equal(editor.getText(), "");
+	assert.doesNotMatch(stripAnsi(editor.render(60).join("\n")), /esc again to clear/);
+	editor.dispose();
+});
+
+test("idle draft: an Esc after the window expires is a fresh first press, not a clear", (t) => {
+	let now = 1_000_000;
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) }, { now: () => now });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.handleInput("\x1b");
+	now += 501;
+	editor.handleInput("\x1b");
+	assert.equal(editor.getText(), "draft reply", "the window expired, so this is a new first press, not a clear");
+	assert.match(stripAnsi(editor.render(60).join("\n")), /esc again to clear/);
+	editor.dispose();
+});
+
+test("idle empty editor: Esc passes straight through to Pi's own tree/fork double-Esc", (t) => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 1, "an empty editor must be untouched by the idle-clear gate");
+	editor.dispose();
+});
+
+test("idle draft: Esc while autocomplete is visible bypasses the idle-clear gate", (t) => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	(editor as unknown as { isShowingAutocomplete(): boolean }).isShowingAutocomplete = () => true;
+	editor.handleInput("\x1b");
+	assert.equal(editor.getText(), "draft reply", "autocomplete cancel must never clear the draft");
+	assert.doesNotMatch(stripAnsi(editor.render(60).join("\n")), /esc again to clear/, "autocomplete must bypass the idle-clear gate, matching CustomEditor's own guard");
+	editor.dispose();
+});
+
+test("working state: a non-empty draft's Esc is decided by the working-cancel gate, never the idle-clear hint", (t) => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.onEscape = () => { editor.setText(editor.getText()); };
+	editor.handleInput("\x1b");
+	assert.doesNotMatch(stripAnsi(editor.render(60).join("\n")), /esc again to clear/, "working must never show the idle-clear hint");
+	editor.dispose();
+});
+
+test("idle draft: editing the text between two Esc presses starts a fresh clear window instead of clearing the edit away", (t) => {
+	let now = 1_000_000;
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) }, { now: () => now });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("draft reply");
+	editor.handleInput("\x1b");
+	editor.setText("draft reply, edited");
+	assert.doesNotMatch(stripAnsi(editor.render(60).join("\n")), /esc again to clear/, "the edit invalidates the pending clear, so the hint goes away with it");
+	now += 400;
+	editor.handleInput("\x1b");
+	assert.equal(editor.getText(), "draft reply, edited", "an edit invalidates the earlier snapshot, so this must not clear");
+	assert.match(stripAnsi(editor.render(60).join("\n")), /esc again to clear/, "the edit starts a fresh first press, with its own hint");
+	now += 400;
+	editor.handleInput("\x1b");
+	assert.equal(editor.getText(), "", "the fresh window's own second Esc, on the unchanged edited text, does clear");
+	editor.dispose();
+});
+
+test("idle draft: typing and deleting between two Esc presses still invalidates the pending clear", (t) => {
+	let now = 1_000_000;
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) }, { now: () => now });
+	const { ctx, ui } = fakeContext();
+	// Esc-only matching: ordinary keystrokes must reach the editor as text.
+	const preciseEscape = { matches: (data: string, keybinding: string) => keybinding === "app.interrupt" && data === "\x1b" };
+	const editor = installedPrompt(ctx, ui, handlers, preciseEscape);
+	editor.setText("draft reply");
+	editor.handleInput("\x1b");
+	editor.handleInput("x");
+	editor.handleInput("\x7f");
+	assert.equal(editor.getText(), "draft reply", "type then backspace lands on the same text");
+	now += 400;
+	editor.handleInput("\x1b");
+	assert.equal(editor.getText(), "draft reply", "an intervening keystroke invalidates the confirmation even when the text ends up identical");
+	editor.dispose();
+});
+
+test("idle draft: a bash-mode draft's Esc bypasses the idle-clear gate entirely", (t) => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("!ls");
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 1, "a bash-mode draft's first Esc must reach Pi's own bash-mode onEscape, which clears bash mode");
+	assert.equal(editor.getText(), "!ls", "this gate never touches bash-mode text; Pi's own onEscape owns it");
+	assert.doesNotMatch(stripAnsi(editor.render(60).join("\n")), /esc again to clear/, "bash mode must bypass the idle-clear gate, matching Pi's own bash-mode Esc");
+	editor.dispose();
+});
+
+test("idle draft: a bash-mode draft with leading whitespace still bypasses the idle-clear gate", (t) => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: scopedDoubleEscCancelConfigHome(t) });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	editor.setText("  !ls");
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 1, "Pi detects bash mode from the trimmed start of the text, so this gate must match the same rule");
+	editor.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// /gentle:double-esc-cancel (issue #1163). Unlike /gentle:background-subagents,
+// no argument toggles the effective policy rather than merely reporting it.
+// ---------------------------------------------------------------------------
+
+test("gentle:double-esc-cancel is registered and declares user-initiated sub-actions with a toggling no-argument form", () => {
+	const { pi, commands } = fakePi();
+	gentleShell(pi, {});
+	const command = commands.get("gentle:double-esc-cancel");
+	assert.ok(command, "gentle:double-esc-cancel must be registered");
+	assert.match(command!.description ?? "", /status\|enable\|disable/);
+	assert.match(command!.description ?? "", /no argument toggles/);
+});
+
+test("gentle:double-esc-cancel status reports off by default and writes nothing", async (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	await commands.get("gentle:double-esc-cancel")!.handler("status", ctx);
+	assert.equal(ui.notices.length, 1);
+	assert.match(ui.notices[0]!, /^double-esc-cancel: off \(decided by built-in default\)/);
+	assert.equal(existsSync(join(configHome, "double-esc-cancel.json")), false);
+});
+
+test("gentle:double-esc-cancel enable writes the global file, reports it, and takes effect immediately", async (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	await commands.get("gentle:double-esc-cancel")!.handler("enable", ctx);
+	assert.match(ui.notices[0]!, /^double-esc-cancel: on \(decided by global file/);
+	assert.match(ui.notices[0]!, /Wrote on to the global file/);
+	assert.deepEqual(
+		JSON.parse(readFileSync(join(configHome, "double-esc-cancel.json"), "utf8")),
+		{ schema: "gentle-pi.double-esc-cancel/v1", policy: "on" },
+	);
+});
+
+test("gentle:double-esc-cancel disable writes off", async (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	await commands.get("gentle:double-esc-cancel")!.handler("enable", ctx);
+	await commands.get("gentle:double-esc-cancel")!.handler("disable", ctx);
+	assert.match(ui.notices[1]!, /^double-esc-cancel: off \(decided by global file/);
+	assert.deepEqual(
+		JSON.parse(readFileSync(join(configHome, "double-esc-cancel.json"), "utf8")),
+		{ schema: "gentle-pi.double-esc-cancel/v1", policy: "off" },
+	);
+});
+
+test("gentle:double-esc-cancel with no argument toggles the effective policy each time", async (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	await commands.get("gentle:double-esc-cancel")!.handler("", ctx);
+	assert.match(ui.notices[0]!, /^double-esc-cancel: on /, "off -> on on the first toggle");
+	await commands.get("gentle:double-esc-cancel")!.handler("", ctx);
+	assert.match(ui.notices[1]!, /^double-esc-cancel: off /, "on -> off on the second toggle");
+});
+
+test("gentle:double-esc-cancel reports a malformed global file as fail-closed, not as an ordinary off", async (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	mkdirSync(configHome, { recursive: true });
+	writeFileSync(join(configHome, "double-esc-cancel.json"), "{malformed");
+	const { pi, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	await commands.get("gentle:double-esc-cancel")!.handler("status", ctx);
+	assert.match(ui.notices[0]!, /present but malformed/);
+});
+
+test("gentle:double-esc-cancel an unknown sub-action warns and changes nothing", async (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	await commands.get("gentle:double-esc-cancel")!.handler("toggle", ctx);
+	assert.match(ui.notices[0]!, /Unknown \/gentle:double-esc-cancel sub-action "toggle"/);
+	assert.equal(existsSync(join(configHome, "double-esc-cancel.json")), false);
+});
+
+test("gentle:double-esc-cancel enable updates the in-memory policy so an already-installed prompt picks it up without re-reading the file", async (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, handlers, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 1, "off by default: the first Esc still aborts");
+	await commands.get("gentle:double-esc-cancel")!.handler("enable", ctx);
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 1, "now on: the same prompt instance must swallow the first Esc instead of aborting");
+	assert.match(stripAnsi(editor.render(60).join("\n")), /esc again to cancel/);
+	editor.dispose();
+});
+
+test("gentle:double-esc-cancel re-syncs the keypress gate from the global file so status, toggle direction, and Esc behavior agree", async (t) => {
+	const configHome = scopedDoubleEscCancelConfigHome(t);
+	const { pi, handlers, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
+	const { ctx, ui } = fakeContext();
+	const editor = installedPrompt(ctx, ui, handlers, escapeKeybindings);
+	let aborted = 0;
+	editor.onEscape = () => { aborted++; };
+	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+	// Another session (or a hand edit) turns the preference on underneath this one.
+	mkdirSync(configHome, { recursive: true });
+	writeFileSync(join(configHome, "double-esc-cancel.json"), JSON.stringify({ schema: "gentle-pi.double-esc-cancel/v1", policy: "on" }));
+	await commands.get("gentle:double-esc-cancel")!.handler("status", ctx);
+	assert.match(ui.notices[0]!, /^double-esc-cancel: on \(decided by global file/);
+	editor.handleInput("\x1b");
+	assert.equal(aborted, 0, "status reported on, so the gate must swallow the first Esc rather than abort");
+	assert.match(stripAnsi(editor.render(60).join("\n")), /esc again to cancel/);
+	// The no-argument toggle flips relative to that same on-disk value: on -> off.
+	await commands.get("gentle:double-esc-cancel")!.handler("", ctx);
+	assert.match(ui.notices[1]!, /^double-esc-cancel: off /);
+	assert.deepEqual(JSON.parse(readFileSync(join(configHome, "double-esc-cancel.json"), "utf8")), { schema: "gentle-pi.double-esc-cancel/v1", policy: "off" });
+	editor.dispose();
+});
+
 test("gentleShell leaves an editor another extension already installed", () => {
 	const { pi, handlers } = fakePi();
 	gentleShell(pi, {});
@@ -508,6 +1234,15 @@ test("captured changes update the widget and bar without repository scans", asyn
  await fire(handlers,"session_shutdown",ctx);
 });
 
+
+// The changes overlay may ask Git for each captured root's HEAD label, and
+// nothing else: no status, diff, numstat or worktree scan behind the user's
+// back. Labelling is metadata, scanning is the behaviour these tests forbid.
+const onlyHeadLabels = (git: readonly string[][]) => git.every((args) => {
+ const command = args[0] === "-C" ? args.slice(2) : args;
+ return command[0] === "symbolic-ref" || (command[0] === "rev-parse" && command.includes("--verify"));
+});
+
 test("Changes opens only for captured mutations, not registered dirty roots", async () => {
  const {pi,handlers,commands,tools,git}=fakePi();
  gentleShell(pi,{});
@@ -522,7 +1257,7 @@ test("Changes opens only for captured mutations, not registered dirty roots", as
  const opened=commands.get("gentle:changes")!.handler("",ctx);
  await overlayReady;
  assert.match(ui.overlayView!.render(140).join("\n"),/linked/);
- assert.equal(git.length,0);
+ assert.ok(onlyHeadLabels(git), `overlay ran more than HEAD labelling: ${JSON.stringify(git)}`);
  ui.closeOverlay?.(); await opened;
  await fire(handlers,"session_shutdown",ctx);
 });
@@ -545,7 +1280,7 @@ test("overlay groups captured roots and refreshes same-count diffs without HEAD 
   await new Promise(resolve=>setTimeout(resolve,20));
   assert.match(ui.overlayView!.render(140).join("\n"),/second/);
   assert.doesNotMatch(ui.overlayView!.render(140).join("\n"),/first/);
-  assert.equal(git.length,0);
+  assert.ok(onlyHeadLabels(git), `overlay ran more than HEAD labelling: ${JSON.stringify(git)}`);
  } finally { ui.closeOverlay?.(); await opened; await fire(handlers,"session_shutdown",ctx); }
 });
 
@@ -891,6 +1626,32 @@ test("gentleShell registers /gentle:usage and opens the subscriptions overlay", 
 	await opened;
 });
 
+test("usageShortcut defaults to alt+u and can be overridden or disabled", () => {
+	assert.equal(usageShortcut({}), "alt+u");
+	assert.equal(usageShortcut({ GENTLE_PI_SHELL_USAGE_KEY: "ctrl+shift+u" }), "ctrl+shift+u");
+	assert.equal(usageShortcut({ GENTLE_PI_SHELL_USAGE_KEY: "off" }), undefined);
+	assert.equal(usageShortcut({ GENTLE_PI_SHELL_USAGE_KEY: "" }), undefined);
+});
+
+test("gentleShell binds the usage shortcut to the same handler as /gentle:usage", async () => {
+	const { pi, handlers, shortcuts } = fakePi();
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { fetch: fakeFetch().fetchFn, now: () => 1_788_600_000_000 });
+	const { ctx, ui } = fakeContext({ token: JWT });
+	await fire(handlers, "session_start", ctx);
+	const shortcut = shortcuts.get("alt+u");
+	assert.ok(shortcut, "alt+u not registered");
+	const opened = shortcut.handler(ctx);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	const plain = ui.overlayView!.render(90).map(stripAnsi);
+	assert.match(plain[0], /Subscriptions/);
+	ui.closeOverlay?.();
+	await opened;
+
+	const silent = fakePi();
+	gentleShell(silent.pi, { GENTLE_PI_SHELL_USAGE_KEY: "off" });
+	assert.equal(silent.shortcuts.has("alt+u"), false, "the usage shortcut must not register when disabled");
+});
+
 test("gentleShell draws the review preflight message as a Gentle card", () => {
 	const { pi } = fakePi();
 	gentleShell(pi, {});
@@ -907,6 +1668,17 @@ test("gentleShell draws the review preflight message as a Gentle card", () => {
 	assert.ok(expanded.some((line) => line.includes("gentle_review")));
 	const collapsed = renderer({ ...message, content: [{ type: "text", text: message.content }] }, { expanded: false }, plainTheme).render(80).map(stripAnsi);
 	assert.equal(collapsed.length, 3);
+});
+
+test("the review preflight card paints the rose INFO frame (border) and title (accent)", () => {
+	const { pi } = fakePi();
+	gentleShell(pi, {});
+	const renderer = renderers.get("gentle-pi.review-preflight")!;
+	const taggedTheme = { ...plainTheme, fg: (color: string, text: string) => `<${color}>${text}</${color}>` };
+	const message = { customType: "gentle-pi.review-preflight", content: "Receipt-driven development is enabled." };
+	const lines = renderer(message, { expanded: true }, taggedTheme).render(60);
+	assert.match(lines[0]!, /^<border>╭<\/border>/);
+	assert.match(lines[0]!, /<accent>✿ Gentle AI<\/accent>/);
 });
 
 test("gentleShell keeps a dev-binary override visible above the editor for the whole session", async () => {
