@@ -17,6 +17,7 @@ import { invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
 import { createCompletionQueue } from "../lib/agents-completion-delivery.ts";
 import { AGENT_MODE, discoverAgents, parseAgentDefinition, loadAgentsConfig, resolveAgentProfile, withPinnedModelProfiles, type AgentDefinition, type AgentMode } from "../lib/agents-config.ts";
 import { resolveBackgroundSubagentsPolicy } from "../lib/background-subagents-policy.ts";
+import { installBackgroundCacheWarming } from "../lib/background-cache-warming.ts";
 import { isFinished, TASK_EVENT, TASK_STATUS, TaskStore, type AskRequest, type TaskRecord } from "../lib/agents-protocol.ts";
 import { AgentRunner, piCommand, abortReasonText, plannedCommands, type RemediationPlan, type RemediationScope, REMEDIATION_PLAN_ENV, parseRemediationPlan, type AskAnswer, type RunnerDeps, type SddChangeSelection, type TaskRequest } from "../lib/agents-runner.ts";
 import { ChildMessenger, type IpcEndpoint } from "../lib/agents-messaging.ts";
@@ -530,6 +531,12 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	// started before /new or /resume stays in the store and comes back with
 	// its session. Before the first session_start there is nothing to scope by.
 	const activeSessionId = (): string | undefined => (sessions === undefined ? undefined : sessions.getSessionId() ?? "");
+	// Pi 0.86.1 adds this event; the package's pinned 0.85.1 types predate it.
+	installBackgroundCacheWarming(pi as unknown as Parameters<typeof installBackgroundCacheWarming>[0], () => ({
+		sessionId: activeSessionId(),
+		ownedTaskIds,
+		tasks: store.list(activeSessionId()),
+	}));
 	const visibleTasks = (): TaskRecord[] => store.list(activeSessionId());
 	type SessionTransport = { generation: number; sessionId: string; sessionManager: ExtensionContext["sessionManager"]; client: SessionTransportClient; listener: SessionTransportListener; registry: SessionTransportRegistry; close(): Promise<void> };
 	let transportGeneration = 0;
@@ -1169,7 +1176,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		if (observe) metricTasks.set(task.id, metrics);
 		ownedTaskIds.add(task.id);
 		store.subscribe(task.id, () => { publishActivity(); requestRender(); });
-		if (request.mode === AGENT_MODE.BACKGROUND) return text(`Started ${task.agent} in the background as task ${task.id}. Results are delivered automatically to this session when settled. End your turn now; do not poll subagent_status or subagent_result.`, taskDetails(task));
+		if (request.mode === AGENT_MODE.BACKGROUND) return text(`Started ${task.agent} in the background as task ${task.id}. Retain that id; completion is pushed automatically. Results are delivered automatically to this session when settled. End your turn now; never sleep or periodically poll subagent_status/subagent_result for completion or cache maintenance. Inspect status only at a real orchestration decision boundary; never relaunch equivalent queued/running work.`, taskDetails(task));
 
 		let unsubscribeUpdates: (() => void) | undefined;
 		if (onUpdate) {

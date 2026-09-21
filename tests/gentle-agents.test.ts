@@ -147,8 +147,10 @@ function fakePi() {
 		await fire("session_shutdown", ctx, { reason: "quit" });
 	};
 	const fire = async (event: string, ctx: ExtensionContext, payload: unknown = {}) => {
+		const results: unknown[] = [];
 		try {
-			for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
+			for (const handler of handlers.get(event) ?? []) results.push(await handler(payload, ctx));
+			return results;
 		} finally {
 			if (event === "session_start") {
 				activeSession = ctx;
@@ -236,6 +238,73 @@ function deps(): { deps: Partial<AgentsDeps>; children: FakeChild[]; spawned: st
 		},
 	};
 }
+
+test("cache warming follows actual Gentle Agents ownership and completion lifecycle", async (t) => {
+	const h = fakePi();
+	const runtime = deps();
+	let store: TaskStore | undefined;
+	const list = TaskStore.prototype.list;
+	t.mock.method(TaskStore.prototype, "list", function (this: TaskStore, ...args: Parameters<TaskStore["list"]>) {
+		store = this;
+		return list.apply(this, args);
+	});
+	const scheduled = t.mock.fn(() => () => {});
+	runtime.deps.schedule = scheduled;
+	gentleAgents(h.pi, {}, runtime.deps);
+	const { ctx } = fakeContext();
+	let sessionId = "warming-parent";
+	ctx.sessionManager.getSessionId = () => sessionId;
+	await h.fire("session_start", ctx);
+	const candidate = { type: "cache_warming_decision", warmCost: 0.01, missCost: 0.1, continuationProbability: 0.15, action: "stop" };
+	const run = t.mock.method(AgentRunner.prototype, "run");
+	const status = t.mock.method(h.tools.get("subagent_status")!, "execute");
+	const result = t.mock.method(h.tools.get("subagent_result")!, "execute");
+	const decide = async (expected: unknown) => {
+		const before = [runtime.spawned.length, run.mock.callCount(), scheduled.mock.callCount(), status.mock.callCount(), result.mock.callCount()];
+		const sent = [...h.sent], entries = [...h.entries];
+		const childTraffic = runtime.children.map(child => JSON.stringify([child.written, child.sent, child.killed]));
+		const timeout = t.mock.method(globalThis, "setTimeout");
+		const interval = t.mock.method(globalThis, "setInterval");
+		try {
+			assert.deepEqual(await h.fire("cache_warming_decision", ctx, candidate), [expected]);
+			assert.equal(timeout.mock.callCount(), 0);
+			assert.equal(interval.mock.callCount(), 0);
+		} finally { timeout.mock.restore(); interval.mock.restore(); }
+		assert.deepEqual([runtime.spawned.length, run.mock.callCount(), scheduled.mock.callCount(), status.mock.callCount(), result.mock.callCount()], before);
+		assert.deepEqual(h.sent, sent, "no maintenance or duplicate completion message");
+		assert.deepEqual(h.entries, entries, "no maintenance context entry");
+		assert.deepEqual(runtime.children.map(child => JSON.stringify([child.written, child.sent, child.killed])), childTraffic, "no child inspection, steering, or cancellation");
+	};
+	await decide(undefined);
+	const launch = await h.tools.get("subagent_run")!.execute("warming-launch", { agent: "explore", task: "Map warming", mode: "background" }, undefined, undefined, ctx);
+	await tick();
+	const taskId = (launch.details.gentleAgents as { taskId: string }).taskId;
+	assert.equal(runtime.children.length, 1);
+	await decide({ action: "warm" });
+	// The same live owned child is foreign when the active session changes.
+	sessionId = "other-parent";
+	await decide(undefined);
+	sessionId = "warming-parent";
+	await decide({ action: "warm" });
+	runtime.children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "mapped" }] }] });
+	await tick();
+	await decide({ action: "warm" });
+	assert.equal(h.sent.length, 0, "agent_end is not settlement");
+	runtime.children[0].emit({ type: "agent_settled" });
+	await tick();
+	await decide(undefined);
+	assert.equal(h.sent.length, 1);
+	assert.equal(h.sent[0].message.customType, "gentle-agents.result");
+	assert.match(JSON.stringify(h.sent[0].message), new RegExp(taskId));
+	assert.equal(h.sent[0].options.triggerTurn, true);
+	assert.equal(run.mock.callCount(), 1, "warming never launches equivalent work");
+	// Seed the actual history-restore path with a stale live-looking record:
+	// sharing the parent ID and running status must not confer ownership.
+	assert.equal(store!.restore({ ...store!.get(taskId)!, id: "warming-restored", status: TASK_STATUS.RUNNING }, emptyThread()), true);
+	await decide(undefined);
+	await h.fire("session_shutdown", ctx);
+	await decide(undefined);
+});
 
 const PRINT_BACKGROUND_ERROR = "Background subagents are unavailable in print mode: pi -p exits before a parent session can receive results. Use task mode, RPC mode, or interactive Pi.";
 
@@ -1838,7 +1907,7 @@ test("default Node spawn adapter distinguishes IPC-only and permission-capable c
 			const { ctx } = fakeContext();
 			(ctx.sessionManager as unknown as { getCwd(): string }).getCwd = () => sessionCwd;
 			await h.fire("session_start", ctx);
-			shutdown.push(() => h.fire("session_shutdown", ctx));
+			shutdown.push(async () => { await h.fire("session_shutdown", ctx); });
 			return { h, ctx, result: h.tools.get("subagent_run")!.execute(`spawn-${mode}`, { agent: "explore", task: `Capture ${mode}`, mode }, undefined, undefined, ctx) };
 		};
 		const task = await launch("task", { PATH: "/bin", FIXTURE: "task" });

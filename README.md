@@ -75,7 +75,7 @@
 ### gentle-shell — Your coding agent, in the workspace you lead
 
 <p align="center">
-  <img src="docs/assets/features/gentle-shell.png" width="1200" alt="gentle-shell showing an SDD agent task, todo list, changes summary, status bar, and usage footer in Pi">
+<img width="1869" height="959" alt="image" src="https://github.com/user-attachments/assets/5d9eefc2-7b2a-48f8-b212-1439834ce195" />
 </p>
 
 <strong>A complete workspace for the agent you direct.</strong> gentle-shell is your coding agent, built for Pi, with native workspace features for agent orchestration, usage monitoring for supported provider accounts, and built-in diff views—all in one integrated layout.

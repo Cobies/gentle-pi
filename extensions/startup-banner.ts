@@ -692,6 +692,7 @@ export default function (pi: ExtensionAPI) {
 
     let tick = 0;
     let refreshStats = () => {};
+    let headerCache: { key: string; out: string[] } | null = null;
     const state = {
       timer: null as NodeJS.Timeout | null,
       mode: currentIntroMode() as IntroMode,
@@ -719,6 +720,7 @@ export default function (pi: ExtensionAPI) {
     setTimeout(() => {
       ctx.ui.setHeader((tui, theme) => {
         if (state.timer) clearInterval(state.timer);
+        headerCache = null;
 
         refreshStats = () => tui.requestRender();
         // Capture once: a command changes the live prompt, not this intro.
@@ -762,8 +764,11 @@ export default function (pi: ExtensionAPI) {
         process.stdout.on("resize", resizeHandler);
 
         return {
+          /** Renders the persistent header grid; memoized per width, tick, mode and stats so static passes reuse the built lines. */
           render(width: number): string[] {
             if (state.mode === "skip") return [];
+            const headerKey = `${width}|${tick}|${state.mode}|${gitBranch}|${mcpServersCount}|${extensionsCount}|${packagesCount}|${sddAgentsCount}|${ctx.cwd}|${skills.length}|${customTools.length}`;
+            if (headerCache?.key === headerKey) return headerCache.out;
 
             const flashStartTick = 10;
             const roseOpacity = Math.min(1, tick / 10);
@@ -1059,9 +1064,10 @@ export default function (pi: ExtensionAPI) {
               out.push(truncateToWidth(line, Math.max(1, width), ""));
             }
 
+            headerCache = { key: headerKey, out };
             return out;
           },
-          invalidate() {},
+          invalidate() { headerCache = null; },
           dispose() {
             cleanup();
           },
