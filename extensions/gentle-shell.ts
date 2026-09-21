@@ -5,7 +5,7 @@ import { statSync } from "node:fs";
 import { profilesFilePath, readProfilesFileResult } from "../lib/agent-profiles.ts";
 import * as os from "node:os";
 import { join } from "node:path";
-import { buildShellHeaderModel, renderShellBar, renderShellHeaderBar, renderShellSidebarBar, shellEnabled, type ShellBarModel, type ShellBarTheme } from "../lib/shell-bar.ts";
+import { buildShellHeaderModel, renderShellBar, renderShellHeaderBar, renderShellHeaderRule, renderShellSidebarBar, shellEnabled, type ShellBarModel, type ShellBarTheme } from "../lib/shell-bar.ts";
 import { CHANGE_STATUS, RootBranchLabels, renderChangesWidget, type ChangedFile, type ChangesModel, type GitRunner, type WorktreeChanges } from "../lib/shell-changes.ts";
 import { WorktreeChangesView } from "../lib/shell-changes-view.ts";
 import { SessionWorktreeRegistry, resolveSessionWorktree, worktreeGitEnvironment, type WorktreeResolver } from "../lib/session-worktree-registry.ts";
@@ -906,10 +906,11 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			const headerBar = (width: number) => renderShellHeaderBar(buildShellHeaderModel(footerModel()), theme, width, usageShortcutKey);
 			const disposeHeader = sidebarHeader(tui, {
 				digest: () => JSON.stringify(buildShellHeaderModel(footerModel())),
-				render: (width) => [headerBar(width).text],
+				render: (width) => [headerBar(width).text, renderShellHeaderRule(theme, width)],
 				invalidate() {},
 				handleMouse(event) {
 					if (event.type !== "click" || event.button !== "left") return undefined;
+					if (event.y !== 0) return undefined; // the rule row under the status line is decorative, never clickable
 					const { usageSpan } = headerBar(event.width);
 					if (!usageSpan || event.x < usageSpan.start || event.x >= usageSpan.end) return undefined;
 					void openUsage(ctx);
@@ -990,9 +991,19 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		});
 	}
 	pi.registerCommand("gentle:animations", {
-		description: "Show or set global animations (status|quality|performance|potato); no argument reports status.",
+		description: "Show or set global animations; no argument opens a selectable menu (quality|performance|potato, plus status).",
+		// No argument opens a selectable menu when an interactive UI is present;
+		// headless callers and fakes without ui.select keep the status fallback.
 		handler: async (args, ctx) => {
-			const action = args.trim() || "status";
+			let action = args.trim() || "status";
+			if (args.trim().length === 0 && ctx.hasUI && typeof ctx.ui.select === "function") {
+				const selected = await ctx.ui.select(
+					`Gentle animations (current: ${animationPolicy})`,
+					["quality", "performance", "potato", "status"],
+				);
+				if (selected === undefined) return;
+				action = selected;
+			}
 			if (action !== "status" && action !== "quality" && action !== "performance" && action !== "potato") {
 				ctx.ui.notify("Use /gentle:animations status|quality|performance|potato.", "warning");
 				return;

@@ -634,6 +634,13 @@ function makeWritableForCleanup(path: string): void {
 	chmodSync(path, 0o644);
 }
 
+function candidateOwnerPreparationError(error: unknown): CandidateViewError {
+	// Surface the bounded errno of the underlying failure directly in the
+	// message so CI logs are self-diagnosing without TAP printing the cause.
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	return new CandidateViewError(`candidate view owner preparation failed${typeof code === "string" && code ? ` (${code})` : ""}`, "candidate-owner-preparation-failed", undefined, { cause: error });
+}
+
 function candidateViewParent(commonDir: string, platform: NodeJS.Platform): string {
 	const control = join(commonDir, "gentle-ai");
 	mkdirSync(control, { recursive: true, mode: 0o700 });
@@ -646,7 +653,7 @@ function candidateViewParent(commonDir: string, platform: NodeJS.Platform): stri
 	try {
 		return prepareCandidateOwnerParent(commonDir, platform);
 	} catch (error) {
-		throw new CandidateViewError("candidate view owner preparation failed", "candidate-owner-preparation-failed", undefined, { cause: error });
+		throw candidateOwnerPreparationError(error);
 	}
 }
 
@@ -916,7 +923,7 @@ function materializeCandidateView(request: CreateCandidateViewRequest, executor:
 		try {
 			owner = createCandidateOwner(canonicalCommonDir, root, platform);
 		} catch (error) {
-			throw new CandidateViewError("candidate view owner preparation failed", "candidate-owner-preparation-failed", undefined, { cause: error });
+			throw candidateOwnerPreparationError(error);
 		}
 		// The worktree is created under the same try/catch cleanup boundary as
 		// the read-tree materialization that follows. addUnbornWorktree's

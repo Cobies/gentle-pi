@@ -510,6 +510,21 @@ test("owner fsync failure prevents worktree registration", (t) => {
 	assert.equal(adds, 0);
 });
 
+test("owner preparation failure names the transient cause code in the wrapper message", (t) => {
+	const cwd = repository(t);
+	t.mock.method(fs, "fsyncSync", () => {
+		const error = new Error("fixture probe timeout") as NodeJS.ErrnoException;
+		error.code = "ETIMEDOUT";
+		throw error;
+	});
+	syncBuiltinESMExports();
+	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+	assert.throws(
+		() => new CandidateViewRegistry().create({ contributorRoot: cwd }),
+		(error: unknown) => error instanceof CandidateViewError && error.reason === "candidate-owner-preparation-failed" && error.cause instanceof Error && (error.cause as NodeJS.ErrnoException).code === "ETIMEDOUT" && /candidate view owner preparation failed \(ETIMEDOUT\)$/.test(error.message),
+	);
+});
+
 test("ordinary cleanup preserves mismatched owner and cleanupAll continues other records", (t) => {
 	const cwd = repository(t);
 	const registry = new CandidateViewRegistry();

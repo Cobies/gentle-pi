@@ -706,7 +706,11 @@ function isNativeUntrackedPath(value         )                  {
 		&& value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
 }
 
-function nativeUntrackedSelection(request                                 )                           {
+export function nativeUntrackedSelection(request
+
+
+
+ )                           {
 	const { untrackedScope, expectedUntrackedInventory, intendedUntracked } = request;
 	const declared = untrackedScope !== undefined || expectedUntrackedInventory !== undefined || intendedUntracked !== undefined;
 	if (!declared) return {};
@@ -717,16 +721,19 @@ function nativeUntrackedSelection(request                                 )     
 	) {
 		throw new TypeError("Native untracked selection must declare one scope, one inventory digest, and unique repository-relative paths");
 	}
-	if (untrackedScope === NATIVE_UNTRACKED_SCOPE.EXCLUDE && (intendedUntracked?.length ?? 0) > 0) {
+	// The guard above establishes the array and element types for both typed
+	// native requests and untyped facade input.
+	const paths = intendedUntracked                                 ;
+	if (untrackedScope === NATIVE_UNTRACKED_SCOPE.EXCLUDE && (paths?.length ?? 0) > 0) {
 		throw new TypeError("Native exclude untracked selection cannot include paths");
 	}
-	if (untrackedScope === NATIVE_UNTRACKED_SCOPE.SELECT && (intendedUntracked?.length ?? 0) === 0) {
+	if (untrackedScope === NATIVE_UNTRACKED_SCOPE.SELECT && (paths?.length ?? 0) === 0) {
 		throw new TypeError("Native select untracked selection requires at least one path");
 	}
 	return {
 		untrackedScope,
 		expectedUntrackedInventory,
-		intendedUntracked: intendedUntracked === undefined ? undefined : [...intendedUntracked],
+		intendedUntracked: paths === undefined ? undefined : [...paths],
 	};
 }
 
@@ -1103,8 +1110,19 @@ function decodeSelectedLenses(value         , riskLevel        , lensesRequired 
 function enumString(value         , allowed                   )         { const parsed = stringValue(value); if (!allowed.includes(parsed)) throw new Error("unsupported enum"); return parsed; }
 const NATIVE_DIAGNOSTIC_TEXT_LIMIT = 4_096;
 
-function sanitizeNativeDiagnosticText(value        , limit = NATIVE_DIAGNOSTIC_TEXT_LIMIT)         {
-	const normalized = value
+function sanitizeNativeDiagnosticText(value        , limit = NATIVE_DIAGNOSTIC_TEXT_LIMIT, operation                        )         {
+	// ASSESS diagnostics are projected into a public verification plan. Retain
+	// native guidance, not local paths or environment assignment values.
+	const input = operation === NATIVE_REVIEW_OPERATION.ASSESS
+		? value
+			.replace(/(?<![\w-])[a-z_][a-z0-9_]*=(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s]+)/gi, "[REDACTED ENV]")
+			.replace(/--(?:password|token|secret|authorization|cookie|private[_-]key|access[_-]token|[a-z0-9_-]+[_-]token|api[_-]?key)[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s]+)/gi, "[REDACTED CREDENTIAL]")
+			// Quoted paths have a clear boundary. For an unquoted path, the
+			// remaining line is ambiguous (spaces may belong to the filename).
+			// Redact that suffix rather than leak trailing path components.
+			.replace(/"(?:[A-Za-z]:[\\/]|\/)[^"\r\n]*"|'(?:[A-Za-z]:[\\/]|\/)[^'\r\n]*'|(?:[A-Za-z]:[\\/]|\/)[^\r\n]*/g, "[REDACTED PATH]")
+		: value;
+	const normalized = input
 		.replace(/\x1b](?:[^\x07\x1b]|\x1b(?!\\))*?(?:\x07|\x1b\\)/g, "[REDACTED CONTROL]")
 		.replace(/\x1b[PX^_][\s\S]*?\x1b\\/g, "[REDACTED CONTROL]")
 		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "[REDACTED CONTROL]")
@@ -1138,7 +1156,7 @@ export function sanitizeForeignNativeReviewDiagnostics(value         )          
 			timed_out: booleanValue(raw.timed_out),
 			output_limit_exceeded: booleanValue(raw.output_limit_exceeded),
 			...(maxBufferBytes === undefined ? {} : { max_buffer_bytes: maxBufferBytes, configuration_hint: configurationHint  }),
-			...(raw.stderr === undefined ? {} : { stderr: sanitizeNativeDiagnosticText(stringValue(raw.stderr)) }),
+			...(raw.stderr === undefined ? {} : { stderr: sanitizeNativeDiagnosticText(stringValue(raw.stderr), NATIVE_DIAGNOSTIC_TEXT_LIMIT, operation) }),
 		};
 	} catch { return undefined; }
 }
@@ -1155,7 +1173,7 @@ function nativeProcessDiagnostics(operation                       , code        
 		...(code === NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT && maxBufferBytes !== undefined
 			? { max_buffer_bytes: maxBufferBytes, configuration_hint: NATIVE_REVIEW_MAX_BUFFER_CONFIGURATION_HINT }
 			: {}),
-		...(result?.stderr.trim() ? { stderr: sanitizeNativeDiagnosticText(result.stderr) } : {}),
+		...(result?.stderr.trim() ? { stderr: sanitizeNativeDiagnosticText(result.stderr, NATIVE_DIAGNOSTIC_TEXT_LIMIT, operation) } : {}),
 	};
 }
 
@@ -2536,6 +2554,7 @@ export class NativeReviewCliV216                            {
 	// rejects -- callers (the `gentle_review` tool's `assess` operation) fail
 	// closed to `high`.
 	async assess(request                           )                              {
+		const selection = nativeUntrackedSelection(request);
 		if (request.baseRef !== undefined && !isCanonicalProcessString(request.baseRef)) throw new TypeError("Native ASSESS baseRef must be a non-empty, trimmed, NUL-free string");
 		if (request.baseRef !== undefined && request.committedOnly !== true) throw new TypeError("Native ASSESS baseRef requires explicit committedOnly acknowledgement");
 		if (request.baseRef === undefined && request.committedOnly !== undefined) throw new TypeError("Native ASSESS committedOnly requires an explicit baseRef");
@@ -2543,7 +2562,7 @@ export class NativeReviewCliV216                            {
 		const execution = await this.invoke(
 			NATIVE_REVIEW_OPERATION.ASSESS,
 			cwd,
-			["review", "assess", "--cwd", cwd, ...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef, "--committed-only"]), "--json"],
+			["review", "assess", "--cwd", cwd, ...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef, "--committed-only"]), ...nativeUntrackedSelectionArguments(selection), "--json"],
 			false,
 			request.signal,
 			this.executablePath(NATIVE_REVIEW_OPERATION.ASSESS, false),
