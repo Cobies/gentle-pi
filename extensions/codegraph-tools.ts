@@ -160,19 +160,33 @@ function truncateOutput(output: string): string {
 		: `${output.slice(0, MAX_OUTPUT_CHARS)}\n\n[CodeGraph output truncated]`;
 }
 
+function isTimeoutError(error: unknown): boolean {
+	return (
+		(typeof error === "object" &&
+			error !== null &&
+			(("name" in error && (error as { name?: unknown }).name === "TimeoutError") ||
+				("code" in error && (error as { code?: unknown }).code === "ABORT_ERR"))) ||
+		(error instanceof Error && /timed out|timeout/i.test(error.message))
+	);
+}
+
 function codeGraphFailureDetails(
 	error: unknown,
 	operation: CodeGraphOperation,
 	cwd: string,
 ): CodeGraphFallbackDetails {
-	const status =
-		typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
+	const status = isTimeoutError(error)
+		? CODEGRAPH_STATUS.FAILED
+		: typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
 			? CODEGRAPH_STATUS.UNAVAILABLE
 			: CODEGRAPH_STATUS.FAILED;
 	return { status, operation, cwd, fallback: FALLBACK_INSTRUCTIONS };
 }
 
-function codeGraphFailureMessage(status: CodeGraphStatus): string {
+function codeGraphFailureMessage(status: CodeGraphStatus, error?: unknown): string {
+	if (isTimeoutError(error)) {
+		return `CodeGraph operation timed out (WSL / filesystem latency or oversized workspace). ${FALLBACK_INSTRUCTIONS}`;
+	}
 	return status === CODEGRAPH_STATUS.UNAVAILABLE
 		? `CodeGraph is unavailable because the codegraph binary was not found. ${FALLBACK_INSTRUCTIONS}`
 		: `CodeGraph failed to run. ${FALLBACK_INSTRUCTIONS}`;
@@ -242,7 +256,7 @@ export function findCodeGraphNodeScriptOnPath(): string | undefined {
 	return codeGraphNodeScriptsOnPath().next().value;
 }
 
-const CODEGRAPH_TOOL_TIMEOUT_MS = 60_000;
+const CODEGRAPH_TOOL_TIMEOUT_MS = 180_000;
 
 const runCodeGraphCommand: CodeGraphRunner = async (args, options) => {
 	const timeoutSignal = AbortSignal.timeout(CODEGRAPH_TOOL_TIMEOUT_MS);
@@ -317,7 +331,7 @@ export function createCodeGraphTool(runner: CodeGraphRunner = runCodeGraphComman
 			} catch (error: unknown) {
 				const details = codeGraphFailureDetails(error, parameters.operation, cwd);
 				return {
-					content: [{ type: "text" as const, text: codeGraphFailureMessage(details.status) }],
+					content: [{ type: "text" as const, text: codeGraphFailureMessage(details.status, error) }],
 					details,
 				};
 			}
