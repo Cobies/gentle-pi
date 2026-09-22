@@ -195,7 +195,7 @@ Delegate when work would inflate parent context or requires focused exploration,
 **Lean Fast-Path (CodeGraph + Engram)**: For 2–4 bounded files in a single domain with zero architectural ambiguity, treat Simple Delegation as the Lean Fast-Path:
 1. **Explore first**: Use CodeGraph (`codegraph_explore`) or `gentle-ai-explore` to map symbol flows and references without dumping raw files into the parent context.
 2. **Persist discoveries**: Persist exploration insights and symbols in Engram via `mem_save` under `topic_key: odd/<feature>/explore` (or memory equivalent) to keep the orchestrator context thin (<20k tokens).
-3. **Track simply**: Record tasks in `odd/tasks/<feature>.md` without open-spec proposal/spec/design ceremony.
+3. **Track simply**: Record the feature in `odd/tasks/<feature>.md` using the 4-part Hybrid ODD Unified Specification Pattern (Diagnosis & Technical Proposal, Technical Specification & Contracts, Tasks & Evidence, Acceptance Criteria & Verification) without open-spec multi-file ceremony, offloading context weight from the live chat session into the physical file.
 4. **Delegate implementation & checks**: Launch `gentle-ai-worker` for edits and `gentle-ai-verify` for checks.
 
 Use the configured subagent runtime when available. Prefer the `subagent_*` tools (`subagent_run`, status/result helpers) when the Pi Subagents extension is installed, because they run the user's configured project/global subagent definitions and preserve history/background behavior.
