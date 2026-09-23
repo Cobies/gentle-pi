@@ -1430,7 +1430,6 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			catch (error) { return text(`Error: ${error instanceof Error ? error.message : String(error)}`, { error: "invalid sdd_change" }); }
 			return launch(ctx, await buildRequest(ctx, agent, String(params.task ?? ""), typeof params.label === "string" ? params.label : undefined, typeof params.context === "string" ? params.context : undefined, mode, undefined, typeof params.workspace_root === "string" ? params.workspace_root : undefined, sddChange, params.research_selection, params.remediation, signal, typeof params.repository_root === "string" ? params.repository_root : undefined), signal, onUpdate);
 		},
-		},
 	);
 
 	tool("status", "Report the status of one subagent task. Do not poll this to wait for background task completion; results arrive automatically via session message.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params) => {
