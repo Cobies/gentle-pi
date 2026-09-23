@@ -1,9 +1,12 @@
 {
 	"name": "gentle-pi",
-	"version": "3.3.0",
+	"version": "3.6.0",
 	"description": "Turn Pi into el Gentleman: a senior-architect development harness with SDD/OpenSpec, subagents, strict TDD evidence, review guardrails, and skill discovery.",
 	"license": "MIT",
 	"type": "module",
+	"bin": {
+		"gentle-shell": "bin/gentle-shell.mjs"
+	},
 	"keywords": [
 		"pi-package",
 		"pi",
@@ -24,6 +27,7 @@
 	},
 	"files": [
 		"assets/",
+		"bin/",
 		"contracts/",
 		"docs/",
 		"extensions/",
