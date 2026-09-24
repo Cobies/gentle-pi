@@ -6,7 +6,9 @@ import { withoutInteractiveHost } from "./rpc-host.ts";
 import { AGENT_MODE, formatModelRef, type AgentDefinition, type AgentMode, type ModelRef } from "./agents-config.ts";
 import { CHILD_QUERY_MAX_INFLIGHT, CHILD_QUERY_TIMEOUT_MS, parseChildFrame, validChildMessage, validChildQueryId } from "./agents-messaging.ts";
 import { ParentStandingReviewPermissionBroker } from "./review-session-standing-permission-ipc.ts";
-import { isFinished, normalizeRpcEvent, TASK_EVENT, TASK_STATUS, taskLabel, type AskRequest, type ChildResponseObservation, type TaskRecord, type TaskStore } from "./agents-protocol.ts";
+import { isFinished, normalizeRpcEvent, TASK_EVENT, TASK_STATUS, taskLabel, type AskRequest, type ChildResponseObservation, type TaskRecord, type TaskStore, type SubagentSpecialization, ALLOWED_READONLY_EXTENSIONS } from "./agents-protocol.ts";
+
+export { ALLOWED_READONLY_EXTENSIONS, type SubagentSpecialization };
 
 // Gentle Agents runner. Every subagent is its own `pi --mode rpc` process:
 // the host never runs subagent work on the TUI thread. It writes JSON
@@ -149,6 +151,7 @@ export interface TaskRequest {
 	remediationIntent?: unknown;
 	sddRemediation?: RemediationContext;
 	sddPreflightContext?: string;
+	specialization?: SubagentSpecialization;
 	agent: AgentDefinition;
 	prompt: string;
 	label: string | undefined;
@@ -279,16 +282,56 @@ function queryRejection(error: unknown): string {
 
 const hostProcess: ProcessControl = { platform: process.platform, kill: (pid, signal) => process.kill(pid, signal) };
 
+export function composeSpecializationPrompt(specialization: SubagentSpecialization): string {
+	const lines = [
+		"## DYNAMIC SPECIALIZATION OVERLAY (Active for this execution)",
+	];
+	if (specialization.label && specialization.label.trim()) {
+		lines.push(`- Specialized Role: ${specialization.label.trim()}`);
+	}
+	lines.push(`- Specific Directives: ${specialization.instructionsOverlay}`);
+	if (specialization.outputContract && specialization.outputContract.trim()) {
+		lines.push(`- Output Contract: ${specialization.outputContract.trim()}`);
+	}
+	lines.push("Respect this specialization as your primary lens while strictly adhering to your base constraints.");
+	return lines.join("\n");
+}
+
+export function childSystemPrompt(request: TaskRequest): string {
+	const base = request.agent.instructions ?? "";
+	if (!request.specialization) return base;
+	const overlay = composeSpecializationPrompt(request.specialization);
+	return base.length > 0 ? `${base}\n\n${overlay}` : overlay;
+}
+
+export function validateSpecializationSandbox(agent: AgentDefinition, specialization?: SubagentSpecialization): void {
+	if (!specialization || !specialization.extraTools || specialization.extraTools.length === 0) return;
+	const tools = agent.tools ?? [];
+	const isReadOnly = !tools.includes("write") && !tools.includes("edit");
+	if (isReadOnly) {
+		const allowedSet = new Set(ALLOWED_READONLY_EXTENSIONS);
+		for (const tool of specialization.extraTools) {
+			if (!allowedSet.has(tool)) {
+				throw new Error(`Specialization tool "${tool}" is not allowed for read-only agent "${agent.name}". Allowed read-only extensions: ${ALLOWED_READONLY_EXTENSIONS.join(", ")}`);
+			}
+		}
+	}
+}
+
 export function childArguments(request: TaskRequest): string[] {
+	validateSpecializationSandbox(request.agent, request.specialization);
 	const args = ["--mode", "rpc", "--session-dir", request.sessionDir];
 	for (const path of request.extensionPaths ?? []) args.push("--extension", path);
 	if (request.sddChange) args.push(SDD_CHANGE_FLAG, JSON.stringify(request.sddChange));
 	if (request.resumeSessionPath) args.push("--session", request.resumeSessionPath);
 	if (request.model) args.push("--model", request.thinking ? `${formatModelRef(request.model)}:${request.thinking}` : formatModelRef(request.model));
 	else if (request.thinking) args.push("--thinking", request.thinking);
-	const tools = request.agent.tools.length > 0 || request.agent.name === "sdd-research" ? [...new Set([...request.agent.tools, PARENT_NOTIFICATION_TOOL])] : DEFAULT_TOOLS;
+	const extraTools = request.specialization?.extraTools ?? [];
+	const hasTools = request.agent.tools.length > 0 || extraTools.length > 0 || request.agent.name === "sdd-research";
+	const tools = hasTools ? [...new Set([...request.agent.tools, ...extraTools, PARENT_NOTIFICATION_TOOL])] : DEFAULT_TOOLS;
 	if (tools.length > 0) args.push("--tools", tools.join(","));
-	if (request.agent.instructions.length > 0) args.push("--append-system-prompt", request.agent.instructions);
+	const systemPrompt = childSystemPrompt(request);
+	if (systemPrompt.length > 0) args.push("--append-system-prompt", systemPrompt);
 	return args;
 }
 
@@ -364,6 +407,7 @@ export class AgentRunner {
 			id: `${now.toString(36)}-${this.counter.toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
 			agent: request.agent.name,
 			...(request.sddPreflightContext ? { sddPreflightContext: request.sddPreflightContext } : {}),
+			...(request.specialization ? { specialization: request.specialization } : {}),
 			mode: request.mode,
 			prompt: request.prompt,
 			label: taskLabel(request.prompt, request.label),
@@ -390,6 +434,7 @@ export class AgentRunner {
 	}
 
 	run(request: TaskRequest): TaskRecord {
+		validateSpecializationSandbox(request.agent, request.specialization);
 		// Admission already confirmed the canonical cwd and human edit scope.
 		// Check this runner's queue/live slots before scheduling any launch: history
 		// is not a lock, and quarantined children still own their live slot.

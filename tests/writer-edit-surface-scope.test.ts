@@ -58,7 +58,7 @@ function dispatchWriter(input: Record<string, unknown>) {
 		cwd,
 		hasUI: false,
 		ui: { confirm: async () => true },
-	} as ExtensionContext);
+	} as unknown as ExtensionContext);
 }
 
 async function assertAccepted(input: Record<string, unknown>, message: string) {
@@ -364,3 +364,82 @@ test("agents outside the bounded writer set are not scope-guarded", async () => 
 		task: "Map the decoder call sites.",
 	}, "a read-only explorer needs no edit surfaces");
 });
+
+test("in-repository absolute paths are normalized to repository-relative paths and accepted", async () => {
+	const repoRoot = "/workspace/my-project";
+	const input: Record<string, unknown> = {
+		agent: "gentle-ai-worker",
+		mode: "task",
+		workspace_root: repoRoot,
+		task: [
+			"Update the status parser.",
+			"",
+			"## Allowed edit surfaces",
+			`- \`${repoRoot}/lib/sdd-status.ts\``,
+			`- ${repoRoot}/tests/sdd-status.test.ts`,
+			"",
+			"### Validation",
+			"npm test",
+		].join("\n"),
+	};
+
+	await assertAccepted(input, "in-repository absolute paths under workspace_root are normalized and accepted");
+	assert.equal(
+		input.task,
+		[
+			"Update the status parser.",
+			"",
+			"## Allowed edit surfaces",
+			"- `lib/sdd-status.ts`",
+			"- tests/sdd-status.test.ts",
+			"",
+			"### Validation",
+			"npm test",
+		].join("\n"),
+		"task prompt is rewritten with clean repository-relative surfaces",
+	);
+
+	const winRoot = "C:\\Users\\Dev\\project";
+	const winInput: Record<string, unknown> = {
+		agent: "gentle-ai-worker",
+		mode: "task",
+		repository_root: winRoot,
+		task: [
+			"## Allowed edit surfaces",
+			`- \`${winRoot}\\src\\index.ts\``,
+			`- ${winRoot}\\tests\\index.test.ts`,
+		].join("\n"),
+	};
+	await assertAccepted(winInput, "in-repository Windows drive paths under repository_root are normalized and accepted");
+	assert.equal(
+		winInput.task,
+		[
+			"## Allowed edit surfaces",
+			"- `src/index.ts`",
+			"- tests/index.test.ts",
+		].join("\n"),
+		"Windows drive paths are normalized to clean forward-slash relative surfaces",
+	);
+
+	await assertRejected({
+		agent: "gentle-ai-worker",
+		mode: "task",
+		workspace_root: repoRoot,
+		task: ["## Allowed edit surfaces", `- \`${repoRoot}/lib/sdd-status.ts\``, "- `/etc/passwd`"].join("\n"),
+	}, "out-of-repository POSIX absolute path remains rejected");
+
+	await assertRejected({
+		agent: "gentle-ai-worker",
+		mode: "task",
+		repository_root: winRoot,
+		task: ["## Allowed edit surfaces", `- \`C:\\outside.ts\``].join("\n"),
+	}, "out-of-repository Windows drive path remains rejected");
+
+	await assertRejected({
+		agent: "gentle-ai-worker",
+		mode: "task",
+		workspace_root: repoRoot,
+		task: ["## Allowed edit surfaces", `- \`${repoRoot}\``].join("\n"),
+	}, "targeting the repository root itself as an absolute path remains rejected");
+});
+

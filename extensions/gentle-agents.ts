@@ -21,8 +21,8 @@ import { createCompletionQueue } from "../lib/agents-completion-delivery.ts";
 import { AGENT_MODE, discoverAgents, parseAgentDefinition, loadAgentsConfig, resolveAgentProfile, withPinnedModelProfiles, type AgentDefinition, type AgentMode } from "../lib/agents-config.ts";
 import { resolveBackgroundSubagentsPolicy } from "../lib/background-subagents-policy.ts";
 import { installBackgroundCacheWarming } from "../lib/background-cache-warming.ts";
-import { isFinished, TASK_EVENT, TASK_STATUS, TaskStore, type AskRequest, type TaskRecord } from "../lib/agents-protocol.ts";
-import { AgentRunner, piCommand, abortReasonText, plannedCommands, type RemediationPlan, type RemediationScope, REMEDIATION_PLAN_ENV, parseRemediationPlan, type AskAnswer, type RunnerDeps, type SddChangeSelection, type TaskRequest } from "../lib/agents-runner.ts";
+import { isFinished, TASK_EVENT, TASK_STATUS, TaskStore, type AskRequest, type SubagentSpecialization, type TaskRecord } from "../lib/agents-protocol.ts";
+import { AgentRunner, piCommand, abortReasonText, plannedCommands, type RemediationPlan, type RemediationScope, REMEDIATION_PLAN_ENV, parseRemediationPlan, validateSpecializationSandbox, type AskAnswer, type RunnerDeps, type SddChangeSelection, type TaskRequest } from "../lib/agents-runner.ts";
 import { ChildMessenger, type IpcEndpoint } from "../lib/agents-messaging.ts";
 import { ActiveSessionClient, ActiveSessionListener, SessionPresenceRegistry, type PresenceRecord, type ReceivedNotification, type SentNotification, type SessionPresenceCandidate } from "../lib/agents-session-transport.ts";
 import { WindowsActiveSessionClient, WindowsActiveSessionListener, WindowsSessionPresenceRegistry, type WindowsSessionRegistryPhaseObserver } from "../lib/windows-session-transport.ts";
@@ -87,6 +87,46 @@ function parseSddChange(value: unknown, agentName: string): SddChangeSelection |
 	}
 	if (expectedPhase === "remediate" && (typeof selection.failedEvidenceRevision !== "string" || !/^sha256:[0-9a-f]{64}$/.test(selection.failedEvidenceRevision))) throw new Error("Invalid remediation revision");
 	return { changeName: selection.changeName, workspaceRoot: selection.workspaceRoot, phase: expectedPhase, ...(expectedPhase === "remediate" ? { failedEvidenceRevision: selection.failedEvidenceRevision as string } : {}) };
+}
+
+const SPECIALIZATION_SCHEMA = {
+	type: "object",
+	additionalProperties: false,
+	required: ["instructionsOverlay"],
+	properties: {
+		label: { type: "string", description: "Concise badge / label for TUI visualization (e.g. 'ODD Architect')" },
+		instructionsOverlay: { type: "string", description: "Domain-specific directives and focus instructions merged into the subagent prompt" },
+		extraTools: { type: "array", items: { type: "string" }, description: "Controlled extension of read-only tools" },
+		outputContract: { type: "string", description: "Expected structure or template for the return report" },
+	},
+};
+
+export function parseSpecialization(value: unknown): SubagentSpecialization | undefined {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("specialization must be an object.");
+	}
+	const spec = value as Record<string, unknown>;
+	if (typeof spec.instructionsOverlay !== "string" || spec.instructionsOverlay.trim().length === 0) {
+		throw new Error("specialization requires non-empty instructionsOverlay.");
+	}
+	if (spec.label !== undefined && typeof spec.label !== "string") {
+		throw new Error("specialization label must be a string.");
+	}
+	if (spec.outputContract !== undefined && typeof spec.outputContract !== "string") {
+		throw new Error("specialization outputContract must be a string.");
+	}
+	if (spec.extraTools !== undefined) {
+		if (!Array.isArray(spec.extraTools) || !spec.extraTools.every((t) => typeof t === "string")) {
+			throw new Error("specialization extraTools must be an array of strings.");
+		}
+	}
+	return {
+		...(spec.label !== undefined ? { label: spec.label as string } : {}),
+		instructionsOverlay: spec.instructionsOverlay as string,
+		...(spec.extraTools !== undefined ? { extraTools: [...(spec.extraTools as string[])] } : {}),
+		...(spec.outputContract !== undefined ? { outputContract: spec.outputContract as string } : {}),
+	};
 }
 
 const REMEDIATION_SCHEMA = {
@@ -1080,7 +1120,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 
 	const roots = (ctx: ExtensionContext) => ({ cwd: ctx.sessionManager.getCwd(), home: deps.home, agentHome });
 
-	const buildRequest = async (ctx: ExtensionContext, agent: AgentDefinition, prompt: string, label: string | undefined, context: string | undefined, mode: AgentMode, resume?: string, workspaceRoot?: string, sddChange?: SddChangeSelection, researchSelection?: unknown, remediationIntent?: unknown, signal?: AbortSignal, repositoryRoot?: string): Promise<TaskRequest> => {
+	const buildRequest = async (ctx: ExtensionContext, agent: AgentDefinition, prompt: string, label: string | undefined, context: string | undefined, mode: AgentMode, resume?: string, workspaceRoot?: string, sddChange?: SddChangeSelection, researchSelection?: unknown, remediationIntent?: unknown, signal?: AbortSignal, repositoryRoot?: string, specialization?: SubagentSpecialization): Promise<TaskRequest> => {
 		if (signal?.aborted) throw new Error("Subagent launch aborted before authorization.");
 		const registry = registryFor(ctx);
 		const parentCwd = ctx.sessionManager.getCwd();
@@ -1161,6 +1201,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			label,
 			context,
 			...(sddPreflightContext === undefined ? {} : { sddPreflightContext }),
+			...(specialization === undefined ? {} : { specialization }),
 			mode,
 			cwd: target ?? parentWorktreeRoot,
 			parentSessionId,
@@ -1431,6 +1472,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 				workspace_root: { type: "string", description: "Optional canonical main or linked Git worktree within the parent's same clone only; mutually exclusive with repository_root." },
 				repository_root: { type: "string", description: "Optional canonical independent Git repository; requires direct interactive session-scoped consent before queueing; mutually exclusive with workspace_root." },
 				research_selection: RESEARCH_SELECTION_SCHEMA,
+				specialization: SPECIALIZATION_SCHEMA,
 				remediation: REMEDIATION_SCHEMA, sdd_change: { type: "object", additionalProperties: false, required: ["changeName", "workspaceRoot", "phase"], properties: { changeName: { type: "string" }, workspaceRoot: { type: "string" }, failedEvidenceRevision: { type: "string" }, phase: { type: "string", enum: ["apply", "verify", "archive", "remediate"] } }, description: "Launch-local selected SDD identity, accepted only by matching SDD phase agents." },
 				mode: { type: "string", enum: ["task", "background"], description: "task waits for the result (default); background returns immediately." },
 			},
@@ -1449,7 +1491,14 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			let sddChange: SddChangeSelection | undefined;
 			try { sddChange = parseSddChange(params.sdd_change, agent.name); }
 			catch (error) { return text(`Error: ${error instanceof Error ? error.message : String(error)}`, { error: "invalid sdd_change" }); }
-			return launch(ctx, await buildRequest(ctx, agent, String(params.task ?? ""), typeof params.label === "string" ? params.label : undefined, typeof params.context === "string" ? params.context : undefined, mode, undefined, typeof params.workspace_root === "string" ? params.workspace_root : undefined, sddChange, params.research_selection, params.remediation, signal, typeof params.repository_root === "string" ? params.repository_root : undefined), signal, onUpdate);
+			let specialization: SubagentSpecialization | undefined;
+			try {
+				specialization = parseSpecialization(params.specialization);
+				if (specialization) validateSpecializationSandbox(agent, specialization);
+			} catch (error) {
+				return text(`Error: ${error instanceof Error ? error.message : String(error)}`, { error: "invalid specialization" });
+			}
+			return launch(ctx, await buildRequest(ctx, agent, String(params.task ?? ""), typeof params.label === "string" ? params.label : undefined, typeof params.context === "string" ? params.context : undefined, mode, undefined, typeof params.workspace_root === "string" ? params.workspace_root : undefined, sddChange, params.research_selection, params.remediation, signal, typeof params.repository_root === "string" ? params.repository_root : undefined, specialization), signal, onUpdate);
 		},
 	);
 
@@ -1507,7 +1556,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			if (sddPhaseForAgent(agent.name) && !sddChange) return text("Error: continuing an SDD phase agent requires a fresh sdd_change selection.", { error: "missing sdd_change" });
 
 			const foreignContinuation = foreignTasks.has(previous.id);
-			return launch(ctx, await buildRequest(ctx, agent, String(params.prompt ?? ""), typeof params.label === "string" ? params.label : undefined, previous.sddPreflightContext, mode, previous.sessionPath, foreignContinuation ? undefined : sddChange?.workspaceRoot ?? previous.cwd, sddChange, params.research_selection, params.remediation, signal, foreignContinuation ? previous.cwd : undefined), signal, onUpdate);
+			return launch(ctx, await buildRequest(ctx, agent, String(params.prompt ?? ""), typeof params.label === "string" ? params.label : undefined, previous.sddPreflightContext, mode, previous.sessionPath, foreignContinuation ? undefined : sddChange?.workspaceRoot ?? previous.cwd, sddChange, params.research_selection, params.remediation, signal, foreignContinuation ? previous.cwd : undefined, previous.specialization), signal, onUpdate);
 		},
 	);
 

@@ -47,7 +47,18 @@ test("canonical roots include cwd, dedupe aliases immediately and reject unrelat
 	registry.register(f.linked, "explicit");
 	assert.deepEqual(registry.roots(), [f.main, f.linked]);
 	assert.equal(h.session.getEntries().length, 2);
-	assert.throws(() => registry.register(f.other, "explicit"), /same Git clone/);
+	assert.throws(
+		() => registry.register(f.other, "explicit"),
+		(err: Error) =>
+			err.message ===
+			"Select an existing worktree in the same Git clone as this session. For an independent Git repository, pass repository_root instead of workspace_root.",
+	);
+	assert.throws(
+		() => registry.validate(f.other),
+		(err: Error) =>
+			err.message ===
+			"Select an existing worktree in the same Git clone as this session. For an independent Git repository, pass repository_root instead of workspace_root.",
+	);
 	assert.throws(() => registry.register(join(f.dir, "missing"), "explicit"), /worktree/);
 	assert.equal(resolveSessionWorktree(f.alias, f.main)?.root, f.linked);
 });

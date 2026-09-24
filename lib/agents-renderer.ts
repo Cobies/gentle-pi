@@ -109,6 +109,13 @@ export function formatLiveTaskActivity(task: { turns: number; toolCalls: number;
 	return parts.join(" ");
 }
 
+export function renderAgentBadge(agent: string, specialization?: { label?: string } | null): string {
+	if (specialization?.label && specialization.label.trim()) {
+		return `${agent} ▸ [${specialization.label.trim()}]`;
+	}
+	return agent;
+}
+
 export function agentOperationSubtitle(
 	toolName: string,
 	args: Record<string, unknown>,
@@ -118,12 +125,16 @@ export function agentOperationSubtitle(
 
 	if (cleanTool === "run") {
 		const agent = typeof args.agent === "string" && args.agent ? args.agent : "worker";
+		const specialization = args.specialization && typeof args.specialization === "object"
+			? (args.specialization as { label?: string })
+			: undefined;
+		const agentBadge = renderAgentBadge(agent, specialization);
 		const label = typeof args.label === "string" && args.label
 			? args.label
 			: typeof args.task === "string" && args.task
 				? taskLabel(args.task)
 				: "";
-		return `${status} · ${agent}${label ? ` · ${label}` : ""}`;
+		return `${status} · ${agentBadge}${label ? ` · ${label}` : ""}`;
 	}
 
 	if (cleanTool === "continue") {

@@ -539,27 +539,236 @@ function readAllowedEditSurfaceEntries(following: string): AllowedEditSurfaceEnt
 		.map((line) => readSurfaceEntry(line.replace(/^ {0,3}/, "")));
 }
 
+function tryNormalizeInRepoAbsolutePath(candidate: string, targetRoot: string): string | undefined {
+	const normalizedCandidate = candidate.replace(/\\/g, "/");
+	const isWindowsDrive = /^[A-Za-z]:\//.test(normalizedCandidate);
+	const isPosixAbsolute = normalizedCandidate.startsWith("/");
+	if (!isWindowsDrive && !isPosixAbsolute) {
+		return undefined;
+	}
+
+	const roots = [targetRoot];
+	try {
+		const realRoot = realpathSync(targetRoot);
+		if (realRoot !== targetRoot) roots.push(realRoot);
+	} catch {
+		// Target root might not exist on disk in synthetic unit tests
+	}
+
+	for (const root of roots) {
+		const normRoot = root.replace(/\\/g, "/");
+		const rootDriveMatch = normRoot.match(/^([A-Za-z]:)(\/.*)?$/);
+		const candDriveMatch = normalizedCandidate.match(/^([A-Za-z]:)(\/.*)?$/);
+
+		let candPrefix = "";
+		let candPath = normalizedCandidate;
+		if (candDriveMatch) {
+			candPrefix = candDriveMatch[1]!.toLowerCase();
+			candPath = candDriveMatch[2] ?? "/";
+		} else if (isPosixAbsolute) {
+			candPrefix = "";
+			candPath = normalizedCandidate;
+		} else {
+			continue;
+		}
+
+		let rootPrefix = "";
+		let rootPath = normRoot;
+		if (rootDriveMatch) {
+			rootPrefix = rootDriveMatch[1]!.toLowerCase();
+			rootPath = rootDriveMatch[2] ?? "/";
+		} else if (normRoot.startsWith("/")) {
+			rootPrefix = "";
+			rootPath = normRoot;
+		} else {
+			const resolvedRoot = resolve(normRoot).replace(/\\/g, "/");
+			const resDrive = resolvedRoot.match(/^([A-Za-z]:)(\/.*)?$/);
+			if (resDrive) {
+				rootPrefix = resDrive[1]!.toLowerCase();
+				rootPath = resDrive[2] ?? "/";
+			} else {
+				rootPrefix = "";
+				rootPath = resolvedRoot;
+			}
+		}
+
+		if (candPrefix !== rootPrefix) continue;
+
+		const candSegments = candPath.split("/").filter((s) => s.length > 0 && s !== ".");
+		const collapsedCand: string[] = [];
+		for (const seg of candSegments) {
+			if (seg === "..") {
+				collapsedCand.pop();
+			} else {
+				collapsedCand.push(seg);
+			}
+		}
+		const collapsedCandPath = "/" + collapsedCand.join("/");
+
+		const rootSegments = rootPath.split("/").filter((s) => s.length > 0 && s !== ".");
+		if (rootSegments.length === 0) continue;
+
+		const collapsedRoot: string[] = [];
+		for (const seg of rootSegments) {
+			if (seg === "..") {
+				collapsedRoot.pop();
+			} else {
+				collapsedRoot.push(seg);
+			}
+		}
+		if (collapsedRoot.length === 0) continue;
+		const collapsedRootPath = "/" + collapsedRoot.join("/");
+
+		const prefixWithSlash = collapsedRootPath === "/" ? "/" : collapsedRootPath + "/";
+		const isMatch = rootDriveMatch
+			? collapsedCandPath.toLowerCase().startsWith(prefixWithSlash.toLowerCase())
+			: collapsedCandPath.startsWith(prefixWithSlash);
+
+		if (isMatch) {
+			const rel = collapsedCandPath.slice(prefixWithSlash.length);
+			if (rel.length > 0 && rel !== "." && !rel.startsWith("/")) {
+				try {
+					const realCandidate = realpathSync(candidate).replace(/\\/g, "/");
+					const realRoots = roots.map((r) => {
+						try { return realpathSync(r).replace(/\\/g, "/"); } catch { return r.replace(/\\/g, "/"); }
+					});
+					const escapes = !realRoots.some((r) => {
+						const rWithSlash = r.endsWith("/") ? r : r + "/";
+						return realCandidate.startsWith(rWithSlash) || realCandidate.toLowerCase().startsWith(rWithSlash.toLowerCase());
+					});
+					if (escapes) return undefined;
+				} catch {
+					// File does not exist yet (normal for planned edits)
+				}
+				return rel;
+			}
+		}
+	}
+
+	return undefined;
+}
+
+function normalizeAllowedEditSurfacesInText(text: string, targetRoot: string): string {
+	const headingPattern = /^## Allowed edit surfaces[ \t]*$/gim;
+	let result = "";
+	let lastIndex = 0;
+
+	for (const match of text.matchAll(headingPattern)) {
+		const matchIndex = match.index ?? 0;
+		result += text.slice(lastIndex, matchIndex + match[0].length);
+		const rest = text.slice(matchIndex + match[0].length);
+
+		const lineRegex = /([^\r\n]*)(\r?\n|$)/g;
+		let lineMatch: RegExpExecArray | null;
+		let sectionEndPos = 0;
+		let inSection = true;
+		const sectionParts: string[] = [];
+
+		while ((lineMatch = lineRegex.exec(rest)) !== null) {
+			if (lineMatch[0].length === 0) break;
+			const rawLine = lineMatch[1]!;
+			const lineEnding = lineMatch[2]!;
+
+			if (inSection && MARKDOWN_HEADING_LINE.test(rawLine)) {
+				inSection = false;
+			}
+
+			if (inSection && rawLine.trim().length > 0) {
+				const indentMatch = rawLine.match(/^ {0,3}/);
+				const indent = indentMatch ? indentMatch[0] : "";
+				const afterIndent = rawLine.slice(indent.length);
+
+				const markerMatch = afterIndent.match(MARKDOWN_LIST_MARKER);
+				const marker = markerMatch ? markerMatch[0] : "";
+				const afterMarker = afterIndent.slice(marker.length);
+
+				const trimmedRight = afterMarker.replace(/ +$/g, "");
+				const trailingSpaces = afterMarker.slice(trimmedRight.length);
+				const backtickMatch = trimmedRight.match(/^`([^`]+)`$/);
+
+				if (backtickMatch) {
+					const normalized = tryNormalizeInRepoAbsolutePath(backtickMatch[1]!, targetRoot);
+					if (normalized !== undefined) {
+						sectionParts.push(`${indent}${marker}\`${normalized}\`${trailingSpaces}${lineEnding}`);
+						sectionEndPos += lineMatch[0].length;
+						continue;
+					}
+				} else if (!trimmedRight.includes("`")) {
+					const normalized = tryNormalizeInRepoAbsolutePath(trimmedRight, targetRoot);
+					if (normalized !== undefined) {
+						sectionParts.push(`${indent}${marker}${normalized}${trailingSpaces}${lineEnding}`);
+						sectionEndPos += lineMatch[0].length;
+						continue;
+					}
+				}
+				sectionParts.push(lineMatch[0]);
+			} else {
+				sectionParts.push(lineMatch[0]);
+			}
+			sectionEndPos += lineMatch[0].length;
+		}
+
+		result += sectionParts.join("");
+		lastIndex = matchIndex + match[0].length + sectionEndPos;
+	}
+
+	result += text.slice(lastIndex);
+	return result;
+}
+
+function resolveTargetRepositoryRoot(input: Record<string, unknown>, fallbackRoot?: string): string {
+	if (typeof input.repository_root === "string" && input.repository_root.trim().length > 0) {
+		return input.repository_root.trim();
+	}
+	if (typeof input.workspace_root === "string" && input.workspace_root.trim().length > 0) {
+		return input.workspace_root.trim();
+	}
+	return fallbackRoot ?? process.cwd();
+}
+
+function normalizeWriterEditSurfaces(input: Record<string, unknown>, defaultRoot?: string): void {
+	const targetRoot = resolveTargetRepositoryRoot(input, defaultRoot);
+	if (typeof input.task === "string") {
+		input.task = normalizeAllowedEditSurfacesInText(input.task, targetRoot);
+	}
+	if (typeof input.context === "string") {
+		input.context = normalizeAllowedEditSurfacesInText(input.context, targetRoot);
+	}
+}
+
 function hasTaskScopedAllowedEditSurfaces(...values: unknown[]): boolean {
 	let expectedEntries: string[] | undefined;
 	let hasSection = false;
 
-	for (const value of values) {
+	let explicitTargetRoot: string | undefined;
+	let promptValues = values;
+	const lastArg = values.at(-1);
+	if (lastArg && typeof lastArg === "object" && "targetRoot" in lastArg) {
+		explicitTargetRoot = (lastArg as { targetRoot?: string }).targetRoot;
+		promptValues = values.slice(0, -1);
+	}
+
+	for (const value of promptValues) {
 		if (typeof value !== "string") continue;
 
 		const headings = value.matchAll(ALLOWED_EDIT_SURFACES_HEADING);
 		for (const heading of headings) {
 			const bodyStart = (heading.index ?? 0) + heading[0].length;
 			const entries = readAllowedEditSurfaceEntries(value.slice(bodyStart));
-			if (
-				entries.length === 0 ||
-				!entries.every(
-					(entry) =>
-						entry.isValidMarkdownSyntax &&
-						!/\p{Cc}|\p{Zl}|\p{Zp}/u.test(entry.source) &&
-						isTaskScopedRepositoryRelativePath(entry.value, entry.isWholeEntryBackticked),
-				)
-			) {
-				return false;
+			if (entries.length === 0) return false;
+
+			for (const entry of entries) {
+				if (!entry.isValidMarkdownSyntax || /\p{Cc}|\p{Zl}|\p{Zp}/u.test(entry.source)) {
+					return false;
+				}
+				if (!isTaskScopedRepositoryRelativePath(entry.value, entry.isWholeEntryBackticked)) {
+					const rootToTry = explicitTargetRoot ?? process.cwd();
+					const normalized = tryNormalizeInRepoAbsolutePath(entry.value, rootToTry);
+					if (normalized === undefined || !isTaskScopedRepositoryRelativePath(normalized, entry.isWholeEntryBackticked)) {
+						return false;
+					}
+					entry.value = normalized;
+				}
 			}
 
 			const uniqueEntries = [...new Set(entries.map((entry) => entry.value))].sort();
@@ -587,7 +796,7 @@ function sddDispatchAgentName(input: unknown): string | undefined {
 	return undefined;
 }
 
-function rejectUnscopedBoundedWriterDispatch(input: unknown): { block: true; reason: string } | undefined {
+function rejectUnscopedBoundedWriterDispatch(input: unknown, defaultRoot?: string): { block: true; reason: string } | undefined {
 	if (
 		!isRecord(input) ||
 		typeof input.agent !== "string" ||
@@ -595,7 +804,8 @@ function rejectUnscopedBoundedWriterDispatch(input: unknown): { block: true; rea
 	) {
 		return undefined;
 	}
-	if (hasTaskScopedAllowedEditSurfaces(input.task, input.context)) {
+	normalizeWriterEditSurfaces(input, defaultRoot);
+	if (hasTaskScopedAllowedEditSurfaces(input.task, input.context, { targetRoot: resolveTargetRepositoryRoot(input, defaultRoot) })) {
 		return undefined;
 	}
 	return { block: true, reason: WRITER_EDIT_SURFACE_REJECTION };
@@ -747,13 +957,14 @@ function hasCanonicalJudgmentDayFixActivation(...values: unknown[]): boolean {
 const JUDGMENT_DAY_FIX_DISPATCH_REJECTION =
 	"Judgment Day fix dispatch requires exactly one `agent: \"jd-fix-agent\"`, one exact `## Judgment Day activation` section containing only `User explicitly requested Judgment Day.`, one non-empty unique canonical `## Exact authorized severe IDs` section, one exact `## Judgment Day correction batch` section with `Round: 1 of 2.` or `Round: 2 of 2.` and the matching canonical lowercase SHA-256 of one exact `## Exact frozen finding rows` section whose BLOCKER/CRITICAL open Judgment Day rows equal the authorized IDs in the same order, and the existing exact `## Allowed edit surfaces` guard. The parent must provide the canonical bounded dispatch; do not infer activation, authorization, or frozen findings.";
 
-function rejectInvalidJudgmentDayFixDispatch(input: unknown): { block: true; reason: string } | undefined {
+function rejectInvalidJudgmentDayFixDispatch(input: unknown, defaultRoot?: string): { block: true; reason: string } | undefined {
 	if (!isRecord(input) || !hasJudgmentDayFixAgentReference(input)) return undefined;
+	normalizeWriterEditSurfaces(input, defaultRoot);
 	if (
 		input.agent === JUDGMENT_DAY_FIX_AGENT_NAME &&
 		!("agents" in input) &&
 		hasCanonicalJudgmentDayFixActivation(input.task, input.context) &&
-		hasTaskScopedAllowedEditSurfaces(input.task, input.context)
+		hasTaskScopedAllowedEditSurfaces(input.task, input.context, { targetRoot: resolveTargetRepositoryRoot(input, defaultRoot) })
 	) {
 		return undefined;
 	}
@@ -8700,6 +8911,12 @@ export const __testing = {
 	getPiModelOptions,
 	MODEL_CONTROL_OPTIONS,
 	switchLiveOrchestrator,
+	rejectUnscopedBoundedWriterDispatch,
+	hasTaskScopedAllowedEditSurfaces,
+	tryNormalizeInRepoAbsolutePath,
+	normalizeAllowedEditSurfacesInText,
+	normalizeWriterEditSurfaces,
+	resolveTargetRepositoryRoot,
 };
 
 export interface GentleAiRuntimeDependencies {
@@ -9365,9 +9582,9 @@ function createGentleAiExtensionForTesting(
 					};
 				}
 			}
-			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input);
+			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input, ctx.cwd);
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
-			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input);
+			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input, ctx.cwd);
 			if (writerScopeDenied) return writerScopeDenied;
 			try {
 				injectReviewCandidateView(event.input, candidateViews);

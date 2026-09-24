@@ -224,6 +224,29 @@ For generic non-SDD exploration and mapping, first attempt the installed package
 
 For bounded multi-file writes, prefer the installed package-owned `gentle-ai-worker`, then a user-configured `worker`. If neither worker definition exists, fall back to the native `Agent` even when `subagent_*` tools are available. If no delegation mechanism is available, stop and explain the blocker. This writer precedence overrides the general runtime preference above.
 
+#### Dynamic Subagent Specialization (DSS) in ODD
+
+Instead of creating persistent ad-hoc agent files on disk, use Dynamic Subagent Specialization (DSS) via `subagent_run`'s `specialization` overlay. DSS enables ephemeral derivation from canonical base archetypes (`gentle-ai-explore` or `gentle-ai-worker`).
+
+When to specialize:
+- **ODD Architecture & Contract Design**: Specialize `gentle-ai-explore` with `label: "ODD Architect"` to draft Part 1 (Diagnosis & Technical Proposal) and Part 2 (Technical Specification & Contracts) of an ODD task document before implementation.
+- **Deep Domain Inspections**: Specialize `gentle-ai-explore` (e.g. `label: "SQL Auditor"`, `label: "Security Reviewer"`, `label: "A11y Inspector"`) when domain-specific directives or read-only tool extensions are required.
+
+Payload fields in `subagent_run`:
+```typescript
+specialization: {
+  label?: string;               // Concise TUI badge (e.g., "ODD Architect")
+  instructionsOverlay: string;  // Domain directives merged into the child system prompt
+  extraTools?: string[];        // Controlled read-only tools (for read-only base agents)
+  outputContract?: string;      // Expected structure or template for the return report
+}
+```
+
+Security and Sandboxing Invariants:
+- **Strictly Monotonic Read-Only Invariant**: If the base agent does not contain `write` or `edit` tools (like `gentle-ai-explore`), `extraTools` may ONLY include whitelisted read-only tools (`read_symbol`, `read_enclosing`, `lens_diagnostics`, `web_search`, `fetch_content`, `source_check`, `ast_grep_search`, `ast_grep_outline`). Any attempt to inject mutating tools (`write`, `edit`, `bash`) throws a validation error before process spawn.
+- **Ephemeral Lifespan**: Specialization never mutates disk assets (`assets/agents/*.md`) or persistent configuration. It lives exclusively in the memory of the spawned RPC child.
+- **UI Transparency**: Cards in the TUI display `<agent-name> ▸ [<specialization-label>]` (e.g. `gentle-ai-explore ▸ [ODD Architect]`).
+
 #### Dynamic Subagents (Last Resort)
 
 When a task, exploration, or phase genuinely does not fit standard SDD phases or existing workers (`gentle-ai-explore`, `gentle-ai-worker`, `gentle-ai-verify`), the orchestrator may define an ad-hoc dynamic subagent as a last resort. Define a custom agent markdown definition with YAML frontmatter in `.pi/agents/<name>.md` specifying the minimum required tools and specialized instructions, and dispatch it via `subagent_run(agent: "<name>")`. This dynamic pattern is strictly a last resort; always prefer existing canonical agents when available.
