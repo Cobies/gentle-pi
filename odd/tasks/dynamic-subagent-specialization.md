@@ -76,8 +76,11 @@ When `task.specialization?.label` is present:
 - [x] Task 5: Update orchestrator delegation guidelines in `assets/orchestrator-delegation.md` for ODD dynamic specialization
 - [x] Task 6: Add automated tests for specialization validation, tool safety sandbox, and child config generation in `tests/`
 - [x] Task 7: Verify whole test suite and run functional validation
-- [ ] Task 8: Implement actionable `workspace_root` vs `repository_root` guidance and in-repo absolute path normalization for `## Allowed edit surfaces`
-- [ ] Task 9: Verify dispatch resilience and path normalization with unit tests in `tests/`
+- [x] Task 8: Implement actionable `workspace_root` vs `repository_root` guidance and in-repo absolute path normalization for `## Allowed edit surfaces`
+- [x] Task 9: Verify dispatch resilience and path normalization with unit tests in `tests/`
+
+### Evidence & Commits
+- `gentle-pi` commit: `f0e0cdc3` (`feat(agents): dynamic subagent specialization and dispatch resilience`)
 
 ---
 
