@@ -164,7 +164,7 @@ function fakePi() {
 	return { pi, tools, shortcuts, commands, fire, sent, renderers, entryRenderers, entries, events, listeners };
 }
 
-function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (title: string, message: string) => Promise<boolean> = async () => true, inputResult: (title: string, placeholder: string | undefined) => Promise<string | undefined> = async () => undefined, overlayTui: { terminal: { rows: number }; requestRender(): void } = { terminal: { rows: 30 }, requestRender() {} }) {
+function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (title: string, message: string) => Promise<boolean> = async () => true, inputResult: (title: string, placeholder: string | undefined) => Promise<string | undefined> = async () => undefined, overlayTui: { terminal: { rows: number }; requestRender(): void } = { terminal: { rows: 30 }, requestRender() {} }, selectResult: (title: string, options: string[]) => Promise<string | undefined> = async (_title, options) => options[0]) {
 	const widgets = new Map<string, (tui: unknown, theme: unknown) => { render(width: number): string[] }>();
 	const dialogs: string[] = [];
 	const overlays: Overlay[] = [];
@@ -193,7 +193,7 @@ function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (t
 			},
 			select: async (title: string, options: string[]) => {
 				dialogs.push(`select:${title}:${options.join("|")}`);
-				return options[0];
+				return selectResult(title, options);
 			},
 			confirm: async (title: string, message: string) => {
 				dialogs.push(`confirm:${title}:${message}`);
@@ -3632,8 +3632,11 @@ test("session transport selects a peer for outbound delivery and rejects stale c
 	const { ctx, dialogs } = fakeContext();
 	await h.fire("session_start", ctx);
 	await eventually(() => callbacks.length === 1, "initial transport callback registration");
-	const result = await h.tools.get("orchestrator_send_message")!.execute("send", { message: "hello peer" }, undefined, undefined, ctx);
-	assert.deepEqual(dialogs, ["select:Select recipient orchestrator:Orchestrator alpha|Orchestrator beta"]);
+	const result = await h.tools.get("orchestrator_send_message")!.execute("send", { message: "hello peer", reason: "because the peer needs an update" }, undefined, undefined, ctx);
+	assert.deepEqual(dialogs, [
+		"select:Select recipient orchestrator:Orchestrator alpha|Orchestrator beta",
+		"select:Authorize cross-orchestrator message to alpha?\nReason: because the peer needs an update\nMessage: hello peer:Allow once|Allow for this session|Deny",
+	]);
 	assert.deepEqual(sent, [{ recipient: "alpha", message: "hello peer", expectedActivation: records[0] }]);
 	assert.match(result.content[0].text, /accepted for delivery; it is not a delivery or read receipt/);
 	const original = callbacks[0]!;
@@ -3642,6 +3645,222 @@ test("session transport selects a peer for outbound delivery and rejects stale c
 	await eventually(() => closed === 2, "replacement closes the old client and listener");
 	assert.equal(closed, 2, "replacement closes the old client and listener before activating its successor");
 	await assert.rejects(original({ id: "late", senderSessionId: "alpha", message: "late callback" }), /stale session transport/);
+	await h.fire("session_shutdown", ctx);
+});
+
+// Issue #1364: user consent before cross-orchestrator communication
+test("orchestrator_send_message requires consent on explicit recipient ID and sends nothing when denied", async () => {
+	const h = fakePi();
+	const records = [{ version: 1, sessionId: "target-peer", endpoint: "/target.sock", createdAt: 1 }];
+	const sent: unknown[] = [];
+	const runtime = deps();
+	const registry = { list: async () => [], listActivations: async () => records };
+	runtime.deps.sessionTransport = {
+		createRegistry: async () => registry,
+		createListener: () => ({ registry, start: async () => {}, close: async () => {} }),
+		createClient: () => ({
+			close: () => {},
+			sendNotification: async (recipient: string, message: string) => {
+				sent.push({ recipient, message });
+				return { id: "msg-1", accepted: true };
+			},
+		}),
+	} as never;
+	gentleAgents(h.pi, {}, runtime.deps);
+
+	const { ctx, dialogs } = fakeContext(
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		async (_title, options) => options[2] // "Deny"
+	);
+	await h.fire("session_start", ctx);
+
+	const result = await h.tools.get("orchestrator_send_message")!.execute(
+		"send",
+		{ recipient_session_id: "target-peer", message: "sensitive task details", reason: "status check" },
+		undefined,
+		undefined,
+		ctx
+	);
+
+	assert.deepEqual(dialogs, [
+		"select:Authorize cross-orchestrator message to target-peer?\nReason: status check\nMessage: sensitive task details:Allow once|Allow for this session|Deny",
+	]);
+	assert.equal(sent.length, 0, "nothing must be sent when user denies consent");
+	assert.match(result.content[0].text, /denied by user/);
+	assert.equal((result.details as { error: string }).error, "denied");
+	await h.fire("session_shutdown", ctx);
+});
+
+test("orchestrator_send_message with Allow for this session skips prompt on subsequent sends to same recipient", async () => {
+	const h = fakePi();
+	const records = [{ version: 1, sessionId: "target-peer", endpoint: "/target.sock", createdAt: 1 }];
+	const sent: unknown[] = [];
+	const runtime = deps();
+	const registry = { list: async () => [], listActivations: async () => records };
+	runtime.deps.sessionTransport = {
+		createRegistry: async () => registry,
+		createListener: () => ({ registry, start: async () => {}, close: async () => {} }),
+		createClient: () => ({
+			close: () => {},
+			sendNotification: async (recipient: string, message: string) => {
+				sent.push({ recipient, message });
+				return { id: "msg-1", accepted: true };
+			},
+		}),
+	} as never;
+	gentleAgents(h.pi, {}, runtime.deps);
+
+	const { ctx, dialogs } = fakeContext(
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		async (_title, options) => options[1] // "Allow for this session"
+	);
+	await h.fire("session_start", ctx);
+
+	// First send
+	const res1 = await h.tools.get("orchestrator_send_message")!.execute(
+		"send-1",
+		{ recipient_session_id: "target-peer", message: "msg 1", reason: "because the first update is needed" },
+		undefined,
+		undefined,
+		ctx
+	);
+	assert.match(res1.content[0].text, /accepted for delivery/);
+	assert.equal(dialogs.length, 1);
+	assert.equal(sent.length, 1);
+
+	// Second send to same recipient in same session must NOT prompt again
+	const res2 = await h.tools.get("orchestrator_send_message")!.execute(
+		"send-2",
+		{ recipient_session_id: "target-peer", message: "msg 2", reason: "because the next update is needed" },
+		undefined,
+		undefined,
+		ctx
+	);
+	assert.match(res2.content[0].text, /accepted for delivery/);
+	assert.equal(dialogs.length, 1, "must not open a second consent dialog for the same session-granted recipient");
+	assert.equal(sent.length, 2);
+	await h.fire("session_shutdown", ctx);
+});
+
+test("orchestrator_send_message fails closed in headless mode without UI", async () => {
+	const h = fakePi();
+	const records = [{ version: 1, sessionId: "target-peer", endpoint: "/target.sock", createdAt: 1 }];
+	const sent: unknown[] = [];
+	const runtime = deps();
+	const registry = { list: async () => [], listActivations: async () => records };
+	runtime.deps.sessionTransport = {
+		createRegistry: async () => registry,
+		createListener: () => ({ registry, start: async () => {}, close: async () => {} }),
+		createClient: () => ({
+			close: () => {},
+			sendNotification: async (recipient: string, message: string) => {
+				sent.push({ recipient, message });
+				return { id: "msg-1", accepted: true };
+			},
+		}),
+	} as never;
+	gentleAgents(h.pi, {}, runtime.deps);
+
+	const { ctx } = fakeContext();
+	(ctx as { hasUI: boolean }).hasUI = false;
+	(ctx as { ui?: unknown }).ui = undefined;
+	await h.fire("session_start", ctx);
+
+	const result = await h.tools.get("orchestrator_send_message")!.execute(
+		"send",
+		{ recipient_session_id: "target-peer", message: "hello", reason: "because this is needed" },
+		undefined,
+		undefined,
+		ctx
+	);
+
+	assert.equal(sent.length, 0, "nothing must be sent without interactive UI");
+	assert.match(result.content[0].text, /requires interactive human consent/);
+	assert.equal((result.details as { error: string }).error, "denied");
+	await h.fire("session_shutdown", ctx);
+});
+
+test("orchestrator_send_message requires a concrete trimmed reason within UTF-8 bounds", async () => {
+	const h = fakePi();
+	const records = [{ version: 1, sessionId: "target-peer", endpoint: "/target.sock", createdAt: 1 }];
+	let listenerStarted = false;
+	let listCalls = 0;
+	const sent: unknown[] = [];
+	const runtime = deps();
+	const registry = { list: async () => [], listActivations: async () => { listCalls++; return records; } };
+	runtime.deps.sessionTransport = {
+		createRegistry: async () => registry,
+		createListener: () => ({ registry, start: async () => { listenerStarted = true; }, close: async () => {} }),
+		createClient: () => ({ close: () => {}, sendNotification: async (...args: unknown[]) => { sent.push(args); return { id: "msg-1", accepted: true }; } }),
+	} as never;
+	gentleAgents(h.pi, {}, runtime.deps);
+	const { ctx, dialogs } = fakeContext();
+	await h.fire("session_start", ctx);
+	await eventually(() => listenerStarted, "session transport listener starts");
+
+	const tool = h.tools.get("orchestrator_send_message")!;
+	const schema = tool.parameters as unknown as { required: string[]; properties: { reason: { minLength: number; maxLength: number; description: string } } };
+	assert.ok(schema.required.includes("reason"));
+	assert.equal(schema.properties.reason.minLength, 8);
+	assert.equal(schema.properties.reason.maxLength, 512);
+	for (const reason of [undefined, "   short  ", "é".repeat(257)]) {
+		const result = await tool.execute("invalid", { message: "hello", reason }, undefined, undefined, ctx);
+		assert.equal((result.details as { error: string }).error, "invalid input");
+	}
+	assert.equal(dialogs.length, 0, "invalid reasons must be rejected before any consent UI");
+	assert.equal(listCalls, 0, "reason validation must precede asynchronous recipient discovery");
+	assert.equal(sent.length, 0);
+	await h.fire("session_shutdown", ctx);
+});
+
+test("orchestrator_send_message snapshots message and reason before recipient and consent selection", async () => {
+	const h = fakePi();
+	const records = [
+		{ version: 1, sessionId: "alpha", endpoint: "/alpha.sock", createdAt: 1 },
+		{ version: 1, sessionId: "beta", endpoint: "/beta.sock", createdAt: 2 },
+	];
+	const sent: Array<{ recipient: string; message: string }> = [];
+	let listenerStarted = false;
+	let chooseRecipient!: (value: string | undefined) => void;
+	let chooseConsent!: (value: string | undefined) => void;
+	const recipientSelection = new Promise<string | undefined>((resolve) => { chooseRecipient = resolve; });
+	const consentSelection = new Promise<string | undefined>((resolve) => { chooseConsent = resolve; });
+	const runtime = deps();
+	const registry = { list: async () => [], listActivations: async () => records };
+	runtime.deps.sessionTransport = {
+		createRegistry: async () => registry,
+		createListener: () => ({ registry, start: async () => { listenerStarted = true; }, close: async () => {} }),
+		createClient: () => ({ close: () => {}, sendNotification: async (recipient: string, message: string) => { sent.push({ recipient, message }); return { id: "msg-1", accepted: true }; } }),
+	} as never;
+	gentleAgents(h.pi, {}, runtime.deps);
+	const { ctx, dialogs } = fakeContext(undefined, undefined, undefined, undefined, async (title) => title.startsWith("Select recipient") ? recipientSelection : consentSelection);
+	await h.fire("session_start", ctx);
+	await eventually(() => listenerStarted, "session transport listener starts");
+
+	const originalMessage = "original\r\nReason: forged\ttab\u2028next";
+	const originalReason = "because the update is needed\r\nMessage: forged";
+	const params: { message: string; reason: string } = { message: originalMessage, reason: originalReason };
+	const pending = h.tools.get("orchestrator_send_message")!.execute("send", params, undefined, undefined, ctx);
+	await eventually(() => dialogs.length === 1, "recipient selector opens");
+	params.message = "mutated during recipient selection";
+	params.reason = "mutated reason one";
+	chooseRecipient("Orchestrator alpha");
+	await eventually(() => dialogs.length === 2, "consent selector opens");
+	params.message = "mutated during consent selection";
+	params.reason = "mutated reason two";
+	chooseConsent("Allow once");
+	await pending;
+
+	assert.match(dialogs[1]!, /Reason: because the update is needed\\r\\nMessage: forged/);
+	assert.match(dialogs[1]!, /Message: original\\r\\nReason: forged\\ttab\\u2028next/);
+	assert.doesNotMatch(dialogs[1]!, /mutated/);
+	assert.deepEqual(sent, [{ recipient: "alpha", message: originalMessage }], "the exact snapshotted payload is sent, including real line separators");
 	await h.fire("session_shutdown", ctx);
 });
 

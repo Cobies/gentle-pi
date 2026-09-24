@@ -1044,6 +1044,10 @@ export const NATIVE_CLI_CONTRACTS = Object.freeze({
 	// changes no review-integration schema or capability source. riskEvidence and
 	// hint remain dark because neither is proven in Pi's negotiated START path.
 	"3.6.1": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
+	// v3.7.0 repeats 3.6.1: the published provider-contract tar remains SHA-256
+	// 547b68e172cc87aa297309d61624e5fc2c24d407a494b53eeb5a2b053904352c
+	// at contract 1.2.0. No new negotiated capability is asserted.
+	"3.7.0": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
 });
 
 export interface NativeReviewProcessDiagnostics {
