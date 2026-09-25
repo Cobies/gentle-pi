@@ -13,7 +13,7 @@ When a sub-agent or tool returns a user-facing blocking prompt or menu, preserve
 
 #### Gentle AI Provider Defect Handoff (MANDATORY)
 
-Before losslessly relaying any blocking choice envelope, classify its semantic admissibility. **The test is what produced the failure, not what the work was doing when it happened.** Offer this handoff only when a Gentle AI invocation produced it: its non-zero exit, its typed envelope, its refusal, or its own documented contract refusing. A Gentle AI workflow merely hosting a failure is not enough, because the client runtime carries out the work: an SDD phase failing inside that runtime is that runtime's defect even though our contract prescribed the phase.
+Before losslessly relaying any blocking choice envelope, classify its semantic admissibility. **The test is what produced the failure, not what the work was doing when it happened.** Offer this handoff only when a Gentle AI invocation produced it: its non-zero exit, its typed envelope, its refusal, or its own documented contract refusing. A Gentle AI workflow merely hosting a failure is not enough, because the client runtime carries out the work: a delegated task failing inside that runtime is that runtime's defect even when our contract prescribed the task.
 
 When anything else produced it, there is no report and no handoff. That includes the model provider (context limits reached, rate limits, a refusal to process an input), the client runtime (a session that must be restarted, a crashed or empty sub-agent result, a dispatcher that never dispatched), the environment, and the user's own repository state. Do not name the component you believe is responsible, do not suggest where else to file it, and do not ask. Say plainly what blocked the work in the ordinary conversation, then continue or stop as the workflow dictates. A report system that files other projects' defects stops meaning anything when it files ours.
 
@@ -43,21 +43,17 @@ When it is ours, never offer to switch to, inspect, modify, or directly repair t
 - Report observed evidence, not an unconfirmed root cause. Include or reuse sanitized version/build, OS/architecture/client, the operation shape without secrets, bounded attempts and outcomes, failure envelopes, mutation outcome, expected and actual behavior, a minimal reproduction, safe opaque reason/revision identifiers, and preserved-state evidence.
 - Resume after an installed published fix or an explicit maintainer-authorized, documented native recovery or reset that the runtime contract supports; then re-enter through native status. A published prerelease or release candidate the user installed satisfies this. Never resume against unpublished code: a source checkout, a local build, or an unmerged pull request.
 
-#### SDD Edit-Authority Consent Relay (MANDATORY)
-
-When native SDD status reports `blocked(edit_authority_missing)`, its structured output may carry the typed `gentle-ai.sdd-integration.consent/v1` envelope as the optional `consent` block. Treat that envelope as a Lossless Blocking Prompt under this contract, with the same discipline as the review consent relay. Present the complete envelope once in the active conversation language: faithfully translate the headline, reason, `value`, the missing-root evidence, choice labels, every choice `effect`, and the off-path note, while preserving the original choices, order, selection mode, exact allowed-answer domain, and answer tokens. Never translate or alter the machine answer tokens (`granted`, `declined`), commands, paths, or invocations. Never summarize, reshape, reorder, merge, or omit any part. The human decides: never answer on the human's behalf and never run the grant unprompted. Only after the human's explicit `granted` answer, execute the envelope's exact grant invocation verbatim, exactly once, then re-enter through native status; the granted roots project into `allowedEditRoots`, and the grant is per-change, audited, and dies with archive. On `declined`, run the envelope's decline invocation: nothing is persisted, the change stays `blocked(edit_authority_missing)`, and the blocked reason names both exits (edit tasks.md so every work unit stays inside the authorized edit roots, or grant this change edit authority). A blocked status without a `consent` block names the same two exits; relay them and stop.
-
 ### Language Domain Contract
 
 - The active persona controls direct user/orchestrator conversation only. Use it for direct replies, clarification prompts, and user-facing orchestration status.
-- Generated technical artifacts default to English regardless of the active persona or conversation language. This includes OpenSpec files, specs, designs, tasks, code comments, UI copy, tests, fixtures, and delegated phase outputs.
+- Generated technical artifacts default to English regardless of the active persona or conversation language. This includes task documents, code comments, UI copy, tests, fixtures, and delegated phase outputs.
 - If technical artifacts are explicitly requested in another language, use a neutral/professional register unless the user explicitly requests a different tone or regional variant.
 - Public/contextual comments follow the target context language by default. Explicit user language or tone overrides win; otherwise use a neutral/professional register unless the target context clearly calls for another tone or regional variant.
 - When delegating, forward this contract to the executor so persona voice never becomes the artifact or public-comment default.
 
 ## Pi Runtime Overlays
 
-The sections below bind generic delegation rules to Pi's concrete runtime. They add runtime routing without changing the package's SDD workflow.
+The sections below bind generic delegation rules to Pi's concrete runtime. They add runtime routing without changing ODD ownership.
 
 ## Language Boundary — subagent-facing English + exceptions
 
@@ -67,11 +63,10 @@ Exceptions:
 
 - Preserve exact user quotes, UI copy, error messages, filenames, commands, and domain terms in their original language when they are evidence.
 - Ask a subagent to produce Spanish only when its output is intended to be pasted directly to the user, a PR/comment/reply in Spanish, or Spanish-language product/documentation text.
-- SDD/OpenSpec artifact content may follow the project's established language, but phase task instructions to subagents should still be English.
 
 ### Organic Driven Development (ODD)
 
-These instructions apply to organic work, not explicitly selected SDD. Preserve the existing direct/delegated topology and one parent owner; do not introduce an ODD CLI, specialized agent, or execution harness.
+These instructions apply to all development work. Preserve the existing direct/delegated topology and one parent owner; do not introduce an ODD CLI, specialized agent, or execution harness.
 
 #### Authorization and progress
 
@@ -87,7 +82,7 @@ Recommend optional research only for a named uncertainty. Establish the problem,
 
 When the question needs external evidence, use available authorized documentation/web tools and prefer primary sources. Attribute material claims to URLs or code locations; distinguish verified facts, assumptions, contradictions, freshness, and gaps. If tools are unavailable, disclose limitations without inventing access or evidence. If research is declined, continue within authorized scope only where safe without the missing evidence; pause only unsafe decisions dependent on it.
 
-Return concise findings, recommendation, tradeoffs, open questions, and implementation implications. Offer a concise proposal only when a real scope or product decision needs it. Neither research nor a proposal is mandatory. Forward these research instructions to an existing fresh general exploration/research worker through the existing delegation mechanism; do not create a specialized agent or invoke `sdd-research`. Research remains read-only and requires no new persistence or readiness machinery.
+Return concise findings, recommendation, tradeoffs, open questions, and implementation implications. Offer a concise proposal only when a real scope or product decision needs it. Neither research nor a proposal is mandatory. Forward these research instructions to an existing fresh general exploration/research worker through the existing delegation mechanism; do not create a specialized agent or create a new workflow. Research remains read-only and requires no new persistence or readiness machinery.
 
 Use at most one scoped independent read-only assumption challenge for a high-consequence unproven premise, even in a small security-critical change. Name the premise, evidence, and consequence; do not start a debate loop. Deterministic failures need fixes, not model debate. The native RDD refuter owns native review claims; never duplicate or bypass it with this challenge.
 
@@ -95,7 +90,7 @@ Before building, validate any consequential premise whose failure would invalida
 
 #### Checks and candidate consent
 
-Resolve effective TDD on/off from existing project/session configuration or explicit user choice; retain its source and exact test runner. Record resolved mode, source, and runner in the feature document when present. Tests or frameworks being present does not enable TDD. Forward mode, source, and runner on every implementation delegation; refresh on resume. When enabled, require observed RED before implementation, GREEN, then REFACTOR; never invent evidence. When disabled, run ordinary functional checks, not no checks. If mode is unknown/conflicting or the runner is missing, disclose and resolve only the ambiguity affecting the next action; never invent precedence or a command, and never invoke sdd-init to determine ODD TDD.
+For behavior changes with applicable runnable deterministic tests and a clear expected outcome, use test-first by default: observe RED before implementation, GREEN after minimum implementation, relevant alternate cases, then REFACTOR with focused checks still passing. Test or framework presence alone does not establish applicability. For passive documentation, non-testable changes, an unavailable runner, or no meaningful RED, state why and run proportionate ordinary functional or structural verification; never invent RED/GREEN or skip checks. No TUI toggle or per-task chat choice activates this policy. Forward this policy, the applicable exact runner and commands (when available), and any exception rationale on every implementation delegation; refresh on resume. Record observed evidence or the reason for fallback in the feature document.
 
 Run applicable functional checks per task; a TODO checkbox never triggers a review cycle. The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch, and native review runs at that work-unit commit or PR slice boundary, not every task update. Checklists grant no approval or receipt and never skip an existing delivery gate.
 
@@ -105,22 +100,22 @@ Delivery follows work units. At feature-document creation, forecast authored cha
 
 ### Delegation Rules
 
-These rules select execution topology, not the implementation method. Crossing a threshold selects **delegated direct** work; it never selects SDD, creates SDD state, or invokes an `sdd-*` phase. Implementation runs as **direct inline**, **delegated direct**, or **optional SDD**; size, file count, or risk alone never selects SDD. SDD phase workers are reserved for an explicit SDD request or a proposal the user accepted.
+These rules select execution topology, not the implementation method. Crossing a threshold selects **delegated direct** ODD work. Implementation runs as **direct inline** or **delegated direct**; size, file count, and risk determine only the safe execution topology.
 
-Core principle: **does this inflate the parent context without need?** If yes, use one bounded worker. If no, do it inline.
+Core principle: **does this inflate the parent context without need?** If yes, use one bounded worker. If no, do it inline. When the user has intent to change, fix, or update something, inline code reads are prohibited: delegate exploration or write preparation. Inline tests, builds, or installs are never permitted for post-subagent verification.
 
 | Action | Direct inline | Delegated direct worker |
 |--------|---------------|-------------------------|
-| Read to decide/verify (1–3 files) | ✅ | — |
+| Read to decide/verify (1–3 files; informational only, no change intent) | ✅ | — |
 | Read to explore/understand (4+ files) | — | ✅ one narrow mapper |
-| Read as preparation for writing | — | ✅ together with the write |
+| Read as preparation for writing / with change intent | — | ✅ together with the write or narrow mapper |
 | Write/mutate code (1+ files) | — | ✅ one writer (requires explicit user permission) |
 | Bash for state (`git`, `gh`) | ✅ | — |
-| Tests, builds, or installs | allowed as a bounded action | ✅ fresh per-action worker without changing route |
+| Tests, builds, or installs | allowed as a bounded action (never for post-subagent verification) | ✅ fresh per-action worker without changing route |
 
-Use the platform's native bounded worker for delegated-direct work; reserve `sdd-*` agents for a selected SDD route. Before every shipped SDD `subagent_run` dispatch, the parent runtime—not phrase matching or the child—must resolve interactive preflight, fail closed on cancellation/failure, and prepend the exact rendered `## SDD Session Preflight` block to the existing child `context`. Do not create a second preference channel. An RPC child consumes that context and never originates, confirms, or persists defaults.
+Use the platform's native bounded worker for delegated-direct work.
 
-Keep one writer and a short synthesized handoff. Delegation is mandatory at the mapping, write, preparation, and broad-research boundaries, but it remains a direct implementation route and must not synthesize SDD artifacts.
+Keep one writer and a short synthesized handoff. Delegation is mandatory at the mapping, write, preparation, and broad-research boundaries, and remains an ODD implementation route.
 
 #### Mandatory Delegation Triggers
 
@@ -131,15 +126,15 @@ These are parent-orchestrator routing boundaries; do not pass these rules to chi
 3. **Incident rule:** after wrong `cwd`, accidental repository/worktree mutation, failed merge recovery, confusing test command, or environment workaround, stop and diagnose the incident separately before resuming.
 4. **Long-session backstop (Long-session rule):** after about 20 tool calls, 5 exploratory reads, or 2 non-mechanical edits without any delegation, pause and delegate the next bounded unit of work.
 5. **Verification rule** (gentle-pi#661/#662, RDD-aware): executing or delegating verification commands goes to `gentle-ai-verify`; only the 1–3-file read-only check stays inline. The normative on/off/unknown routing is stated once under Pi Trigger Runtime Bindings below; reference it, do not restate it.
-6. **Linguistic Mapping rule (HARD CONTRACT):** any user prompt containing action verbs or defect reports ('arreglá', 'corregí', 'hacé', 'probá', 'revisá', 'fijate', 'tengo un detalle...') maps directly to delegating the execution to a subagent (`gentle-ai-explore` or `gentle-ai-worker`). The parent thread acts strictly as Pure Thinker and Coordinator.
+6. **Linguistic Mapping rule (HARD CONTRACT):** any user prompt containing action verbs or defect reports ('arreglá', 'corregí', 'hacé', 'probá', 'revisá', 'fijate', 'tengo un detalle...', 'actualizá', 'cambiá') maps directly to delegating the execution to a subagent (`gentle-ai-explore` or `gentle-ai-worker`). The parent thread acts strictly as Pure Thinker and Coordinator: it NEVER reads code files, executes analysis scripts, or performs sweeps inline before delegating.
 7. **Large-Context Window rule:** large context window capacity (1M+ tokens) NEVER overrides delegation rules. Absorbing multi-file reads or multi-file edits in the parent chat is strictly forbidden.
-8. **Post-Subagent Synthesis rule:** when a subagent returns its report, the parent orchestrator MUST synthesize the findings or propose the next action to the user. It is strictly forbidden for the parent to start reading files or running greps inline to re-verify, double-check, or expand the subagent's work. If additional exploration is needed, delegate a new focused subagent task.
+8. **Post-Subagent Synthesis rule:** when a subagent returns its report, the parent orchestrator MUST synthesize the findings or propose the next action to the user. It is strictly forbidden for the parent to start reading files (`read`), checking diagnostics (`lens_diagnostics`), searching code (`grep`), running verification commands (`bash` for tests/builds), or running scripts inline to re-verify, double-check, or expand the subagent's work. The subagent's reported evidence/summary is authoritative; if additional verification or fixes are needed, delegate a new focused subagent task (`gentle-ai-verify` or `gentle-ai-worker`).
 
 **Preparation trigger:** reading that prepares a write, and broad research or context compression, delegate together with or ahead of the write instead of filling the parent context.
 
 **Route declaration:** for substantial work, record the chosen route per task (inline or delegated) and the trigger evidence in the feature document, so skipped delegation is observable instead of silent.
 
-These triggers never select SDD and never create SDD artifacts; they only choose between direct inline and delegated direct inside the organic flow.
+These triggers only choose between direct inline and delegated direct inside ODD.
 
 For bounded multi-file writes, prefer the installed package-owned `gentle-ai-worker`, then a user-configured `worker`. If neither worker definition exists, fall back to the native `Agent` even when `subagent_*` tools are available. If no delegation mechanism is available, stop and explain the blocker. Judgment Day phase roles are never generic fallbacks. If the generic writer chain is unavailable, use the documented native generic fallback or stop.
 
@@ -167,7 +162,7 @@ Once a trigger fires, the parent MUST delegate through the best available subage
 
 The bounded multi-file writer precedence in rule 3 overrides that general runtime preference. If no delegation mechanism is available, stop and explain the blocker.
 
-1. **4-file rule**: launch `scout`, `context-builder`, or the closest read-only mapping subagent with fresh context and a narrow mapping task. Route generic non-SDD exploration to `gentle-ai-explore`; if missing or unusable, use native `Agent` with the same read-only mapping task and report the fallback.
+1. **4-file rule**: launch `scout`, `context-builder`, or the closest read-only mapping subagent with fresh context and a narrow mapping task. Route generic exploration to `gentle-ai-explore`; if missing or unusable, use native `Agent` with the same read-only mapping task and report the fallback.
 2. **Multi-file write rule**: for bounded multi-file writes, prefer the installed package-owned `gentle-ai-worker`, then a user-configured `worker`. If neither worker definition exists, fall back to the native `Agent` even when `subagent_*` tools are available. If no delegation mechanism is available, stop and explain the blocker.
 3. **Incident rule**: after wrong `cwd`, accidental repository/worktree mutation, failed merge recovery, confusing test command, or environment workaround, stop and diagnose the incident separately before resuming.
 4. **Long-session rule**: if accumulating work is no longer clearly local — roughly 20 tool calls, 5 exploratory file reads, or 2 non-mechanical edits without delegation — pause and delegate the remaining work instead of silently continuing monolithically.
@@ -188,11 +183,11 @@ Route work through the smallest harness that is safe. "Smallest" means minimal s
 
 #### 1. Inline Direct
 
-Use inline execution when the task is small, mechanical, and the parent already has enough context: a typo, rename, one-file mechanical edit, a small known bug, focused verification over 1–3 files, or bash for state. Do not add SDD ceremony. Do not use this exception to avoid delegation after the task stops being small.
+Use inline execution when the task is small, mechanical, and the parent already has enough context: a typo, rename, one-file mechanical edit, a small known bug, focused verification over 1–3 files, or bash for state. Keep the ODD path proportionate. Do not use this exception to avoid delegation after the task stops being small.
 
 #### 2. Simple Delegation
 
-Delegate when work would inflate parent context or requires focused exploration, validation, or multi-file implementation, but does not yet need a full SDD workflow. Examples include understanding an unfamiliar module, inspecting 4+ files, investigating a failing test, implementing a bounded multi-file change (2–4 files), or running focused tests/builds.
+Delegate when work would inflate parent context or requires focused exploration, validation, or multi-file implementation, within the ODD workflow. Examples include understanding an unfamiliar module, inspecting 4+ files, investigating a failing test, implementing a bounded multi-file change, or running focused tests/builds.
 
 **Lean Fast-Path (CodeGraph + Engram)**: For 2–4 bounded files in a single domain with zero architectural ambiguity, treat Simple Delegation as the Lean Fast-Path:
 1. **Explore first**: Use CodeGraph (`codegraph_explore`) or `gentle-ai-explore` to map symbol flows and references without dumping raw files into the parent context.
@@ -220,7 +215,7 @@ When the policy is on and `subagent_run` is available:
 - Finished tasks persist across restarts; running ones are stopped when pi exits and must be relaunched, never claimed as recovered.
 <!-- /gentle-pi:background-subagents -->
 
-For generic non-SDD exploration and mapping, first attempt the installed package-owned `gentle-ai-explore`. If that individual role is missing or unusable, fall back to Pi's native `Agent` with the same read-only mapping constraints and report the fallback.
+For generic exploration and mapping, first attempt the installed package-owned `gentle-ai-explore`. If that individual role is missing or unusable, fall back to Pi's native `Agent` with the same read-only mapping constraints and report the fallback.
 
 For bounded multi-file writes, prefer the installed package-owned `gentle-ai-worker`, then a user-configured `worker`. If neither worker definition exists, fall back to the native `Agent` even when `subagent_*` tools are available. If no delegation mechanism is available, stop and explain the blocker. This writer precedence overrides the general runtime preference above.
 
@@ -247,13 +242,7 @@ Security and Sandboxing Invariants:
 - **Ephemeral Lifespan**: Specialization never mutates disk assets (`assets/agents/*.md`) or persistent configuration. It lives exclusively in the memory of the spawned RPC child.
 - **UI Transparency**: Cards in the TUI display `<agent-name> ▸ [<specialization-label>]` (e.g. `gentle-ai-explore ▸ [ODD Architect]`).
 
-#### Dynamic Subagents (Last Resort)
-
-When a task, exploration, or phase genuinely does not fit standard SDD phases or existing workers (`gentle-ai-explore`, `gentle-ai-worker`, `gentle-ai-verify`), the orchestrator may define an ad-hoc dynamic subagent as a last resort. Define a custom agent markdown definition with YAML frontmatter in `.pi/agents/<name>.md` specifying the minimum required tools and specialized instructions, and dispatch it via `subagent_run(agent: "<name>")`. This dynamic pattern is strictly a last resort; always prefer existing canonical agents when available.
-
-Delegate generic non-SDD verification that executes or delegates commands per the RDD-aware Verification rule (trigger 5 under Mandatory Delegation Triggers, gentle-pi#661) -- the normative on/off/unknown routing lives there, not here: the bounded writer always self-verifies via `## Verification`, and `gentle-ai-verify` (or the native `Agent` fallback, with the same read-only verification constraints, exact parent-authorized commands, and fallback reporting) is on-demand only when the rendered `Receipt-driven development:` line reads `on`; when the line reads `off` or `unknown`, the `gentle_review` `assess` operation's returned plan decides it by native risk tier instead of a blanket non-trivial rule (gentle-pi#662). `## Known environmental failures` follows the same definition as `gentle-ai-worker`'s Verification contract: exact pre-existing base failures reported as evidence, never blockers -- any other failing required command still forces `status: partial`. Truly local read-only checking of 1–3 known files may remain inline. Separate exploration stays reserved for when the parent needs the map to decide or route; reading that prepares a write belongs with the writer making the change, consistent with the Delegation Rules table above.
-
-Use `sdd-explore` and `sdd-verify` only inside SDD.
+Delegate generic verification that executes or delegates commands per the RDD-aware Verification rule (trigger 5 under Mandatory Delegation Triggers, gentle-pi#661) -- the normative on/off/unknown routing lives there, not here: the bounded writer always self-verifies via `## Verification`, and `gentle-ai-verify` (or the native `Agent` fallback, with the same read-only verification constraints, exact parent-authorized commands, and fallback reporting) is on-demand only when the rendered `Receipt-driven development:` line reads `on`; when the line reads `off` or `unknown`, the `gentle_review` `assess` operation's returned plan decides it by native risk tier instead of a blanket non-trivial rule (gentle-pi#662). `## Known environmental failures` follows the same definition as `gentle-ai-worker`'s Verification contract: exact pre-existing base failures reported as evidence, never blockers -- any other failing required command still forces `status: partial`. Truly local read-only checking of 1–3 known files may remain inline. Separate exploration stays reserved for when the parent needs the map to decide or route; reading that prepares a write belongs with the writer making the change, consistent with the Delegation Rules table above.
 
 #### Allowed edit surfaces (MANDATORY)
 
@@ -275,7 +264,7 @@ Relay a writer's `interaction_required` payload about edit surfaces the same way
 
 Subagents refuse to rediscover the project/user skill registry during normal runtime. The parent owns skill selection:
 
-Before launching any subagent (`gentle-ai-worker`, `gentle-ai-explore`, `gentle-ai-verify`, or SDD executors):
+Before launching any subagent (`gentle-ai-worker`, `gentle-ai-explore`, `gentle-ai-verify`):
 1. Check if `.atl/skill-registry.md` exists in the target project/workspace.
 2. If present, match the target files and technology stack of the task (e.g. Angular, Go, SQL, Docker, TypeScript, etc.) against the `Trigger / description` column in the registry.
 3. Include the matching absolute paths under a `## Skills to load before work` heading in the delegated task/prompt, one per line.
@@ -291,9 +280,9 @@ For delegation other than bounded multi-file writes, use the generic fallback: i
 
 #### Pi Subagent Model Routing
 
-For generic Pi subagents (`delegate`, `worker`, `scout`, `context-builder`, `oracle`, `planner`, `researcher`, or other non-SDD agents), do not pass the `model` parameter by default. Let `pi-subagents` resolve model and thinking from `.pi/settings.json`, `.pi/subagents.json`, global subagent config, and runtime defaults.
+For generic Pi subagents (`delegate`, `worker`, `scout`, `context-builder`, `oracle`, `planner`, `researcher`, or other general agents), do not pass the `model` parameter by default. Let `pi-subagents` resolve model and thinking from `.pi/settings.json`, `.pi/subagents.json`, global subagent config, and runtime defaults.
 
-SDD model assignment tables apply only to SDD/Judgment-Day phase agents. They must not be used for generic Pi delegation. Only pass `model` for generic subagents when the user explicitly requests a model override for that launch.
+Only pass `model` for generic subagents when the user explicitly requests a model override for that launch.
 
 Default balanced pattern for bounded implementation:
 
@@ -301,13 +290,7 @@ Default balanced pattern for bounded implementation:
 parent clarifies and checks git → one worker writes when authorized → focused verification → parent reports
 ```
 
-Do not make every task SDD. Do make non-trivial tasks multi-agent at the narrowest useful point.
-
-#### 3. SDD (optional)
-
-SDD is never selected by size, file count, or risk alone. Do not recommend SDD merely to resolve ambiguity. Use the organic research guidance above; retain SDD when the user explicitly requests it or accepts a proposal to use it.
-
-Select SDD only when the user explicitly asks to use SDD, invokes `/gentle-sdd-new`, `/gentle-sdd-ff`, or `/gentle-sdd-continue`, or accepts an SDD proposal. Once selected, do not jump directly to implementation. Calibrate context, create artifacts, and ask for approval at the appropriate gates.
+Make non-trivial tasks multi-agent at the narrowest useful point.
 
 ## Pi Delegation Bindings
 
@@ -339,4 +322,4 @@ stop writes → parent captures git status → diagnose affected repositories/wo
 
 ## Delivery strategy
 
-For selected SDD work, use the delivery strategy, chain strategy, workload forecast, and approval gates in `assets/sdd-orchestrator-workflow.md`. Direct and delegated work do not create SDD artifacts.
+Use the ODD delivery strategy and work-unit boundaries under Checks and candidate consent above. Push, PR creation, and merge remain human decisions.
