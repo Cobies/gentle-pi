@@ -312,3 +312,47 @@ test("ODD protocol is always-on in the rendered system prompt and runs by defaul
 	containsAll(core, ["orchestrator-delegation.md", "orchestrator-memory.md"]);
 	assert.doesNotMatch(core + delegation + memory, /SDD|sdd-|OpenSpec|openspec/i);
 });
+
+test("cross-repository subagent dispatch enforces mandatory human consent gate across contracts and prompts", () => {
+	const consentMandate =
+		"Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via `repository_root`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously.";
+	const consentGate = "Cross-Repository Consent Gate (HARD CONTRACT)";
+
+	containsAll(delegation, [
+		consentGate,
+		"when a task requires delegating to an independent Git repository via `repository_root`",
+		"The orchestrator must NEVER autonomously dispatch a subagent to an independent Git repository via `repository_root` without pausing to ask the human for explicit authorization first",
+		"Never cross repository boundaries autonomously",
+	]);
+
+	containsAll(core, [
+		"Cross-Repository Consent Gate (HARD CONTRACT): dispatching a subagent to an independent Git repository via `repository_root` strictly requires explicit user authorization first; never cross repository boundaries autonomously.",
+		"Cross-Repository Consent Mandate: dispatching subagents to an independent Git repository (via `repository_root`) strictly requires asking the user for explicit authorization first; never cross repository boundaries autonomously.",
+	]);
+
+	containsAll(wrapper, [
+		"Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via \\`repository_root\\`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously.",
+	]);
+
+	for (const persona of ["gentleman", "neutral"] as const) {
+		const prompt = __testing.buildGentlePrompt(persona);
+		assert.ok(
+			prompt.includes(consentMandate),
+			`[${persona}] missing Cross-Repository Consent Mandate in prompt`,
+		);
+		// Step 1 check
+		assert.ok(
+			prompt.includes(
+				`1. **Authorize.** Investigation, explanation, review, comparison, and proposal-only requests stay read-only: no writer, apply, or implementation artifacts. Ambiguous or conditional change intent gets one clarification; stop and wait. ${consentMandate}`,
+			),
+			`[${persona}] missing Cross-Repository Consent Mandate in ODD step 1`,
+		);
+		// Step 6 check
+		assert.ok(
+			prompt.includes(
+				`6. **Implement task by task.** Route each task through the orchestrator's Work Routing Ladder, honoring its mandatory delegation triggers, with applicable test-first development and checks. These triggers are mandatory, not advisory: executing past a fired trigger inline is a routing defect even if the work succeeds. ${consentMandate}`,
+			),
+			`[${persona}] missing Cross-Repository Consent Mandate in ODD step 6`,
+		);
+	}
+});

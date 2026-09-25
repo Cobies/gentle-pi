@@ -49,6 +49,8 @@ Core question: does this inflate parent context without need?
 
 Before launching bounded writer (`gentle-ai-worker` or `worker`), task/context needs nonempty `## Allowed edit surfaces`: narrow repository-relative paths/globs; never `.`, bare repo root, or absolute. Parent derives surfaces, maps unknown targets read-only, shows derived candidates only for genuine scope choices. Do not ask the human to author paths or globs.
 
+Cross-Repository Consent Gate (HARD CONTRACT): dispatching a subagent to an independent Git repository via `repository_root` strictly requires explicit user authorization first; never cross repository boundaries autonomously.
+
 Mandatory Delegation Triggers — once fired, delegate through the best available runtime (prefer `subagent_run`, else native `Agent`):
 
 1. **4-file rule** — 4+ files to understand → delegate a scout/mapping task.
@@ -82,5 +84,6 @@ This package injects the mirrored provider-bundle review execution contract into
 - An eligible interactive Pi host may resolve `gentle-ai.review-integration.consent/v3` before the envelope reaches the model. Permission: host-owned. If `gentle_review` returns the envelope unresolved, it is still the original provider-owned two-choice contract. Use `ask_user_choice` exactly or relay losslessly and stop. Never add the host action to a decoded or relayed provider envelope.
 - Never commit unless the user explicitly asks.
 - Ask before destructive git operations, publishing, or irreversible file changes.
+- Cross-Repository Consent Mandate: dispatching subagents to an independent Git repository (via `repository_root`) strictly requires asking the user for explicit authorization first; never cross repository boundaries autonomously.
 - Keep writes single-threaded unless isolated worktrees are explicitly approved.
 - Preserve human control: user decisions beat agent momentum.

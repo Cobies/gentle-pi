@@ -129,6 +129,7 @@ These are parent-orchestrator routing boundaries; do not pass these rules to chi
 6. **Linguistic Mapping rule (HARD CONTRACT):** any user prompt containing action verbs or defect reports ('arreglá', 'corregí', 'hacé', 'probá', 'revisá', 'fijate', 'tengo un detalle...', 'actualizá', 'cambiá') maps directly to delegating the execution to a subagent (`gentle-ai-explore` or `gentle-ai-worker`). The parent thread acts strictly as Pure Thinker and Coordinator: it NEVER reads code files, executes analysis scripts, or performs sweeps inline before delegating.
 7. **Large-Context Window rule:** large context window capacity (1M+ tokens) NEVER overrides delegation rules. Absorbing multi-file reads or multi-file edits in the parent chat is strictly forbidden.
 8. **Post-Subagent Synthesis rule:** when a subagent returns its report, the parent orchestrator MUST synthesize the findings or propose the next action to the user. It is strictly forbidden for the parent to start reading files (`read`), checking diagnostics (`lens_diagnostics`), searching code (`grep`), running verification commands (`bash` for tests/builds), or running scripts inline to re-verify, double-check, or expand the subagent's work. The subagent's reported evidence/summary is authoritative; if additional verification or fixes are needed, delegate a new focused subagent task (`gentle-ai-verify` or `gentle-ai-worker`).
+9. **Cross-Repository Consent Gate (HARD CONTRACT):** when a task requires delegating to an independent Git repository via `repository_root`, the parent orchestrator MUST stop and ask the user for explicit authorization before queueing or dispatching the subagent. The orchestrator must NEVER autonomously dispatch a subagent to an independent Git repository via `repository_root` without pausing to ask the human for explicit authorization first. Never cross repository boundaries autonomously.
 
 **Preparation trigger:** reading that prepares a write, and broad research or context compression, delegate together with or ahead of the write instead of filling the parent context.
 
@@ -299,6 +300,7 @@ Prefer delegation when fresh context improves correctness more than token saving
 - Use `scout`/`context-builder` to compress broad repository exploration into a short handoff instead of loading many files into the parent.
 - Use a single `worker` for one writer thread; do not run parallel writers unless isolated worktrees are explicitly approved.
 - Use `outputMode: "file-only"` for large child reports and summarize only decisions, blockers, and paths in the parent thread.
+- **Cross-Repository Consent Gate (HARD CONTRACT)**: Dispatching a subagent to an independent Git repository via `repository_root` strictly requires explicit user authorization first. The orchestrator must NEVER autonomously dispatch a subagent to an independent Git repository via `repository_root` without pausing to ask the human for explicit authorization first. Never cross repository boundaries autonomously.
 
 ### Canonical Lightweight Workflows
 
