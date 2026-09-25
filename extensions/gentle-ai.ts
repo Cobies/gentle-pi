@@ -19,7 +19,7 @@ import {
 	readdir,
 	writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -1887,6 +1887,69 @@ function evaluateSensitivePathTool(
 		block: true,
 		reason: `Gentle AI safety policy blocked access to sensitive path: ${sanitizeTerminalText(sensitivePath)}. Ask the user for an explicit safer plan.`,
 	};
+}
+
+function isAllowedOrchestratorMutationPath(rawPath: string, cwd: string): boolean {
+	if (typeof rawPath !== "string" || !rawPath.trim()) return false;
+	const normalized = rawPath.trim().replace(/\\/g, "/");
+	const strippedLeadingDot = normalized.replace(/^\.\//, "");
+
+	const allowedBookkeepingPrefixes = [
+		"odd/tasks/",
+		".atl/",
+		".pi/",
+		".git/",
+		".engram/",
+	];
+	if (allowedBookkeepingPrefixes.some((prefix) => strippedLeadingDot === prefix.slice(0, -1) || strippedLeadingDot.startsWith(prefix))) {
+		return true;
+	}
+
+	const resolvedCwd = resolve(cwd);
+	const absPath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(resolvedCwd, rawPath);
+	const relFromCwd = relative(resolvedCwd, absPath).replace(/\\/g, "/");
+	const isInsideCwd = !relFromCwd.startsWith("..") && !isAbsolute(relFromCwd);
+
+	if (isInsideCwd) {
+		const cleanRel = relFromCwd.replace(/^\.\//, "");
+		if (allowedBookkeepingPrefixes.some((prefix) => cleanRel === prefix.slice(0, -1) || cleanRel.startsWith(prefix))) {
+			return true;
+		}
+
+		const blockedSourcePrefixes = [
+			"src/",
+			"lib/",
+			"extensions/",
+			"assets/",
+			"tests/",
+			"bin/",
+			"skills/",
+			"prompts/",
+		];
+		const blockedExactFiles = [
+			"package.json",
+			"package-lock.json",
+			"tsconfig.json",
+			"pnpm-lock.yaml",
+		];
+		if (blockedSourcePrefixes.some((prefix) => cleanRel.startsWith(prefix)) || blockedExactFiles.includes(cleanRel)) {
+			return false;
+		}
+	}
+
+	const resolvedTemp = resolve(tmpdir());
+	const relFromTemp = relative(resolvedTemp, absPath).replace(/\\/g, "/");
+	const isInsideTemp = !relFromTemp.startsWith("..") && !isAbsolute(relFromTemp);
+	const normalizedAbs = absPath.replace(/\\/g, "/").toLowerCase();
+	if (isInsideTemp || normalizedAbs.startsWith("/tmp/") || normalizedAbs.startsWith("/var/tmp/") || normalizedAbs.startsWith("/private/tmp/")) {
+		return true;
+	}
+
+	if (isInsideCwd) {
+		return false;
+	}
+
+	return false;
 }
 
 const ASK_USER_CHOICE_BLOCKED_EVENT = "gentle-pi:ask-user-choice:blocked";
@@ -8760,6 +8823,7 @@ async function executeReviewControllerOperation(
 
 /** @internal */
 export const __testing = {
+	isAllowedOrchestratorMutationPath,
 	resolveReviewModeGate,
 	readEffectiveModelConfig,
 	readEffectiveModelConfigAsync,
@@ -9379,6 +9443,20 @@ function createGentleAiExtensionForTesting(
 			event.input,
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
+		if (event.toolName === "write" || event.toolName === "edit") {
+			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
+				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
+				Boolean((ctx as unknown as { agent?: unknown })?.agent);
+			if (!isChild) {
+				const targetPath = isRecord(event.input) && typeof event.input.path === "string" ? event.input.path : "";
+				if (!isAllowedOrchestratorMutationPath(targetPath, ctx.cwd)) {
+					return {
+						block: true,
+						reason: "Gentle AI Pure Thinker policy: direct source code editing by the parent orchestrator is strictly prohibited. All code modifications must be delegated to gentle-ai-worker. Dispatch a worker subagent with explicit ## Allowed edit surfaces.",
+					};
+				}
+			}
+		}
 		if (event.toolName === "subagent_run") {
 			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input, ctx.cwd);
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;

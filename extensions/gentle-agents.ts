@@ -58,6 +58,7 @@ const CLOCK_TICK_MS = 1000;
 const TOOL_PREFIX = "subagent_";
 
 const retiredSddAgent = (name: string): boolean => /^sdd(?:-|$)/.test(name);
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 const SPECIALIZATION_SCHEMA = {
 	type: "object",
@@ -1319,12 +1320,12 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		},
 	);
 
-	tool("status", "Report the status of one subagent task. Do not poll this to wait for background task completion; results arrive automatically via session message.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params) => {
+	tool("status", "Report the status of one subagent task. Polling active (queued or running) background tasks is blocked by runtime policy; results arrive automatically via session message.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params) => {
 		const task = await resolveTask(String(params.task_id));
 		return task ? text(describeTask(task), taskDetails(task)) : text(`Error: no task ${String(params.task_id)}`, { error: "unknown task" });
 	});
 
-	tool("result", "Return the final answer of a finished subagent task, or its current state if it is still running. Do not poll this to wait for background task completion; results arrive automatically via session message.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params) => {
+	tool("result", "Return the final answer of a finished subagent task, or its current state if it is still running. Polling active (queued or running) background tasks is blocked by runtime policy; results arrive automatically via session message.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params) => {
 		const task = await resolveTask(String(params.task_id));
 		if (!task) return text(`Error: no task ${String(params.task_id)}`, { error: "unknown task" });
 		// The parent just pulled a finished result; its pending completion must
@@ -1401,6 +1402,23 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			handler: async (ctx) => stopAll(ctx),
 		});
 	}
+
+	pi.on("tool_call", async (event) => {
+		if (event.toolName === "subagent_status" || event.toolName === "subagent_result") {
+			const rawId = isRecord(event.input) ? event.input.task_id : undefined;
+			const taskId = typeof rawId === "string" ? rawId.trim() : typeof rawId === "number" ? String(rawId) : undefined;
+			if (taskId) {
+				const task = await resolveTask(taskId);
+				if (task && (task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.QUEUED)) {
+					return {
+						block: true,
+						reason: "Gentle AI safety policy: polling subagent_status or subagent_result while a background task is running is strictly forbidden. Results arrive automatically via session message when settled. You MUST end your turn immediately without calling further tools.",
+					};
+				}
+			}
+		}
+		return undefined;
+	});
 
 	pi.on("session_start", async (event, ctx) => {
 		// A resumed, reloaded, or replaced session starts with an empty completion
