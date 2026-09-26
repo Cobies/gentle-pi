@@ -1,4 +1,5 @@
 import { consumeReviewMutation, pendingReviewMutation, recordReviewMutation } from "../lib/review-reminder-receipt.ts";
+import { isOddPhase, oddPhaseRegistry, ODD_PHASES } from "../lib/odd-phase.ts";
 import { resolveSessionWorktree } from "../lib/session-worktree-registry.ts";
 import { declareReviewRelayHandshake } from "../lib/review-relay-contract.ts";
 import { execFileSync } from "node:child_process";
@@ -29,7 +30,7 @@ import type {
 	ThemeColor,
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { Key, isKeyRelease, matchesKey, truncateToWidth, type KeybindingsManager, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { Key, Text, isKeyRelease, matchesKey, truncateToWidth, type KeybindingsManager, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { resolveGentlePiAgentHome, gentlePiConfigHome } from "../lib/agent-home.ts";
 import {
 	BACKGROUND_SUBAGENTS_FILE,
@@ -1809,7 +1810,11 @@ const MODEL_PANEL_MAX_RENDER_ROWS = 20;
 // Rows the agent list does not own: two borders, title, current-profile line,
 // blank, "Current assignments:", blank, both scroll indicators, blank, Continue,
 // Back, blank, and the two footer rows.
-const AGENT_LIST_MAX_VISIBLE_ROWS = MODEL_PANEL_MAX_RENDER_ROWS - 15;
+const AGENT_LIST_CHROME_ROWS = 15;
+const AGENT_LIST_MAX_VISIBLE_ROWS = MODEL_PANEL_MAX_RENDER_ROWS - AGENT_LIST_CHROME_ROWS;
+// Rows the model list does not own: two borders, title, blank, search, blank,
+// blank, and the footer row.
+const MODEL_LIST_CHROME_ROWS = 8;
 const MODEL_LIST_MAX_VISIBLE_ROWS = 12;
 
 function readStringPath(value: unknown, path: string[]): string | undefined {
@@ -3023,6 +3028,8 @@ class SddModelPanel implements OverlayComponent {
 	private readonly theme: Theme | undefined;
 	// The profile `u` writes to, named up front so the key never targets a surprise.
 	private readonly profileLabel: string;
+	// Terminal rows, so the card fills the fullscreen overlay like `/gentle:profiles`.
+	private readonly terminalRows: (() => number) | undefined;
 
 	constructor(
 		initialConfig: AgentModelConfig,
@@ -3031,6 +3038,7 @@ class SddModelPanel implements OverlayComponent {
 		done: (result: ModelPanelResult) => void,
 		theme?: Theme,
 		profileLabel = "none",
+		terminalRows?: () => number,
 	) {
 		this.draft = cloneModelConfig(initialConfig);
 		this.rows = [SET_ALL_AGENTS, ...agents];
@@ -3038,6 +3046,7 @@ class SddModelPanel implements OverlayComponent {
 		this.done = done;
 		this.theme = theme;
 		this.profileLabel = profileLabel;
+		this.terminalRows = terminalRows;
 	}
 
 	invalidate(): void {}
@@ -3065,10 +3074,22 @@ class SddModelPanel implements OverlayComponent {
 		return this.renderCard(lines, width);
 	}
 
-	private renderCard(lines: string[], width: number): string[] {
+	// In the fullscreen overlay a list owns every row its chrome leaves free;
+	// without a terminal height it keeps the fixed window.
+	private visibleListRows(fixedRows: number, chromeRows: number): number {
+		if (!this.terminalRows) return fixedRows;
+		return Math.max(1, Math.floor(this.terminalRows()) - chromeRows);
+	}
+
+	private renderCard(body: string[], width: number): string[] {
+		let lines = body;
 		const innerWidth = Math.max(1, width - 4);
 		const horizontal = "─".repeat(innerWidth + 2);
 		const border = (text: string) => this.renderText(text, "border");
+		const bodyRows = this.terminalRows ? Math.floor(this.terminalRows()) - 2 : 0;
+		if (lines.length < bodyRows) {
+			lines = [...lines, ...Array<string>(bodyRows - lines.length).fill("")];
+		}
 		return [
 			border(`╭${horizontal}╮`),
 			...lines.map(
@@ -3300,7 +3321,10 @@ class SddModelPanel implements OverlayComponent {
 		lines.push("");
 		lines.push(line("Current assignments:", "muted"));
 		lines.push("");
-		const visibleRows = Math.min(AGENT_LIST_MAX_VISIBLE_ROWS, this.rows.length);
+		const visibleRows = Math.min(
+			this.visibleListRows(AGENT_LIST_MAX_VISIBLE_ROWS, AGENT_LIST_CHROME_ROWS),
+			this.rows.length,
+		);
 		const listCursor = Math.min(this.cursor, this.rows.length - 1);
 		const start = Math.max(
 			0,
@@ -3366,14 +3390,15 @@ class SddModelPanel implements OverlayComponent {
 			`${this.renderText("◎", "accent")} ${this.renderText(this.query || "search...", "muted")}`,
 		);
 		lines.push("");
+		const visibleRows = this.visibleListRows(MODEL_LIST_MAX_VISIBLE_ROWS, MODEL_LIST_CHROME_ROWS);
 		const start = Math.max(
 			0,
 			Math.min(
-				this.modelCursor - Math.floor(MODEL_LIST_MAX_VISIBLE_ROWS / 2),
-				Math.max(0, options.length - MODEL_LIST_MAX_VISIBLE_ROWS),
+				this.modelCursor - Math.floor(visibleRows / 2),
+				Math.max(0, options.length - visibleRows),
 			),
 		);
-		const end = Math.min(options.length, start + MODEL_LIST_MAX_VISIBLE_ROWS);
+		const end = Math.min(options.length, start + visibleRows);
 		for (let i = start; i < end; i++) {
 			const focused = i === this.modelCursor;
 			lines.push(
@@ -3481,10 +3506,20 @@ function renderSddModelPanelForTesting(
 	agents: string[],
 	width: number,
 	theme?: Theme,
+	terminalRows?: number,
+	inputs: string[] = [],
 ): string[] {
-	return new SddModelPanel(initialConfig, modelOptions, agents, () => {}, theme).render(
-		width,
+	const panel = new SddModelPanel(
+		initialConfig,
+		modelOptions,
+		agents,
+		() => {},
+		theme,
+		undefined,
+		terminalRows === undefined ? undefined : () => terminalRows,
 	);
+	for (const data of inputs) panel.handleInput(data);
+	return panel.render(width);
 }
 
 async function showSddModelPanel(
@@ -3495,15 +3530,18 @@ async function showSddModelPanel(
 	const modelOptions = await getPiModelOptions(ctx);
 	const agents = modelAssignmentNames(ctx.cwd);
 	return ctx.ui.custom<ModelPanelResult>(
-		(_tui, theme, _keybindings, done) =>
-			new SddModelPanel(config, modelOptions, agents, done, theme, profileLabel),
+		(tui, theme, _keybindings, done) =>
+			new SddModelPanel(config, modelOptions, agents, done, theme, profileLabel, () =>
+				Math.max(0, tui.terminal.rows),
+			),
 		{
 			overlay: true,
+			// Same fullscreen dimensions as the `/gentle:profiles` panel.
 			overlayOptions: {
 				anchor: "center",
-				width: "70%",
-				minWidth: 72,
-				maxHeight: "85%",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
 			},
 		},
 	);
@@ -8983,6 +9021,66 @@ function createGentleAiExtensionForTesting(
 		cleanupAllPendingReviewConsents(pendingReviewConsentRegistry, sessionKey);
 		processRetainedNativeStatusSelections.delete(sessionKey);
 		processAgentEndSubagentDepth.delete(sessionKey);
+	});
+
+	// gentle-pi ODD input phase labels: a small, explicit, bounded ODD phase
+	// signal for the Gentle prompt's working label. There is no Pi runtime
+	// event for ODD phases, so this is reported by the orchestrator only, at
+	// ODD protocol transitions -- never inferred from tool use or prose. It is
+	// session-scoped in lib/odd-phase.ts: a background/child agent runs as its
+	// own OS process with its own module state, so it can never see or
+	// override the primary session's reported phase.
+	const hiddenOddPhaseToolComponent = { render: (_width: number): string[] => [], invalidate() {} };
+	pi.registerTool({
+		name: "gentle_odd_phase",
+		renderShell: "self",
+		label: "Gentle ODD Phase",
+		description: "Report the primary session's current ODD phase for the Gentle prompt's working label. Best-effort UI only; never a source of truth for orchestration logic.",
+		promptSnippet: "Report authorizing/exploring/researching/deciding/planning/implementing/checking/closing only at real ODD phase transitions of the primary turn; never poll or report per tool call.",
+		promptGuidelines: [
+			`phase must be exactly one of ${ODD_PHASES.join(", ")}, or "clear" to leave the current phase before its turn ends. Call this only when the ODD phase actually changes for the primary session's active turn, not on every tool call or thought.`,
+			"Never call this from a subagent or background/child task; it reports only the primary orchestrator's own phase, and a child's session id can never override the parent's label.",
+		],
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			required: ["phase"],
+			properties: {
+				phase: { type: "string", enum: [...ODD_PHASES, "clear"], description: "The reported ODD phase, or 'clear' to leave the current phase." },
+			},
+		} as const,
+		executionMode: "parallel",
+		// The prompt editor owns the success indicator. An empty self-rendered
+		// call avoids Pi's default transcript card while preserving error output.
+		renderCall() {
+			return hiddenOddPhaseToolComponent;
+		},
+		renderResult(result, _options, theme, context) {
+			if (!context.isError) return hiddenOddPhaseToolComponent;
+			const message = result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
+			return new Text(theme.fg("error", sanitizeTerminalText(message || "ODD phase report failed.")), 0, 0);
+		},
+		async execute(_toolCallId, parameters, _signal, _onUpdate, ctx) {
+			const phase = (parameters as { phase?: unknown }).phase;
+			const sessionId = ctx.sessionManager.getSessionId();
+			// Pi's own contract (docs/extensions.md, Signaling errors): throw to
+			// mark a tool execution as failed (sets isError: true on the result);
+			// returning a value -- including an isError property on it -- never
+			// sets that flag.
+			if (!sessionId) throw new Error("No active session to report an ODD phase for; nothing changed.");
+			// An invalid token never resets state: only the explicit "clear" token
+			// leaves the current phase. This keeps a malformed report from wiping
+			// out an otherwise-accurate label for the rest of the turn.
+			if (phase === "clear") {
+				oddPhaseRegistry.clear(sessionId);
+				return { content: [{ type: "text", text: "ODD phase cleared." }], details: { phase: undefined } };
+			}
+			if (!isOddPhase(phase)) {
+				throw new Error(`Invalid ODD phase; use one of ${ODD_PHASES.join(", ")}, or "clear". The previously reported phase, if any, is unchanged.`);
+			}
+			const reported = oddPhaseRegistry.report(sessionId, phase);
+			return { content: [{ type: "text", text: `ODD phase reported: ${reported}` }], details: { phase: reported } };
+		},
 	});
 
 	const GENTLE_TIMED_TOOLS = new Set(["gentle_review_scope", "gentle_review_capture_group", "gentle_review_capture", "gentle_review"]);
