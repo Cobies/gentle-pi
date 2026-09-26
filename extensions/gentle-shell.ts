@@ -26,11 +26,17 @@ import { oddPhaseRegistry } from "../lib/odd-phase.ts";
 import { gentlePiConfigHome } from "../lib/agent-home.ts";
 import { resolveAnimationPolicy, writeAnimationPolicy, type AnimationPolicy } from "../lib/animation-policy.ts";
 import { resolveVimPolicy, writeVimPolicy, type VimPolicy } from "../lib/vim-policy.ts";
+import { resolveHistoryCapture, writeHistoryCapturePolicy } from "../lib/history-capture-policy.ts";
 import { createRequire } from "node:module";
 import { createVimEditorAdapter } from "../lib/vim-editor-adapter.ts";
 import { VimNormalEngine } from "../lib/vim-normal-engine.ts";
 import { VimOperatorEngine, type OperatorResult } from "../lib/vim-operator-engine.ts";
 import { VimVisualEngine } from "../lib/vim-visual-engine.ts";
+
+// Canonical entrypoint and index patterns across POSIX and Windows separators.
+// Exported for cross-platform unit testing of candidate path resolution.
+export const VIM_CLI_ENTRY_PATTERN = /(?:^|[\\/])dist[\\/]bundle[\\/]cli\.js$/;
+export const VIM_AGENT_INDEX_PATTERN = /(?:^|[\\/])dist[\\/]index\.js$/;
 
 // Candidate paths provide only package roots, never version authority. Both
 // constructors must come from that same canonical agent/TUI pair before its
@@ -45,9 +51,9 @@ export function resolveVimRuntime(entry = process.argv[1], customClass: typeof C
 	try {
 		if (entry) {
 			const cli = realpathSync(entry);
-			if (cli.endsWith("/dist/bundle/cli.js")) {
+			if (VIM_CLI_ENTRY_PATTERN.test(cli)) {
 				const root = resolve(dirname(cli), "../..");
-				const bundlePath = resolve(root, "dist/bundle/index.js");
+				const bundlePath = resolve(root, "dist", "bundle", "index.js");
 				if (realpathSync(bundlePath) === bundlePath) {
 					const requireFromBundle = createRequire(bundlePath);
 					const bundled = requireFromBundle(bundlePath) as { CustomEditor?: typeof CustomEditor; VERSION?: string };
@@ -66,17 +72,17 @@ export function resolveVimRuntime(entry = process.argv[1], customClass: typeof C
 	try {
 		if (entry) {
 			const cli = realpathSync(entry);
-			if (cli.endsWith("/dist/bundle/cli.js")) candidates.push(resolve(dirname(cli), "../.."));
+			if (VIM_CLI_ENTRY_PATTERN.test(cli)) candidates.push(resolve(dirname(cli), "../.."));
 		}
 	} catch { /* The CLI is only a candidate, not proof. */ }
 	try {
 		const localIndex = realpathSync(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
-		if (localIndex.endsWith("/dist/index.js")) candidates.push(resolve(dirname(localIndex), ".."));
+		if (VIM_AGENT_INDEX_PATTERN.test(localIndex)) candidates.push(resolve(dirname(localIndex), ".."));
 	} catch { /* No local candidate; do not trust extension-relative metadata. */ }
 	for (const root of new Set(candidates)) {
 		try {
-			const agentIndex = realpathSync(resolve(root, "dist/index.js"));
-			if (agentIndex !== resolve(root, "dist/index.js")) continue;
+			const agentIndex = realpathSync(resolve(root, "dist", "index.js"));
+			if (agentIndex !== resolve(root, "dist", "index.js")) continue;
 			const requireFromRuntime = createRequire(agentIndex);
 			const agent = requireFromRuntime(agentIndex) as { CustomEditor?: typeof CustomEditor };
 			const agentMetadata = requireFromRuntime(resolve(root, "package.json")) as { version?: string; name?: string };
@@ -1708,7 +1714,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		});
 	}
 	pi.registerCommand("gentle:customize", {
-		description: "Configure animations, banner, themes, layout and global Vim prompt editing.",
+		description: "Configure animations, banner, themes, layout, global Vim prompt editing and prompt history capture.",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui" || !ctx.hasUI) {
 				if (ctx.hasUI) ctx.ui.notify("Visual customization requires an interactive terminal.", "warning");
@@ -1816,6 +1822,31 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 					vimPolicy = result.policy;
 					prompt?.setVimPolicy(vimPolicy);
 					reportVim(ctx, result);
+				},
+			});
+			category = "History";
+			// The prompt-history extension re-reads this preference per prompt, so a
+			// change applies without restart. An explicit GENTLE_PI_HISTORY_CAPTURE
+			// value wins; the rows say so instead of silently ignoring the choice.
+			const historyCapture = () => resolveHistoryCapture({ env, gentlePiConfigHome: doubleEscCancelConfigHome });
+			for (const [label, policy] of [["enable", "on"], ["disable", "off"]] as const) rows.push({
+				category,
+				label: () => {
+					const result = historyCapture();
+					return `Prompt history capture: ${label}${result.preference === policy && !result.malformed ? " (current)" : ""}${result.envOverride ? " · env override" : ""}`;
+				},
+				preview: () => {
+					const result = historyCapture();
+					const effective = result.enabled ? "on" : "off";
+					return { title: "Prompt history capture · Customize preference", sample: `preference: ${result.preference} · effective: ${effective}${result.malformed ? " · malformed or unreadable file" : ""}${result.envOverride ? " · GENTLE_PI_HISTORY_CAPTURE overrides this preference" : ""}` };
+				},
+				action: () => {
+					const current = historyCapture();
+					if (current.malformed) throw new Error(`Cannot update malformed or unreadable history capture preference: ${current.globalFile}`);
+					writeHistoryCapturePolicy(policy, { gentlePiConfigHome: doubleEscCancelConfigHome });
+					const result = historyCapture();
+					if (result.envOverride) ctx.ui.notify(`Prompt history capture preference saved: ${result.preference}. GENTLE_PI_HISTORY_CAPTURE=${result.envOverride} overrides it; capture stays ${result.envOverride}.`, "warning");
+					else ctx.ui.notify(result.enabled ? "Prompt history capture: on. Applies from the next prompt; stored history is kept." : "Prompt history capture: off. New prompts are not recorded; stored history is kept.", "info");
 				},
 			});
 			category = "Layout";

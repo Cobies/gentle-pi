@@ -1217,9 +1217,22 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			description,
 			parameters: { type: "object", additionalProperties: false, ...parameters } as never,
 			renderCall(args, theme, context) {
+				// The result title belongs with the result body so a running poll
+				// can hide both without changing the tool call or its model output.
+				if (name === "result") return { render: () => [], invalidate() {} };
 				return renderGentleAgentCall(name, args as Record<string, unknown>, theme, context as GentleAgentRenderContext | undefined);
 			},
 			renderResult(result, options, theme, context) {
+				const task = (result.details as { gentleAgents?: { status?: string; taskId?: string } } | undefined)?.gentleAgents;
+				if (name === "result" && task?.status === TASK_STATUS.RUNNING) {
+					return { render: () => [], invalidate() {} };
+				}
+				if (name === "result") {
+					const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+					const visibleBody = options.expanded ? body : theme.fg("muted", body.split("\n")[0] ?? "");
+					const title = `${AGENTS_GLYPH} agent result${task?.taskId ? ` · ${sanitizeTerminalText(task.taskId)}` : ""}`;
+					return new Text(`${theme.fg("toolTitle", title)}\n${visibleBody}`, 0, 0);
+				}
 				return renderGentleAgentResult(result as AgentToolResult<unknown>, options, theme, context as GentleAgentRenderContext | undefined);
 			},
 			async execute(_id, params, signal, onUpdate, ctx) {
@@ -1347,7 +1360,11 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			},
 		},
 		async (params, ctx, signal, onUpdate) => {
-			if (Object.hasOwn(params, "repository_root") && Object.hasOwn(params, "workspace_root")) throw new Error("repository_root and workspace_root are mutually exclusive.");
+			// An empty selector names no destination: only real roots are mutually
+			// exclusive, so a blank string must not masquerade as a second target.
+			const hasWorkspaceRoot = Object.hasOwn(params, "workspace_root") && params.workspace_root !== "";
+			const hasRepositoryRoot = Object.hasOwn(params, "repository_root") && params.repository_root !== "";
+			if (hasRepositoryRoot && hasWorkspaceRoot) throw new Error("repository_root and workspace_root are mutually exclusive.");
 			if ((Object.hasOwn(params, "repository_root") && typeof params.repository_root !== "string") || (Object.hasOwn(params, "workspace_root") && typeof params.workspace_root !== "string")) throw new Error("Root selectors must be strings.");
 			if (Object.hasOwn(params, "sdd_change") || Object.hasOwn(params, "remediation") || Object.hasOwn(params, "research_selection") || retiredSddAgent(String(params.agent))) return text("Error: retired SDD delegation is not supported.", { error: "retired SDD delegation" });
 			const { agents } = discoverAgents(roots(ctx));
@@ -1365,7 +1382,9 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			} catch (error) {
 				return text(`Error: ${error instanceof Error ? error.message : String(error)}`, { error: "invalid specialization" });
 			}
-			return launch(ctx, await buildRequest(ctx, agent, String(params.task ?? ""), typeof params.label === "string" ? params.label : undefined, typeof params.context === "string" ? params.context : undefined, mode, undefined, typeof params.workspace_root === "string" ? params.workspace_root : undefined, signal, typeof params.repository_root === "string" ? params.repository_root : undefined, specialization), signal, onUpdate);
+			const workspaceRoot = typeof params.workspace_root === "string" && params.workspace_root !== "" ? params.workspace_root : undefined;
+			const repositoryRoot = typeof params.repository_root === "string" && params.repository_root !== "" ? params.repository_root : undefined;
+			return launch(ctx, await buildRequest(ctx, agent, String(params.task ?? ""), typeof params.label === "string" ? params.label : undefined, typeof params.context === "string" ? params.context : undefined, mode, undefined, workspaceRoot, signal, repositoryRoot, specialization), signal, onUpdate);
 		},
 	);
 
