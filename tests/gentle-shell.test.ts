@@ -410,6 +410,109 @@ test("profile reader follows store changes and rejects missing or invalid active
 	assert.equal(read(), undefined);
 });
 
+test("bound profile reader follows pin precedence and keeps frames free of resolution", (t) => {
+	const home = mkdtempSync(join(tmpdir(), "shell-effective-"));
+	t.after(() => rmSync(home, { recursive: true, force: true }));
+	const repo = join(home, "repo");
+	const commonDir = join(home, "git");
+	const local = join(commonDir, "gentle-ai", "profile-pin.json");
+	const shared = join(repo, ".pi", "gentle-ai", "profile.json");
+	mkdirSync(join(commonDir, "gentle-ai"), { recursive: true });
+	mkdirSync(join(repo, ".pi", "gentle-ai"), { recursive: true });
+	writeFileSync(join(home, "profiles.json"), JSON.stringify({ kind: "gentle-pi.agent_model_profiles", version: 1, active: "team", profiles: { team: {}, other: {} } }));
+	const pin = (path: string, profile: string) => writeFileSync(path, JSON.stringify({ kind: "gentle-pi.agent_model_profile_pin", version: 1, profile }));
+	const read = createActiveProfileReader({ GENTLE_PI_CONFIG_HOME: home });
+	let resolutions = 0;
+	const resolver = () => { resolutions++; return { root: repo, commonDir }; };
+	assert.equal(read(), "team");
+	read.bind(repo, resolver);
+	assert.equal(read(), "team");
+	pin(shared, "other");
+	assert.equal(read(), "team", "edits wait for a refresh");
+	assert.equal(read.refresh(), true);
+	assert.equal(read(), "other (repo)");
+	pin(local, "other");
+	assert.equal(read.refresh(), true, "same name with a different source changes the display");
+	assert.equal(read(), "other (local)");
+	for (let i = 0; i < 20; i++) assert.equal(read(), "other (local)");
+	assert.equal(resolutions, 1, "bound frames and polls reuse the worktree identity");
+	pin(local, "stale");
+	assert.equal(read.refresh(), true);
+	assert.equal(read(), "other (repo)");
+	writeFileSync(shared, "invalid");
+	assert.equal(read.refresh(), true);
+	assert.equal(read(), "team");
+	read.reset();
+	assert.equal(read(), "team");
+	assert.equal(read.refresh(), false);
+});
+
+test("profile polling refreshes both fullscreen surfaces only on change and stops across sessions", async (t) => {
+	const home = mkdtempSync(join(tmpdir(), "shell-poll-"));
+	t.after(() => rmSync(home, { recursive: true, force: true }));
+	const repo = join(home, "repo");
+	const commonDir = join(home, "git");
+	const local = join(commonDir, "gentle-ai", "profile-pin.json");
+	mkdirSync(join(commonDir, "gentle-ai"), { recursive: true });
+	mkdirSync(repo);
+	writeFileSync(join(home, "profiles.json"), JSON.stringify({ kind: "gentle-pi.agent_model_profiles", version: 1, active: "team", profiles: { team: {}, other: {} } }));
+	const intervals: Array<{ tick: () => void; delay: number; stopped: boolean }> = [];
+	t.mock.method(globalThis, "setInterval", (tick: () => void, delay: number) => {
+		const timer = { tick, delay, stopped: false };
+		intervals.push(timer);
+		return { unref() {}, timer };
+	});
+	t.mock.method(globalThis, "clearInterval", (handle: { timer: (typeof intervals)[number] }) => { handle.timer.stopped = true; });
+	const { pi, handlers } = fakePi();
+	let resolutions = 0;
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, {
+		resolveWorktree: () => { resolutions++; return { root: repo, commonDir }; },
+	});
+	const first = fakeContext();
+	await fire(handlers, "session_start", first.ctx);
+	const tui = { terminal: { rows: 40, columns: 160 }, requestRender: t.mock.fn() };
+	const footerData = { getGitBranch: () => "main", getExtensionStatuses: () => new Map(), getAvailableProviderCount: () => 1, onBranchChange: () => () => {} };
+	const factory = first.ui.footerFactory as (tui: unknown, theme: ShellBarTheme, data: unknown) => { dispose(): void };
+	const component = factory(tui, plainTheme, footerData);
+	const state = sidebarState(tui as unknown as TUI);
+	const status = () => (state.parts.get("footer") as SidebarRail).render(60).join("\n");
+	const header = () => (state.parts.get("header") as SidebarRail).render(160).join("\n");
+	try {
+		const timer = intervals.find((entry) => entry.delay === 2000);
+		assert.ok(timer, "UI session installs the 2000ms profile refresh");
+		assert.match(status(), /Profile.*team/);
+		assert.match(header(), /team/);
+		const before = tui.requestRender.mock.callCount();
+		timer.tick();
+		assert.equal(tui.requestRender.mock.callCount(), before, "unchanged poll does not render");
+		writeFileSync(local, JSON.stringify({ kind: "gentle-pi.agent_model_profile_pin", version: 1, profile: "other" }));
+		assert.match(status(), /Profile.*team/, "external edits do not read during render");
+		timer.tick();
+		assert.equal(tui.requestRender.mock.callCount(), before + 1);
+		assert.match(status(), /Profile.*other \(local\)/);
+		assert.match(header(), /other \(local\)/);
+		timer.tick();
+		assert.equal(tui.requestRender.mock.callCount(), before + 1);
+		const afterBind = resolutions;
+		status(); header(); timer.tick();
+		assert.equal(resolutions, afterBind, "poll and render reuse the session Git identity");
+		const second = fakeContext();
+		await fire(handlers, "session_start", second.ctx);
+		assert.equal(timer.stopped, true);
+		const replacement = intervals.filter((entry) => entry.delay === 2000).at(-1)!;
+		assert.notEqual(replacement, timer);
+		writeFileSync(local, "invalid");
+		timer.tick();
+		assert.equal(tui.requestRender.mock.callCount(), before + 1, "old session cannot repaint");
+		await fire(handlers, "session_shutdown", second.ctx);
+		assert.equal(replacement.stopped, true);
+		replacement.tick();
+		assert.equal(tui.requestRender.mock.callCount(), before + 1);
+	} finally {
+		component.dispose();
+	}
+});
+
 test("gentleShell stays out of the way without a UI or when disabled", () => {
 	const disabled = fakePi();
 	gentleShell(disabled.pi, { GENTLE_PI_SHELL: "0" });
@@ -2257,27 +2360,32 @@ test("animations command reports without writing and switches the live pulse", a
 	assert.match(ui.notices.at(-1)!, /animations: quality/);
 	assert.equal(existsSync(join(configHome, "animations.json")), false);
 	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
-	assert.deepEqual(delays, [80]);
+	assert.deepEqual(delays, [2000, 80]);
 	await command.handler("performance", ctx);
-	assert.deepEqual(delays, [80, 1000]);
-	assert.equal(active, 1);
+	assert.deepEqual(delays, [2000, 80, 1000]);
+	assert.equal(active, 2);
 	await command.handler("potato", ctx);
-	assert.equal(active, 0);
+	assert.equal(active, 1);
 	assert.match(stripAnsi(editor.render(60)[0]), /working/);
 	assert.equal(JSON.parse(readFileSync(join(configHome, "animations.json"), "utf8")).policy, "potato");
 	await command.handler("invalid", ctx);
 	assert.equal(JSON.parse(readFileSync(join(configHome, "animations.json"), "utf8")).policy, "potato");
 	await command.handler("quality", ctx);
-	assert.deepEqual(delays, [80, 1000, 80]);
+	assert.deepEqual(delays, [2000, 80, 1000, 80]);
 	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
-	assert.equal(active, 0);
+	assert.equal(active, 1);
 	editor.dispose();
+	await fire(handlers, "session_shutdown", ctx);
+	assert.equal(active, 0);
 });
 
 test("potato repaints start/settle and shows queued state on the host's next render without intervals", async (t) => {
 	const configHome = scopedDoubleEscCancelConfigHome(t);
 	writeFileSync(join(configHome, "animations.json"), '{"schema":"gentle-pi.animations/v1","policy":"potato"}');
-	const intervals = t.mock.method(globalThis, "setInterval", () => { throw new Error("potato must not animate"); });
+	const intervals = t.mock.method(globalThis, "setInterval", (_callback: () => void, delay: number) => {
+		assert.equal(delay, 2000, "potato must not animate");
+		return { unref() {} };
+	});
 	const renders = t.mock.method(fakeTui, "requestRender", () => {});
 	const { pi, handlers, commands } = fakePi();
 	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
@@ -2305,7 +2413,7 @@ test("potato repaints start/settle and shows queued state on the host's next ren
 	await commands.get("gentle:animations")!.handler("status", ctx);
 	assert.match(ui.notices.at(-1)!, /animations: potato/);
 	for (const handler of handlers.get("session_shutdown") ?? []) handler({}, ctx);
-	assert.equal(intervals.mock.callCount(), 0);
+	assert.equal(intervals.mock.callCount(), 1);
 });
 
 test("animations status attributes malformed files and reports a failed write", async (t) => {
@@ -2352,7 +2460,7 @@ test("animations with no argument opens a selectable menu and applies the chosen
 	assert.equal(existsSync(join(dismissHome, "animations.json")), false);
 });
 
-test("prompt uses the compact banner cadence and releases its unref timer at settlement", (t) => {
+test("prompt uses the compact banner cadence and releases its unref timer at settlement", async (t) => {
 	const configHome = scopedDoubleEscCancelConfigHome(t);
 	writeFileSync(join(configHome, "animations.json"), '{"schema":"gentle-pi.animations/v1","policy":"quality"}');
 	const delays: number[] = [];
@@ -2368,13 +2476,14 @@ test("prompt uses the compact banner cadence and releases its unref timer at set
 	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
 	const { ctx, ui } = fakeContext();
 	const editor = installedPrompt(ctx, ui, handlers);
-	assert.equal(active, 0);
+	assert.equal(active, 1);
 	for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
-	assert.deepEqual(delays, [80]);
-	assert.equal(unrefs, 1);
+	assert.deepEqual(delays, [2000, 80]);
+	assert.equal(unrefs, 2);
 	for (const handler of handlers.get("agent_settled") ?? []) handler({}, ctx);
-	assert.equal(active, 0);
+	assert.equal(active, 1);
 	editor.dispose();
+	await fire(handlers, "session_shutdown", ctx);
 	assert.equal(active, 0);
 });
 
