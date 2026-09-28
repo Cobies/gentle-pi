@@ -1,4 +1,6 @@
+import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
 import { consumeReviewMutation, pendingReviewMutation, recordReviewMutation } from "../lib/review-reminder-receipt.ts";
+import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
 import { isOddPhase, oddPhaseRegistry, ODD_PHASES } from "../lib/odd-phase.ts";
 import { resolveSessionWorktree } from "../lib/session-worktree-registry.ts";
 import { declareReviewRelayHandshake } from "../lib/review-relay-contract.ts";
@@ -1463,6 +1465,7 @@ Organic Driven Development (ODD) is the predefined workflow of this orchestrator
 5. **Track before the first write.** For substantial authorized implementation, create \`odd/tasks/<feature-name>.md\` and its Engram mirror \`odd/<feature-name>/tasks\` automatically immediately after exploration and alignment, following the 4-part Hybrid ODD Unified Specification Pattern (1. Diagnosis & Technical Proposal, 2. Technical Specification & Contracts, 3. Tasks & Evidence, 4. Acceptance Criteria & Verification) to offload context weight into the physical file, then create or rebuild the visible \`todo\` list from the reconciled feature tasks, all before authorizing or dispatching any writer subagent and before the first source write, without asking permission for tasks or storage. Never defer creating the ODD document to the moment of dispatching the worker: Parts 1 and 2 (technical proposal and contracts) must be mapped and settled in the file before task execution. Tell the user in one line which feature document was created and how many tasks it holds.
 6. **Implement task by task.** Route each task through the orchestrator's Work Routing Ladder, honoring its mandatory delegation triggers, with applicable test-first development and checks. These triggers are mandatory, not advisory: executing past a fired trigger inline is a routing defect even if the work succeeds. Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via \`repository_root\`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously. Subagent delegation mandate: all source code mutations, edits, and multi-file work MUST delegate to \`gentle-ai-worker\` and require explicit user permission before dispatch; inline code editing by the parent orchestrator is strictly forbidden. The worker only implements settled tasks against the pre-existing ODD specification; it does not invent architecture or explore the codebase from scratch. Default to background execution (\`mode: "background"\`) for independent tasks to run concurrently. Background turn-yield rule: when launching a task in the background, end your turn immediately; never poll, execute \`sleep\` in bash, or call \`subagent_status\`/\`subagent_result\` to wait for completion (results are delivered automatically via session message). Every subagent delegation must resolve \`.atl/skill-registry.md\` and inject matching exact paths under \`## Skills to load before work\`, plus \`## Allowed edit surfaces\` for writers. Check an item off only after its outcome and checks were observed; update the file, mirror, and visible \`todo\` projection after every task transition and material plan change. Every task closes with at least one work-unit commit on the feature branch, branch first when on the default branch, with tests and docs alongside the behavior, using a Conventional Commit message; record the commit identity in the feature document as evidence. Work-unit commits on the feature branch are part of authorized substantial ODD implementation; push, pull request creation, and merge remain the user's decisions.
 7. **Close.** Report the verified outcome, every failed, skipped, or pending check, and the next step. The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch; native review runs only under the user-owned RDD switch.
+Phase reporting: the Gentle Shell prompt label is inferred automatically from the primary session's tool activity (reads show \`exploring\`, edits \`implementing\`, test runs \`checking\`, user questions \`deciding\`). When the \`gentle_odd_phase\` tool is available, use it to refine that label with phases tools cannot show (\`authorizing\`, \`researching\`, \`deciding\`, \`closing\`): call \`gentle_odd_phase\` only when the primary session's ODD phase actually changes, never per tool call or on a fixed cadence, and never from a subagent. It drives the Gentle Shell prompt label only.
 Resume an interrupted feature with \`mem_context\`, then project- and feature-scoped \`mem_search\`, then \`mem_get_observation\` for the full document, then the task file itself; reconcile before continuing the next unfinished task. Detail for steps 3–7: \`orchestrator-delegation.md\` and \`orchestrator-memory.md\`.
 
 Harness principles:
@@ -2984,8 +2987,8 @@ interface OverlayComponent {
 
 type ModelPanelResult =
 	| { type: "save"; config: AgentModelConfig }
-	// `save`, then snapshot the saved routing into the current profile: the step
-	// `/gentle:profiles` performs with `s`, reachable without leaving this panel.
+	// `save`, then snapshot saved agent routing and the live orchestrator into
+	// the current profile without changing the global orchestrator defaults.
 	| { type: "save-profile"; config: AgentModelConfig }
 	| { type: "custom"; agent: string | "all"; config: AgentModelConfig }
 	| { type: "export"; config: AgentModelConfig }
@@ -3370,7 +3373,7 @@ class SddModelPanel implements OverlayComponent {
 		);
 		lines.push(
 			line(
-				`x export • r restore • ctrl+s save • u update profile "${this.profileLabel}" • esc back`,
+				`x export • r restore • ctrl+s save • u capture session in "${this.profileLabel}" • esc back`,
 				"muted",
 			),
 		);
@@ -3547,7 +3550,7 @@ async function showSddModelPanel(
 	);
 }
 
-async function handleModelsCommand(ctx: ExtensionContext): Promise<void> {
+async function handleModelsCommand(ctx: ExtensionContext, pi: ExtensionAPI): Promise<void> {
 	migrateLegacyProjectModelOverrides(ctx.cwd);
 	// A pinned repository resolves its subagent routing from the profile at launch,
 	// so global routing written here will not reach its subagents. Saying it before
@@ -3669,7 +3672,7 @@ async function handleModelsCommand(ctx: ExtensionContext): Promise<void> {
 		].join("\n"),
 		"info",
 	);
-	if (result.type === "save-profile") updateCurrentProfileFromSavedRouting(ctx);
+	if (result.type === "save-profile") updateCurrentProfileFromSavedRouting(ctx, pi);
 }
 
 /** The profile `u` in `/gentle:models` writes to, and why it is that one. */
@@ -3700,13 +3703,12 @@ function describeCurrentProfileTarget(target: CurrentProfileTarget | undefined):
 }
 
 /**
- * The second half of `u`: the same snapshot `/gentle:profiles` takes with `s`,
- * aimed at the current profile. The snapshot reads the global routing the save
- * just materialized, never the pin, so a pinned repository does not copy its
- * pinned profile onto itself. The global save has already been reported, so every
+ * The second half of `u` captures saved global agent routing (never the pin)
+ * and the live session orchestrator. Without a live model it falls back to
+ * persisted settings. The global save has already been reported, so every
  * outcome here speaks only about the profile.
  */
-function updateCurrentProfileFromSavedRouting(ctx: ExtensionContext): void {
+function updateCurrentProfileFromSavedRouting(ctx: ExtensionContext, pi: ExtensionAPI): void {
 	const path = profilesFilePath(gentleAiConfigHome());
 	const read = readProfilesFileResult(path);
 	if (read.status === "invalid") {
@@ -3720,6 +3722,12 @@ function updateCurrentProfileFromSavedRouting(ctx: ExtensionContext): void {
 		readGlobalEffectiveModelConfig(ctx.cwd),
 		readOrchestratorSettings(orchestratorSettingsPath()),
 	);
+	if (ctx.model) {
+		snapshot[PROFILE_ORCHESTRATOR_KEY] = {
+			model: `${ctx.model.provider}/${ctx.model.id}`,
+			thinking: pi.getThinkingLevel(),
+		};
+	}
 	if (read.status === "missing") {
 		// The same seed `/gentle:profiles` performs on its first open, so pressing
 		// `u` before ever opening that panel lands on the same "current" profile.
@@ -5277,6 +5285,11 @@ function parseControllerJson(input: string, operation: ReviewControllerOperation
 	return value;
 }
 
+// Explicit cancellation uses the AbortError convention so observers can tell it from failure.
+function reviewCancellation(message: string): Error {
+	return Object.assign(new Error(message), { name: "AbortError" });
+}
+
 async function authorizeDestructiveReviewOperation(
 	parametersValue: unknown,
 	ctx: ExtensionContext,
@@ -5949,7 +5962,15 @@ interface RetainedNativeUntrackedSelection {
 	readonly submission?: NativeIntendedUntrackedSelectionSubmission;
 }
 
-interface RetainedPreLineageNativeUntrackedSelection extends RetainedNativeUntrackedSelection {
+// The untracked-selection fields are optional here, unlike the lineage-scoped
+// RetainedNativeUntrackedSelection above: a plain inspect that resolves ready
+// without ever needing an untrackedScope decision still retains its own
+// committed-range selector alone, bound only to targetIdentity/candidateTree.
+interface RetainedPreLineageNativeUntrackedSelection {
+	readonly untrackedScope?: NativeStartUntrackedScope;
+	readonly expectedUntrackedInventory?: string;
+	readonly intendedUntracked?: readonly string[];
+	readonly submission?: NativeIntendedUntrackedSelectionSubmission;
 	readonly targetIdentity: string;
 	readonly candidateTree: string;
 	// gentle-pi#1192: only set when the inspect that produced this entry was a
@@ -5965,7 +5986,7 @@ interface RetainedNativeCaptureRoute { readonly workspaceRoot: string; readonly 
 // yet. Keep only its selector, bound to the exact provider collect input.
 interface RetainedNativeUntrackedStopSelector { readonly selectionBinding: string; readonly targetIdentity: string; readonly baseRef: string; readonly committedOnly: true; }
 
-type RetainedNativeStatusSelection = RetainedNativeUntrackedSelection | RetainedNativeCaptureRoute | RetainedNativeUntrackedStopSelector;
+type RetainedNativeStatusSelection = RetainedNativeUntrackedSelection | RetainedPreLineageNativeUntrackedSelection | RetainedNativeCaptureRoute | RetainedNativeUntrackedStopSelector;
 
 const MAX_RETAINED_NATIVE_STATUS_SELECTIONS = 64;
 class NativeCaptureRouteRegistrationError extends Error {}
@@ -7378,6 +7399,9 @@ async function resolveNegotiatedReviewStatusForSession(
 ): Promise<ReviewStatusV3 | undefined> {
 	if (nativeReviewCli?.reviewMode === undefined || nativeReviewCli.targetStatus === undefined) return undefined;
 	if (ctx.hasUI !== true) return undefined;
+	// Passive status negotiation cannot bootstrap a repository. Explicit review
+	// controller requests retain their separate workspace validation path.
+	if (resolveSessionWorktree(ctx.cwd, ctx.cwd) === undefined) return undefined;
 	let modeEffective: "on" | "off";
 	try {
 		const mode = await nativeReviewCli.reviewMode({ cwd: ctx.cwd, operation: NATIVE_REVIEW_MODE_OPERATION.STATUS });
@@ -8015,6 +8039,15 @@ async function executeReviewControllerOperation(
 				if (parameters.untrackedScope === undefined) {
 					if (canonicalBaseRef !== undefined && typeof plainMapped.selectionBinding === "string") {
 						retainNativeStatusSelection(retainedUntrackedSelections, reviewLifecycleStorageKey(defaultCwd, ""), Object.freeze({ selectionBinding: plainMapped.selectionBinding, targetIdentity: status.targetIdentity, baseRef: canonicalBaseRef, committedOnly: true as const }));
+					} else if (canonicalBaseRef !== undefined && plainMapped.status === "ready") {
+						// A plain inspect that resolves ready with no untracked decision still
+						// retains its own committed-range selector, so the following plain
+						// START replays this exact inspected range instead of adopting the
+						// native default base-ref (gentle-pi#874).
+						const readyCandidateIdentity = nativePreLineageCandidateIdentity(status);
+						if (readyCandidateIdentity !== undefined) {
+							retainNativeStatusSelection(retainedUntrackedSelections, reviewLifecycleStorageKey(defaultCwd, ""), Object.freeze({ ...readyCandidateIdentity, baseRef: canonicalBaseRef, committedOnly: true as const }));
+						}
 					}
 					// gentle-pi#706: the stop alone never tells the caller what to do next.
 					return {
@@ -8555,24 +8588,29 @@ async function executeReviewControllerOperation(
 			// selector verbatim; it was already canonicalized when the inspect stored
 			// it, so no second resolveCanonicalCandidateBase round trip is needed.
 			if (canonicalBaseRef === undefined && retainedPreLineageSelection?.baseRef !== undefined) canonicalBaseRef = retainedPreLineageSelection.baseRef;
+			// A retained pre-lineage entry may carry only a committed-range selector
+			// with no untracked decision at all (a plain inspect that resolved ready
+			// without ever needing untrackedScope); only adopt its untracked fields
+			// when it actually recorded one.
 			const untrackedSelection: NativeStartUntrackedSelection =
-				retainedPreLineageSelection === undefined
+				retainedPreLineageSelection === undefined || retainedPreLineageSelection.untrackedScope === undefined
 					? explicitUntrackedSelection
 					: {
 							untrackedScope: retainedPreLineageSelection.untrackedScope,
 							expectedUntrackedInventory:
-								retainedPreLineageSelection.expectedUntrackedInventory,
-							intendedUntracked: [...retainedPreLineageSelection.intendedUntracked],
+								retainedPreLineageSelection.expectedUntrackedInventory!,
+							intendedUntracked: [...retainedPreLineageSelection.intendedUntracked!],
 						};
 			const untrackedSubmission =
-				intendedUntrackedSelection ?? retainedPreLineageSelection?.submission;
+				intendedUntrackedSelection ??
+				(retainedPreLineageSelection?.untrackedScope === undefined ? undefined : retainedPreLineageSelection.submission);
 			// The stored value must stay a plain RetainedNativeUntrackedSelection
 			// (no baseRef/targetIdentity/candidateTree): it is re-keyed under the
 			// lineage-scoped entry below, and readRetainedNativeUntrackedSelection
 			// discriminates that entry from a RetainedNativeCaptureRoute by the
 			// absence of a baseRef field.
 			const retainedUntrackedSelection: RetainedNativeUntrackedSelection | undefined =
-				retainedPreLineageSelection === undefined
+				retainedPreLineageSelection === undefined || retainedPreLineageSelection.untrackedScope === undefined
 					? cloneRetainedNativeUntrackedSelection(explicitUntrackedSelection)
 					: Object.freeze({
 							untrackedScope: retainedPreLineageSelection.untrackedScope,
@@ -9053,9 +9091,12 @@ function createGentleAiExtensionForTesting(
 		return revoked;
 	};
 
+	const reviewSidebar = createReviewSidebarPublisher(pi);
+	pi.on("session_tree", (_event, ctx) => reviewSidebar.reset(ctx));
 	let reminderSessionActive = true;
 	let reminderEpoch = 0;
 	pi.on("session_shutdown", (event, context) => {
+		reviewSidebar.reset();
 		reminderSessionActive = false;
 		reminderEpoch += 1;
 		// Pi tears down this registry on reload as well as session replacement/quit.
@@ -9072,20 +9113,22 @@ function createGentleAiExtensionForTesting(
 		processAgentEndSubagentDepth.delete(sessionKey);
 	});
 
-	// gentle-pi ODD input phase labels: a small, explicit, bounded ODD phase
-	// signal for the Gentle prompt's working label. There is no Pi runtime
-	// event for ODD phases, so this is reported by the orchestrator only, at
-	// ODD protocol transitions -- never inferred from tool use or prose. It is
-	// session-scoped in lib/odd-phase.ts: a background/child agent runs as its
-	// own OS process with its own module state, so it can never see or
-	// override the primary session's reported phase.
+	// gentle-pi ODD input phase labels: the explicit half of the bounded ODD
+	// phase signal for the Gentle prompt's working label. Gentle Shell infers
+	// the phase from the primary session's tool activity
+	// (lib/odd-phase-inference.ts); this tool lets the orchestrator refine it
+	// at ODD protocol transitions tools cannot show, and its report is
+	// "explicit" so a following read-only tool call never downgrades it. Never
+	// inferred from prose. It is session-scoped in lib/odd-phase.ts: a
+	// background/child agent runs as its own OS process with its own module
+	// state, so it can never see or override the primary session's phase.
 	const hiddenOddPhaseToolComponent = { render: (_width: number): string[] => [], invalidate() {} };
 	pi.registerTool({
 		name: "gentle_odd_phase",
 		renderShell: "self",
 		label: "Gentle ODD Phase",
-		description: "Report the primary session's current ODD phase for the Gentle prompt's working label. Best-effort UI only; never a source of truth for orchestration logic.",
-		promptSnippet: "Report authorizing/exploring/researching/deciding/planning/implementing/checking/closing only at real ODD phase transitions of the primary turn; never poll or report per tool call.",
+		description: "Refine the primary session's current ODD phase for the Gentle prompt's working label, which is otherwise inferred automatically from tool activity. Best-effort UI only; never a source of truth for orchestration logic.",
+		promptSnippet: "Refine the automatically inferred working label with authorizing/exploring/researching/deciding/planning/implementing/checking/closing only at real ODD phase transitions of the primary turn; never poll or report per tool call.",
 		promptGuidelines: [
 			`phase must be exactly one of ${ODD_PHASES.join(", ")}, or "clear" to leave the current phase before its turn ends. Call this only when the ODD phase actually changes for the primary session's active turn, not on every tool call or thought.`,
 			"Never call this from a subagent or background/child task; it reports only the primary orchestrator's own phase, and a child's session id can never override the parent's label.",
@@ -9127,7 +9170,7 @@ function createGentleAiExtensionForTesting(
 			if (!isOddPhase(phase)) {
 				throw new Error(`Invalid ODD phase; use one of ${ODD_PHASES.join(", ")}, or "clear". The previously reported phase, if any, is unchanged.`);
 			}
-			const reported = oddPhaseRegistry.report(sessionId, phase);
+			const reported = oddPhaseRegistry.report(sessionId, phase, "explicit");
 			return { content: [{ type: "text", text: `ODD phase reported: ${reported}` }], details: { phase: reported } };
 		},
 	});
@@ -9190,7 +9233,7 @@ function createGentleAiExtensionForTesting(
 		return named.length === 0 ? operation : `${operation} · ${named.join(" · ")}`;
 	};
 
-	pi.registerTool({
+	pi.registerTool(reviewSidebar.tool({
 		name: "gentle_review_capture_group",
 		renderShell: "self",
 		label: "Gentle Review Capture Group",
@@ -9211,7 +9254,7 @@ function createGentleAiExtensionForTesting(
 			return renderGentleAiResult(result, options, theme, timingContext(context as GentleAiRenderContext | undefined));
 		},
 		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
-			if (signal?.aborted) throw new Error("Review capture group was cancelled");
+			if (signal?.aborted) throw reviewCancellation("Review capture group was cancelled");
 			const details = await executeReviewCaptureGroupOperation(
 				parameters,
 				ctx.cwd,
@@ -9228,9 +9271,9 @@ function createGentleAiExtensionForTesting(
 			);
 			return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 		},
-	});
+	}));
 
-	pi.registerTool({
+	pi.registerTool(reviewSidebar.tool({
 		name: "gentle_review_capture",
 		renderShell: "self",
 		label: "Gentle Review Capture",
@@ -9254,7 +9297,7 @@ function createGentleAiExtensionForTesting(
 			return renderGentleAiResult(result, options, theme, timingContext(context as GentleAiRenderContext | undefined));
 		},
 		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
-			if (signal?.aborted) throw new Error("Review capture was cancelled");
+			if (signal?.aborted) throw reviewCancellation("Review capture was cancelled");
 			const details = await executeReviewCaptureOperation(
 				parameters,
 				ctx.cwd,
@@ -9274,9 +9317,9 @@ function createGentleAiExtensionForTesting(
 				details,
 			};
 		},
-	});
+	}));
 
-	pi.registerTool({
+	pi.registerTool(reviewSidebar.tool({
 		name: "gentle_review",
 		renderShell: "self",
 		label: "Gentle Review Controller",
@@ -9307,7 +9350,7 @@ function createGentleAiExtensionForTesting(
 			return renderGentleAiResult(result, options, theme, timingContext(context as GentleAiRenderContext | undefined));
 		},
 		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
-			if (signal?.aborted) throw new Error("Review controller operation was cancelled");
+			if (signal?.aborted) throw reviewCancellation("Review controller operation was cancelled");
 			await authorizeDestructiveReviewOperation(parameters, ctx);
 			const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
 			const retainedSelections = processRetainedNativeStatusSelections.get(sessionKey)
@@ -9422,9 +9465,10 @@ function createGentleAiExtensionForTesting(
 				details,
 			};
 		},
-	});
+	}));
 
 	pi.on("session_start", async (event, ctx) => {
+		reviewSidebar.reset(ctx);
 		elapsedTiming = new GentleAiElapsedTimingLedger(ctx.sessionManager, pi);
 		reminderSessionActive = true;
 		reminderEpoch += 1;
@@ -9531,9 +9575,11 @@ function createGentleAiExtensionForTesting(
 					return fragment === null ? "" : `\n\n${fragment}`;
 				})()
 				: "";
-		return {
-			systemPrompt: `${event.systemPrompt}${gentlePrompt}${reviewContractPrompt}`,
-		};
+		// gentle-shell#1485: pi-claude-bridge drops a handler-returned systemPrompt
+		// and forwards only systemPromptOptions, so the harness is delivered
+		// through the mutable appendSystemPrompt section instead of a replacement.
+		appendSystemPromptOnce(event.systemPromptOptions, `${gentlePrompt}${reviewContractPrompt}`);
+		return undefined;
 	});
 
 	// gentle-pi#556 / gentle-ai#4051: with RDD enabled, the agent could finish
@@ -9652,7 +9698,7 @@ function createGentleAiExtensionForTesting(
 	pi.registerCommand("gentle:models", {
 		description: "Configure global per-agent models for el Gentleman.",
 		handler: async (_args, ctx) => {
-			await handleModelsCommand(ctx);
+			await handleModelsCommand(ctx, pi);
 		},
 	});
 
