@@ -1846,8 +1846,8 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			const statusOwner = () => narrowStatusOwner({ mode: (tui as TUI & { mode?: string }).mode, columns: tui.terminal?.columns ?? 0, statusPlacement: visualSettings.statusPlacement, headerPlacement: visualSettings.headerPlacement });
 			const bottomBar = { ...bottom, render: (width: number) => statusOwner() === STATUS_OWNER.BOTTOM ? renderShellBottomOnlyBar(footerModel(), theme, width, usageShortcutKey, visualSettings) : bottom.render(width) };
 			const part = sidebarPart(tui, "footer", bottomBar, {
-				digest: () => JSON.stringify([footerModel(), visualSettings]),
-				render: (width) => renderShellSidebarBar(footerModel(), theme, width, visualSettings),
+				digest: () => JSON.stringify([footerModel(), visualSettings, sidebarState(tui).parts.has("hud")]),
+				render: (width) => renderShellSidebarBar(footerModel(), theme, width, visualSettings, { hudActive: sidebarState(tui).parts.has("hud") }),
 				invalidate() {},
 			});
 			const buildHudModel = (): HudModel => {

@@ -72,18 +72,25 @@ function createSampleHudModel(overrides?: {
 	};
 }
 
-test("renderHudCard renders card frame, title, and the three module headers", () => {
+test("renderHudCard renders exactly 5 lines (dense HUD) without module headers", () => {
 	const model = createSampleHudModel();
 	const lines = renderHudCard(model, plainTheme, 50).map(stripAnsi);
 
-	assert.ok(lines.length > 5, "renders multi-line card");
+	assert.equal(lines.length, 5, "renders exactly 5 lines in dense HUD format");
 	assert.match(lines[0]!, /^╭─ ✿ ENVIRONMENT HUD ─+╮$/, "renders ENVIRONMENT HUD title in top rule");
-	assert.match(lines[lines.length - 1]!, /^╰─+╯$/, "renders bottom rule");
+	assert.match(lines[4]!, /^╰─+╯$/, "renders bottom rule");
 
 	const joined = lines.join("\n");
-	assert.ok(joined.includes("[ PROJECT TARGET ACTIVE ]"), "includes project module header");
-	assert.ok(joined.includes("[ MODEL CONTEXT PROTOCOL ]"), "includes MCP module header");
-	assert.ok(joined.includes("[ EXECUTION TELEMETRY ]"), "includes telemetry module header");
+	assert.ok(!joined.includes("[ PROJECT TARGET ACTIVE ]"), "omits project module header");
+	assert.ok(!joined.includes("[ MODEL CONTEXT PROTOCOL ]"), "omits MCP module header");
+	assert.ok(!joined.includes("[ EXECUTION TELEMETRY ]"), "omits telemetry module header");
+
+	// Fila 1: target & git
+	assert.match(lines[1]!, /feat\/hud.*developer.*±2 files \(\+15 −3\)/, "line 1 contains target, git, profile and diff");
+	// Fila 2: MCP horizontal
+	assert.match(lines[2]!, /MCP \(2\/3 · 18 tools\).*● context7/, "line 2 contains MCP summary and server glyphs");
+	// Fila 3: Execution telemetry
+	assert.match(lines[3]!, /\$0\.045 \(320ms\) · Ctx.*16k \/ 128k \(13%\)/, "line 3 contains cost, latency, gauge, tokens, percent");
 });
 
 test("renderHudCard handles clean git diff and dirty diffs", () => {
@@ -116,7 +123,7 @@ test("renderHudCard handles clean git diff and dirty diffs", () => {
 		},
 	});
 	const dirtyLines = renderHudCard(dirtyModel, plainTheme, 50).map(stripAnsi).join("\n");
-	assert.match(dirtyLines, /±3 files · \+42 −7/, "renders formatted dirty diff with ±N files · +X −Y");
+	assert.match(dirtyLines, /±3 files \(\+42 −7\)/, "renders formatted dirty diff with ±N files (+X −Y)");
 
 	// Diff with notice
 	const noticeModel = createSampleHudModel({
@@ -148,14 +155,15 @@ test("renderHudCard handles MCP server statuses and tool counts", () => {
 			],
 		},
 	});
-	const text = renderHudCard(model, plainTheme, 50).map(stripAnsi).join("\n");
+	// Check at width 80 so all servers fit without horizontal clipping
+	const text = renderHudCard(model, plainTheme, 80).map(stripAnsi).join("\n");
 
 	assert.match(text, /3\/4/, "renders server connected ratio");
 	assert.match(text, /25 tools/, "renders active tools count");
-	assert.ok(text.includes("context7") && text.includes("ready"), "renders context7 ready status");
-	assert.ok(text.includes("codegraph") && text.includes("connected"), "renders codegraph connected status");
-	assert.ok(text.includes("engram") && text.includes("standby"), "renders engram standby status");
-	assert.ok(text.includes("legacy") && text.includes("error"), "renders error status");
+	assert.ok(text.includes("● context7"), "renders context7 ready status with ● glyph");
+	assert.ok(text.includes("● codegraph"), "renders codegraph connected status with ● glyph");
+	assert.ok(text.includes("○ engram"), "renders engram standby status with ○ glyph");
+	assert.ok(text.includes("✖ legacy"), "renders legacy error status with ✖ glyph");
 
 	// Empty servers list
 	const emptyMcpModel = createSampleHudModel({
@@ -224,7 +232,7 @@ test("renderHudCard handles telemetry: session cost, latency, context gauge and 
 	assert.match(computedText, /50%/, "computes context percentage from tokens/window when percent is null");
 });
 
-test("renderHudCard fits within bounded widths without overflow", () => {
+test("renderHudCard fits within bounded widths without overflow and remains exactly 5 lines", () => {
 	const model = createSampleHudModel({
 		project: {
 			cwd: "/a/very/long/nested/path/to/some/deep/workspace/project-directory-name",
@@ -233,6 +241,7 @@ test("renderHudCard fits within bounded widths without overflow", () => {
 
 	for (const width of [40, 50, 60]) {
 		const lines = renderHudCard(model, plainTheme, width);
+		assert.equal(lines.length, 5, `Height at width ${width} must be exactly 5 lines`);
 		for (const line of lines) {
 			const visible = visibleWidth(stripAnsi(line));
 			assert.ok(

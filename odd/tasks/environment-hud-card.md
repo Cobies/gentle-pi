@@ -84,6 +84,8 @@ export function hudDigest(model: HudModel, visualSettings: unknown): string;
   - Verified with `node --experimental-strip-types --test tests/shell-sidebar.test.ts` (7/7 passing).
   - Verified with `node --experimental-strip-types --test tests/shell-sidebar-fullscreen.test.ts` (2/2 passing).
   - Verified typecheck with `node scripts/check-types.mjs` (0 regressions, 14 improved).
+- [x] T6 — Dense HUD Compaction & Sidebar Deduplication: Refactor `renderHudCard` to an ultra-compact 5-line format (top border + 3 dense rows + bottom border) and deduplicate `Project` and `Changes` in `renderShellSidebarBar` when HUD is active to eliminate vertical scroll when ODD tasks are rendered.
+  - Evidence: `npx tsx --test tests/shell-hud.test.ts tests/shell-sidebar-layout.test.ts` passed 54/54 tests. Reduced HUD card from ~16 lines to 5 lines and omitted redundant `Project`/`Changes` from `Status` (~14 lines saved), saving ~25 vertical lines in the sidebar rail.
 
 ## 4. Acceptance Criteria & Verification
 

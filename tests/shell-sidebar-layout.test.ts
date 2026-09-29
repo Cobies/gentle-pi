@@ -6,6 +6,7 @@ import { installSidebar, invalidateSidebar, narrowStatusOwner } from "../lib/she
 import { sidebarHeader, sidebarPart, sidebarState } from "../lib/shell-sidebar.ts";
 import { renderShellSidebarBar } from "../lib/shell-bar.ts";
 import { renderTodoCard, type TodoState } from "../lib/shell-todo.ts";
+import { renderHudCard } from "../lib/shell-hud.ts";
 
 const NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
@@ -1038,4 +1039,90 @@ test("changes to the hud digest re-render only the hud section while leaving una
 	assert.match(rail(f).render(50).join("\n"), /HUD two/);
 	assert.deepEqual(counts, { hud: 2, footer: 1, agents: 2, todo: 2 }, "revision invalidation reaches only sections with no digest of their own");
 });
+
+test("Status card omits Project and Changes when HUD is active, retaining Integrations and RDD", () => {
+	const model = {
+		cwd: "/project",
+		branch: "feat/compact-hud",
+		dirty: 2,
+		sessionName: "session",
+		modelId: "model",
+		effort: "high",
+		contextPercent: 45,
+		contextWindow: 1000,
+		costTotal: 1,
+		subscription: false,
+		statuses: ["mcp-server: active"],
+		usage: undefined,
+		review: { state: "reviewing" as const, scope: "lib/shell-hud.ts" },
+	};
+
+	const deduplicated = renderShellSidebarBar(model, theme, 46, undefined, { hudActive: true });
+	const text = deduplicated.join("\n");
+
+	// Project and Changes are omitted to prevent duplication with HUD
+	assert.doesNotMatch(text, /Project/);
+	assert.doesNotMatch(text, /\/project/);
+	assert.doesNotMatch(text, /Changes/);
+	assert.doesNotMatch(text, /\/gentle:changes/);
+
+	// RDD and unique Integrations survive in Status
+	assert.match(text, /🌹 RDD/);
+	assert.match(text, /Integrations/);
+	assert.match(text, /mcp-server: active/);
+});
+
+test("Status card is completely omitted when HUD is active and no unique integrations or RDD exist", () => {
+	const model = {
+		cwd: "/project",
+		branch: "main",
+		dirty: 0,
+		sessionName: "session",
+		modelId: "model",
+		effort: "low",
+		contextPercent: 10,
+		contextWindow: 1000,
+		costTotal: 0,
+		subscription: false,
+		statuses: [],
+		usage: undefined,
+	};
+
+	const deduplicated = renderShellSidebarBar(model, theme, 46, undefined, { hudActive: true });
+	assert.deepEqual(deduplicated, [], "returns empty array so sidebar rail filters it out entirely");
+});
+
+test("dense HUD card combined with TODO eliminates vertical overflow on typical viewports", (t) => {
+	const f = fixture();
+	const todoState: TodoState = {
+		tasks: [
+			{ id: 1, title: "Task 1", status: "done" },
+			{ id: 2, title: "Task 2", status: "in_progress" },
+			{ id: 3, title: "Task 3", status: "pending" },
+		],
+		nextId: 4,
+		updatedTurn: 1,
+	};
+	const todoTheme = { ...theme, strikethrough: (s: string) => s };
+	const hudModel = {
+		project: { cwd: "/workspace/gentle-pi", branch: "feat/hud", profile: "developer", diff: { files: 1, added: 5, deleted: 1, clean: false } },
+		mcp: { serverCount: 2, totalServers: 2, servers: [{ name: "s1", status: "ready" as const }], toolsCount: 5 },
+		telemetry: { costTotal: 0.01, subscription: false, latencyMs: 200, contextTokens: 1000, contextWindow: 100000, contextPercent: 1 },
+	};
+
+	sidebarPart(f.tui, "hud", { render: (w: number) => renderHudCard(hudModel, theme, w), invalidate() {} });
+	sidebarPart(f.tui, "footer", { render: () => [], invalidate() {} }); // Deduplicated footer produces 0 lines
+	sidebarPart(f.tui, "todo", { render: (w: number) => renderTodoCard(todoState, todoTheme, w, { scrollable: false, collapsed: false, staleTurns: 0 }), invalidate() {} });
+
+	t.after(installSidebar(f.tui, theme));
+	const railScroll = rail(f);
+	const renderedLines = railScroll.render(50);
+
+	// Total height must be compact (banner + gap + 5 hud + gap + todo <= 20 rows)
+	assert.ok(renderedLines.length <= 20, `Rail lines ${renderedLines.length} exceeds compact height budget`);
+	assert.ok(renderedLines.some((l) => l.includes("ENVIRONMENT HUD")));
+	assert.ok(renderedLines.some((l) => l.includes("Task 1")));
+	assert.doesNotMatch(renderedLines.join("\n"), /Status/);
+});
+
 

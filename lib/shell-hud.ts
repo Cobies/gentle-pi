@@ -1,4 +1,5 @@
 // Gentle Shell Environment HUD Card
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { CARD_TONE, cardInnerWidth, renderCard } from "./shell-card.ts";
 import { paintGauge } from "./shell-gauge.ts";
 import { formatTokens, type ShellBarTheme } from "./shell-bar.ts";
@@ -47,110 +48,99 @@ export interface HudModel {
 function shortenPath(path: string, maxLen: number): string {
 	if (path.length <= maxLen) return path;
 	const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
-	if (parts.length <= 2) return path;
-	const lastTwo = parts.slice(-2).join("/");
-	const candidate = path.startsWith("/") ? `/…/${lastTwo}` : `…/${lastTwo}`;
-	return candidate.length < path.length ? candidate : path;
+	if (parts.length > 1) {
+		const lastTwo = parts.slice(-2).join("/");
+		const candidate2 = path.startsWith("/") ? `/…/${lastTwo}` : `…/${lastTwo}`;
+		if (candidate2.length <= maxLen) return candidate2;
+		const lastOne = parts[parts.length - 1]!;
+		const candidate1 = path.startsWith("/") ? `/…/${lastOne}` : `…/${lastOne}`;
+		if (candidate1.length <= maxLen) return candidate1;
+		if (lastOne.length <= maxLen) return lastOne;
+	}
+	if (maxLen <= 1) return "…";
+	return `…${path.slice(-(maxLen - 1))}`;
 }
 
-function formatDiff(diff: HudProjectModel["diff"], theme: ShellBarTheme): string {
-	if (diff.clean || (diff.files === 0 && diff.added === 0 && diff.deleted === 0)) {
-		return "clean · No captured changes";
+function formatDiffSummary(diff: HudProjectModel["diff"], theme: ShellBarTheme): string {
+	const isClean = diff.clean || (diff.files === 0 && diff.added === 0 && diff.deleted === 0);
+	if (isClean) {
+		const text = diff.notice ? `clean (${diff.notice})` : "clean";
+		return theme.fg("success", text);
 	}
 	const count = `${diff.files} ${diff.files === 1 ? "file" : "files"}`;
-	return `${theme.fg("warning", `±${count}`)} ${theme.fg("muted", "·")} ${theme.fg("success", `+${diff.added}`)} ${theme.fg("error", `−${diff.deleted}`)}`;
+	const noticePart = diff.notice ? ` · ${diff.notice}` : "";
+	return `${theme.fg("warning", `±${count}`)} ${theme.fg("dim", "(")}${theme.fg("success", `+${diff.added}`)} ${theme.fg("error", `−${diff.deleted}`)}${theme.fg("dim", ")")}${noticePart ? theme.fg("warning", noticePart) : ""}`;
 }
 
-function formatServerStatus(server: HudMcpServerStatus, theme: ShellBarTheme): string {
+function formatServerGlyph(server: HudMcpServerStatus, theme: ShellBarTheme): string {
 	let icon: string;
-	let statusTone: string;
 	switch (server.status) {
 		case "ready":
 		case "connected":
 			icon = theme.fg("success", "●");
-			statusTone = "success";
 			break;
 		case "standby":
 			icon = theme.fg("dim", "○");
-			statusTone = "muted";
 			break;
 		case "error":
 			icon = theme.fg("error", "✖");
-			statusTone = "error";
 			break;
 		default:
-			icon = theme.fg("muted", "○");
-			statusTone = "muted";
+			icon = theme.fg("dim", "○");
 			break;
 	}
-	const desc = server.description ? ` ${theme.fg("dim", `(${server.description})`)}` : "";
-	return `  ${icon} ${theme.fg("text", server.name)} ${theme.fg("dim", "·")} ${theme.fg(statusTone, server.status)}${desc}`;
+	return `${icon} ${theme.fg("text", server.name)}`;
 }
 
 export function renderHudCard(model: HudModel, theme: ShellBarTheme, width: number): string[] {
 	const innerWidth = cardInnerWidth(width);
 
-	// 1. [ PROJECT TARGET ACTIVE ]
-	const shortenedCwd = shortenPath(model.project.cwd, Math.max(16, innerWidth - 10));
+	// Fila 1 (Target & Git): ${shortCwd} · ${branch} [${profile}] · ${diffSummary}
 	const branchText = model.project.branch ?? "none";
-	const profilePart = model.project.profile
-		? ` ${theme.fg("dim", "·")} ${theme.fg("muted", "Profile:")} ${theme.fg("text", model.project.profile)}`
-		: "";
-	const projectLines: string[] = [
-		theme.fg("accent", theme.bold("[ PROJECT TARGET ACTIVE ]")),
-		`  ${theme.fg("muted", "CWD:")} ${theme.fg("text", shortenedCwd)}`,
-		`  ${theme.fg("muted", "Branch:")} ${theme.fg("text", branchText)}${profilePart}`,
-		`  ${theme.fg("muted", "Diff:")} ${formatDiff(model.project.diff, theme)}`,
-		...(model.project.diff.notice ? [`  ${theme.fg("warning", model.project.diff.notice)}`] : []),
-	];
+	const profilePart = model.project.profile ? ` [${model.project.profile}]` : "";
+	const diffPart = formatDiffSummary(model.project.diff, theme);
+	const diffWidth = visibleWidth(diffPart);
+	const fullTarget = `${theme.fg("text", branchText)}${model.project.profile ? theme.fg("muted", profilePart) : ""}`;
+	const fullTargetWidth = visibleWidth(fullTarget);
+	const availWithProfile = innerWidth - fullTargetWidth - diffWidth - 6;
+	const targetPart = availWithProfile >= 3 ? fullTarget : theme.fg("text", branchText);
+	const availCwd = Math.max(3, innerWidth - visibleWidth(targetPart) - diffWidth - 6);
+	const shortenedCwd = shortenPath(model.project.cwd, availCwd);
+	const line1Raw = `${theme.fg("text", shortenedCwd)} ${theme.fg("dim", "·")} ${targetPart} ${theme.fg("dim", "·")} ${diffPart}`;
+	const line1 = truncateToWidth(line1Raw, innerWidth, "…");
 
-	// 2. [ MODEL CONTEXT PROTOCOL ]
-	const mcpSummary = `  ${theme.fg("muted", "Servers:")} ${theme.fg("text", `${model.mcp.serverCount}/${model.mcp.totalServers}`)} ${theme.fg("dim", "·")} ${theme.fg("text", `${model.mcp.toolsCount} tools`)}`;
-	const serverLines = model.mcp.servers.length > 0
-		? model.mcp.servers.map((server) => formatServerStatus(server, theme))
-		: [`  ${theme.fg("dim", "No MCP servers")}`];
-	const mcpLines: string[] = [
-		theme.fg("accent", theme.bold("[ MODEL CONTEXT PROTOCOL ]")),
-		mcpSummary,
-		...serverLines,
-	];
+	// Fila 2 (MCP Ecosystem): MCP (${readyCount}/${total} · ${totalTools} tools) · ● name ○ name ✖ name
+	const toolsCount = model.mcp.toolsCount;
+	const mcpHead = `${theme.fg("muted", "MCP")} ${theme.fg("dim", "(")}${theme.fg("text", `${model.mcp.serverCount}/${model.mcp.totalServers}`)} ${theme.fg("dim", "·")} ${theme.fg("text", `${toolsCount} ${toolsCount === 1 ? "tool" : "tools"}`)}${theme.fg("dim", ")")}`;
+	const serversList = model.mcp.servers.length > 0
+		? model.mcp.servers.map((s) => formatServerGlyph(s, theme)).join(" ")
+		: theme.fg("dim", "No MCP servers");
+	const line2Raw = `${mcpHead} ${theme.fg("dim", "·")} ${serversList}`;
+	const line2 = truncateToWidth(line2Raw, innerWidth, "…");
 
-	// 3. [ EXECUTION TELEMETRY ]
+	// Fila 3 (Execution Telemetry): ${cost} (${latency}ms) · Ctx ${gauge} ${tokens} (${pct}%)
 	const costAmount = model.telemetry.costTotal.toFixed(3);
 	const costFormatted = model.telemetry.subscription ? `$${costAmount} sub` : `$${costAmount}`;
-	const latencyFormatted = model.telemetry.latencyMs !== null ? `${model.telemetry.latencyMs}ms` : "--";
-	const telemetryRow1 = `  ${theme.fg("muted", "Cost:")} ${theme.fg("text", costFormatted)} ${theme.fg("dim", "·")} ${theme.fg("muted", "Latency:")} ${theme.fg("text", latencyFormatted)}`;
+	const latencyFormatted = model.telemetry.latencyMs !== null ? `${model.telemetry.latencyMs}ms` : "--ms";
 
 	const percent = model.telemetry.contextPercent ?? (
 		model.telemetry.contextTokens !== null && model.telemetry.contextWindow > 0
 			? (model.telemetry.contextTokens / model.telemetry.contextWindow) * 100
 			: null
 	);
-	const gauge = paintGauge(percent, theme);
+	const gauge = paintGauge(percent, theme, 8);
 	const tokensStr = model.telemetry.contextTokens !== null
 		? `${formatTokens(model.telemetry.contextTokens)} / ${formatTokens(model.telemetry.contextWindow)}`
 		: `-- / ${formatTokens(model.telemetry.contextWindow)}`;
 	const percentStr = percent !== null ? `${Math.round(percent)}%` : "?%";
-	const telemetryRow2 = `  ${theme.fg("muted", "Context:")} ${gauge} ${theme.fg("text", `${tokensStr} (${percentStr})`)}`;
 
-	const telemetryLines: string[] = [
-		theme.fg("accent", theme.bold("[ EXECUTION TELEMETRY ]")),
-		telemetryRow1,
-		telemetryRow2,
-	];
-
-	const body = [
-		...projectLines,
-		"",
-		...mcpLines,
-		"",
-		...telemetryLines,
-	];
+	const line3Raw = `${theme.fg("text", costFormatted)} ${theme.fg("dim", "(")}${theme.fg("muted", latencyFormatted)}${theme.fg("dim", ")")} ${theme.fg("dim", "·")} ${theme.fg("muted", "Ctx")} ${gauge} ${theme.fg("text", tokensStr)} ${theme.fg("dim", "(")}${theme.fg("text", percentStr)}${theme.fg("dim", ")")}`;
+	const line3 = truncateToWidth(line3Raw, innerWidth, "…");
 
 	return renderCard(
 		{
 			title: "ENVIRONMENT HUD",
-			body,
+			body: [line1, line2, line3],
 			tone: CARD_TONE.INFO,
 		},
 		theme,
