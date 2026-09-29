@@ -49,6 +49,7 @@ type PreparedRail = {
 const CACHE = Symbol.for("gentle-pi.experimental-sidebar.cache");
 
 function sidebarCache(tui: TUI): SidebarCache {
+	// SAFETY: Attaching experimental sidebar cache symbol directly onto terminal instance.
 	const terminal = tui.terminal as unknown as Record<symbol, SidebarCache>;
 	return terminal[CACHE] ??= { revision: 0 };
 }
@@ -228,7 +229,7 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme, placement: () => 
 			const preparedHeaderLines = [...(headerPart?.render(Math.max(0, width - HEADER_RIGHT_INSET)) ?? [])];
 			const headerActive = headerPart !== undefined && preparedHeaderLines.some((line) => line.trim() !== "");
 			const contentWidth = scroll.getContentWidth(RAIL_WIDTH);
-			const sections = ["footer", "agents", "todo"].filter((key) => key !== "todo" || state.visibility?.todo !== false).map((key) => {
+			const sections = ["hud", "footer", "agents", "todo"].filter((key) => key !== "todo" || state.visibility?.todo !== false).map((key) => {
 				const component = state.parts.get(key);
 				if (!component) {
 					sectionCache.delete(key);
@@ -372,7 +373,8 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme, placement: () => 
 		stopped = true;
 		state.active = false;
 		clearInterval(timer);
-		scroll.hideTransientScrollbar();
+		// SAFETY: Accessing private ScrollView cleanup method during layout teardown.
+		(scroll as unknown as { hideTransientScrollbar(): void }).hideTransientScrollbar();
 		for (const cleanup of cleanups.reverse()) cleanup();
 		tui.requestRender();
 	};

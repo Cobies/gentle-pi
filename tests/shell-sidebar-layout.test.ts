@@ -43,6 +43,7 @@ test("grouped Status preserves structured fields and opaque integration text", (
 		cwd: "/project", branch: "main", dirty: 2, sessionName: "session",
 		modelId: "model", effort: "high", contextPercent: 45, contextWindow: 1000,
 		costTotal: 1, subscription: false, statuses: ["opaque integration"],
+		usage: undefined,
 	}, theme, 46);
 	const text = lines.join("\n");
 	let previous = -1;
@@ -419,7 +420,7 @@ test("rail rejects removed or replaced parts before cached geometry is prepared 
 			return { handled: true };
 		},
 	};
-	const mounted = sidebarPart(f.tui, "todo", { render: () => ["Todo bottom"], invalidate() {} }, original);
+	const mounted = sidebarPart(f.tui, "todo", { render: () => ["Todo bottom"], invalidate() {}, dispose() {} }, original);
 	const dispose = installSidebar(f.tui, theme);
 	t.after(dispose);
 	const scroll = rail(f);
@@ -990,3 +991,51 @@ test("rail scrollbar stays hidden when the rail does not overflow", (t) => {
 	scroll.scrollBy(1);
 	assert.equal(scroll.isScrollbarVisible, false);
 });
+
+test("when a hud part is registered in sidebarState, it renders at the top of the rail before footer and todo", (t) => {
+	const f = fixture();
+	sidebarPart(f.tui, "hud", { render: () => ["HUD card", ""], invalidate() {} });
+	sidebarPart(f.tui, "todo", { render: () => ["todo", ""], invalidate() {} });
+	sidebarPart(f.tui, "agents", { render: () => ["agents", ""], invalidate() {} });
+	t.after(installSidebar(f.tui, theme));
+	assert.deepEqual(rail(f).render(50).map((line) => line.trim()), ["✿ Gentle Shell ✿", "", "HUD card", "", "Status", "", "agents", "", "todo"]);
+});
+
+test("changes to the hud digest re-render only the hud section while leaving unaffected sibling sections cached", (t) => {
+	const f = fixture();
+	let hudLabel = "one";
+	const counts = { hud: 0, footer: 0, agents: 0, todo: 0 };
+	sidebarPart(f.tui, "hud", { render: () => ["HUD"], invalidate() {} }, {
+		digest: () => hudLabel,
+		render: () => { counts.hud++; return [`HUD ${hudLabel}`]; },
+		invalidate() {},
+	});
+	sidebarPart(f.tui, "footer", { render: () => ["Status"], invalidate() {} }, {
+		digest: () => "footer-static",
+		render: () => { counts.footer++; return ["Footer static"]; },
+		invalidate() {},
+	});
+	for (const key of ["agents", "todo"] as const) {
+		sidebarPart(f.tui, key, { render: () => [key], invalidate() {} }, {
+			render: () => { counts[key]++; return [key]; },
+			invalidate() {},
+		});
+	}
+	t.after(installSidebar(f.tui, theme));
+
+	assert.match(rail(f).render(50).join("\n"), /HUD one/);
+	assert.deepEqual(counts, { hud: 1, footer: 1, agents: 1, todo: 1 });
+
+	// Re-render with nothing changed at all
+	assert.match(rail(f).render(50).join("\n"), /HUD one/);
+	assert.deepEqual(counts, { hud: 1, footer: 1, agents: 1, todo: 1 });
+
+	hudLabel = "two";
+	assert.match(rail(f).render(50).join("\n"), /HUD two/);
+	assert.deepEqual(counts, { hud: 2, footer: 1, agents: 1, todo: 1 }, "only the hud section whose digest changed re-renders");
+
+	invalidateSidebar(f.tui);
+	assert.match(rail(f).render(50).join("\n"), /HUD two/);
+	assert.deepEqual(counts, { hud: 2, footer: 1, agents: 2, todo: 2 }, "revision invalidation reaches only sections with no digest of their own");
+});
+
