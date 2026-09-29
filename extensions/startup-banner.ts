@@ -574,7 +574,8 @@ export function isPiCliSubcommandInvocation(argv: readonly string[]): boolean {
   return first !== undefined && (PI_SUBCOMMANDS as readonly string[]).includes(first);
 }
 
-export default function (pi: ExtensionAPI) {
+export default function (pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env) {
+  if (env.GENTLE_PI_AGENTS_CHILD === "1") return;
   let disposeHeader = () => {};
   pi.on("session_shutdown", () => disposeHeader());
   const notifyBannerConfig = (ctx: any, config: BannerConfig) => {
@@ -684,9 +685,15 @@ export default function (pi: ExtensionAPI) {
     setTimeout(() => {
       (async () => {
         try {
+          const agentDir = join(os.homedir(), ".pi", "agent");
           const raw = await readFile(
-            join(os.homedir(), ".pi", "agent", "mcp.json"),
+            join(agentDir, "mcp-adapter.json"),
             "utf8",
+          ).catch(() =>
+            readFile(
+              join(agentDir, "mcp.json"),
+              "utf8",
+            ),
           );
           const cfg = JSON.parse(raw);
           mcpServersCount = Object.keys(cfg.mcpServers || {}).length;

@@ -10,6 +10,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 
+delete process.env.GENTLE_PI_AGENTS_CHILD;
+
 test("startup artwork spells Gentle Shell with aligned animation spans", () => {
 	const source = readFileSync(new URL("../extensions/startup-banner.ts", import.meta.url), "utf8");
 	const logo = JSON.parse(source.match(/const TEXT_LOGO = (\[[\s\S]*?\]);/)![1].replace(/,\s*]/, "]")) as string[];
@@ -287,4 +289,23 @@ test("launcher-injected extension directories do not suppress the startup banner
 	for (const sub of ["install", "remove", "uninstall", "update", "list", "config", "auth"]) {
 		assert.equal(isPiCliSubcommandInvocation(["node", "pi", sub, "npm:x"]), true, sub);
 	}
+});
+
+test("startup banner returns immediately without registering hooks or commands in subagent child processes", (t) => {
+	const previous = process.env.GENTLE_PI_AGENTS_CHILD;
+	process.env.GENTLE_PI_AGENTS_CHILD = "1";
+	t.after(() => {
+		if (previous === undefined) delete process.env.GENTLE_PI_AGENTS_CHILD;
+		else process.env.GENTLE_PI_AGENTS_CHILD = previous;
+	});
+	let hooks = 0;
+	let commands = 0;
+	startup({
+		on() { hooks++; },
+		registerCommand() { commands++; },
+		getCommands: () => [],
+		getAllTools: () => [],
+	} as unknown as ExtensionAPI);
+	assert.equal(hooks, 0, "no lifecycle hooks registered in subagent child");
+	assert.equal(commands, 0, "no commands registered in subagent child");
 });

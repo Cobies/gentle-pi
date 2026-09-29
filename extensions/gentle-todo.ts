@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type Component, type TUI } from "@earendil-works/pi-tui";
-import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
+import { appendSystemPromptOnce, type AppendableSystemPromptOptions } from "../lib/append-system-prompt.ts";
 import { NativePointerRegion } from "../lib/native-pointer-region.ts";
 import { sidebarPart } from "../lib/shell-sidebar.ts";
 import { invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
@@ -84,6 +84,7 @@ function sessionKey(ctx: ExtensionContext): string {
 }
 
 export default function gentleTodo(pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env): void {
+	if (env.GENTLE_PI_AGENTS_CHILD === "1") return;
 	if (!todoEnabled(env)) return;
 	const sessions = new Map<string, TodoSession>();
 	const collapseKey = todoCollapseKey(env);
@@ -239,7 +240,7 @@ export default function gentleTodo(pi: ExtensionAPI, env: NodeJS.ProcessEnv = pr
 		if (!block) return undefined;
 		// gentle-shell#1485: pi-claude-bridge drops a handler-returned
 		// systemPrompt, so the open-tasks block goes through appendSystemPrompt.
-		appendSystemPromptOnce(event.systemPromptOptions, block);
+		appendSystemPromptOnce(event.systemPromptOptions as AppendableSystemPromptOptions | undefined, block);
 		return undefined;
 	});
 

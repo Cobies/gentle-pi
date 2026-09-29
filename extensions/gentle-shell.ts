@@ -1474,6 +1474,7 @@ async function fetchFromSource(source: UsageSource, apiKey: string | undefined, 
 }
 
 export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env, overrides: Partial<ShellDeps> = {}): void {
+	if (env.GENTLE_PI_AGENTS_CHILD === "1") return;
 	installSessionChangeCapture(pi, env, overrides.resolveWorktree ?? resolveSessionWorktree);
 	if (!shellEnabled(env)) return;
 	const profileReader = createActiveProfileReader(env);
