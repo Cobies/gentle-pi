@@ -95,30 +95,33 @@ function formatServerGlyph(server: HudMcpServerStatus, theme: ShellBarTheme): st
 export function renderHudCard(model: HudModel, theme: ShellBarTheme, width: number): string[] {
 	const innerWidth = cardInnerWidth(width);
 
-	// Fila 1 (Target & Git): ${shortCwd} · ${branch} [${profile}] · ${diffSummary}
+	// Fila 1 (Workspace CWD): CWD con todo el ancho disponible
+	const shortenedCwd = shortenPath(model.project.cwd, innerWidth);
+	const line1Raw = theme.fg("text", shortenedCwd);
+	const line1 = truncateToWidth(line1Raw, innerWidth, "…");
+
+	// Fila 2 (Branch, Perfil y Git Diff): ${branch} [${profile}] · ${diffSummary}
 	const branchText = model.project.branch ?? "none";
 	const profilePart = model.project.profile ? ` [${model.project.profile}]` : "";
 	const diffPart = formatDiffSummary(model.project.diff, theme);
 	const diffWidth = visibleWidth(diffPart);
 	const fullTarget = `${theme.fg("text", branchText)}${model.project.profile ? theme.fg("muted", profilePart) : ""}`;
 	const fullTargetWidth = visibleWidth(fullTarget);
-	const availWithProfile = innerWidth - fullTargetWidth - diffWidth - 6;
-	const targetPart = availWithProfile >= 3 ? fullTarget : theme.fg("text", branchText);
-	const availCwd = Math.max(3, innerWidth - visibleWidth(targetPart) - diffWidth - 6);
-	const shortenedCwd = shortenPath(model.project.cwd, availCwd);
-	const line1Raw = `${theme.fg("text", shortenedCwd)} ${theme.fg("dim", "·")} ${targetPart} ${theme.fg("dim", "·")} ${diffPart}`;
-	const line1 = truncateToWidth(line1Raw, innerWidth, "…");
+	const availWithProfile = innerWidth - fullTargetWidth - diffWidth - 3;
+	const targetPart = availWithProfile >= 0 ? fullTarget : theme.fg("text", branchText);
+	const line2Raw = `${targetPart} ${theme.fg("dim", "·")} ${diffPart}`;
+	const line2 = truncateToWidth(line2Raw, innerWidth, "…");
 
-	// Fila 2 (MCP Ecosystem): MCP (${readyCount}/${total} · ${totalTools} tools) · ● name ○ name ✖ name
+	// Fila 3 (MCP Ecosystem): MCP (${readyCount}/${total} · ${totalTools} tools) · ● name ○ name ✖ name
 	const toolsCount = model.mcp.toolsCount;
 	const mcpHead = `${theme.fg("muted", "MCP")} ${theme.fg("dim", "(")}${theme.fg("text", `${model.mcp.serverCount}/${model.mcp.totalServers}`)} ${theme.fg("dim", "·")} ${theme.fg("text", `${toolsCount} ${toolsCount === 1 ? "tool" : "tools"}`)}${theme.fg("dim", ")")}`;
 	const serversList = model.mcp.servers.length > 0
 		? model.mcp.servers.map((s) => formatServerGlyph(s, theme)).join(" ")
 		: theme.fg("dim", "No MCP servers");
-	const line2Raw = `${mcpHead} ${theme.fg("dim", "·")} ${serversList}`;
-	const line2 = truncateToWidth(line2Raw, innerWidth, "…");
+	const line3Raw = `${mcpHead} ${theme.fg("dim", "·")} ${serversList}`;
+	const line3 = truncateToWidth(line3Raw, innerWidth, "…");
 
-	// Fila 3 (Execution Telemetry): ${cost} (${latency}ms) · Ctx ${gauge} ${tokens} (${pct}%)
+	// Fila 4 (Execution Telemetry): ${cost} (${latency}ms) · Ctx ${gauge} ${tokens} (${pct}%)
 	const costAmount = model.telemetry.costTotal.toFixed(3);
 	const costFormatted = model.telemetry.subscription ? `$${costAmount} sub` : `$${costAmount}`;
 	const latencyFormatted = model.telemetry.latencyMs !== null ? `${model.telemetry.latencyMs}ms` : "--ms";
@@ -134,13 +137,13 @@ export function renderHudCard(model: HudModel, theme: ShellBarTheme, width: numb
 		: `-- / ${formatTokens(model.telemetry.contextWindow)}`;
 	const percentStr = percent !== null ? `${Math.round(percent)}%` : "?%";
 
-	const line3Raw = `${theme.fg("text", costFormatted)} ${theme.fg("dim", "(")}${theme.fg("muted", latencyFormatted)}${theme.fg("dim", ")")} ${theme.fg("dim", "·")} ${theme.fg("muted", "Ctx")} ${gauge} ${theme.fg("text", tokensStr)} ${theme.fg("dim", "(")}${theme.fg("text", percentStr)}${theme.fg("dim", ")")}`;
-	const line3 = truncateToWidth(line3Raw, innerWidth, "…");
+	const line4Raw = `${theme.fg("text", costFormatted)} ${theme.fg("dim", "(")}${theme.fg("muted", latencyFormatted)}${theme.fg("dim", ")")} ${theme.fg("dim", "·")} ${theme.fg("muted", "Ctx")} ${gauge} ${theme.fg("text", tokensStr)} ${theme.fg("dim", "(")}${theme.fg("text", percentStr)}${theme.fg("dim", ")")}`;
+	const line4 = truncateToWidth(line4Raw, innerWidth, "…");
 
 	return renderCard(
 		{
 			title: "ENVIRONMENT HUD",
-			body: [line1, line2, line3],
+			body: [line1, line2, line3, line4],
 			tone: CARD_TONE.INFO,
 		},
 		theme,

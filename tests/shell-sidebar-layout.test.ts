@@ -1118,7 +1118,7 @@ test("dense HUD card combined with TODO eliminates vertical overflow on typical 
 	const railScroll = rail(f);
 	const renderedLines = railScroll.render(50);
 
-	// Total height must be compact (banner + gap + 5 hud + gap + todo <= 20 rows)
+	// Total height must be compact (banner + gap + 6 hud + gap + todo <= 20 rows)
 	assert.ok(renderedLines.length <= 20, `Rail lines ${renderedLines.length} exceeds compact height budget`);
 	assert.ok(renderedLines.some((l) => l.includes("ENVIRONMENT HUD")));
 	assert.ok(renderedLines.some((l) => l.includes("Task 1")));

@@ -72,25 +72,27 @@ function createSampleHudModel(overrides?: {
 	};
 }
 
-test("renderHudCard renders exactly 5 lines (dense HUD) without module headers", () => {
+test("renderHudCard renders exactly 6 lines (dense HUD) without module headers", () => {
 	const model = createSampleHudModel();
 	const lines = renderHudCard(model, plainTheme, 50).map(stripAnsi);
 
-	assert.equal(lines.length, 5, "renders exactly 5 lines in dense HUD format");
+	assert.equal(lines.length, 6, "renders exactly 6 lines in dense HUD format");
 	assert.match(lines[0]!, /^╭─ ✿ ENVIRONMENT HUD ─+╮$/, "renders ENVIRONMENT HUD title in top rule");
-	assert.match(lines[4]!, /^╰─+╯$/, "renders bottom rule");
+	assert.match(lines[5]!, /^╰─+╯$/, "renders bottom rule");
 
 	const joined = lines.join("\n");
 	assert.ok(!joined.includes("[ PROJECT TARGET ACTIVE ]"), "omits project module header");
 	assert.ok(!joined.includes("[ MODEL CONTEXT PROTOCOL ]"), "omits MCP module header");
 	assert.ok(!joined.includes("[ EXECUTION TELEMETRY ]"), "omits telemetry module header");
 
-	// Fila 1: target & git
-	assert.match(lines[1]!, /feat\/hud.*developer.*±2 files \(\+15 −3\)/, "line 1 contains target, git, profile and diff");
-	// Fila 2: MCP horizontal
-	assert.match(lines[2]!, /MCP \(2\/3 · 18 tools\).*● context7/, "line 2 contains MCP summary and server glyphs");
-	// Fila 3: Execution telemetry
-	assert.match(lines[3]!, /\$0\.045 \(320ms\) · Ctx.*16k \/ 128k \(13%\)/, "line 3 contains cost, latency, gauge, tokens, percent");
+	// Fila 1: CWD
+	assert.match(lines[1]!, /\/workspace\/gentle-pi/, "line 1 contains workspace CWD");
+	// Fila 2: branch, profile & git diff
+	assert.match(lines[2]!, /feat\/hud.*developer.*±2 files \(\+15 −3\)/, "line 2 contains branch, profile and diff");
+	// Fila 3: MCP horizontal
+	assert.match(lines[3]!, /MCP \(2\/3 · 18 tools\).*● context7/, "line 3 contains MCP summary and server glyphs");
+	// Fila 4: Execution telemetry
+	assert.match(lines[4]!, /\$0\.045 \(320ms\) · Ctx.*16k \/ 128k \(13%\)/, "line 4 contains cost, latency, gauge, tokens, percent");
 });
 
 test("renderHudCard handles clean git diff and dirty diffs", () => {
@@ -232,7 +234,7 @@ test("renderHudCard handles telemetry: session cost, latency, context gauge and 
 	assert.match(computedText, /50%/, "computes context percentage from tokens/window when percent is null");
 });
 
-test("renderHudCard fits within bounded widths without overflow and remains exactly 5 lines", () => {
+test("renderHudCard fits within bounded widths without overflow and remains exactly 6 lines", () => {
 	const model = createSampleHudModel({
 		project: {
 			cwd: "/a/very/long/nested/path/to/some/deep/workspace/project-directory-name",
@@ -241,7 +243,7 @@ test("renderHudCard fits within bounded widths without overflow and remains exac
 
 	for (const width of [40, 50, 60]) {
 		const lines = renderHudCard(model, plainTheme, width);
-		assert.equal(lines.length, 5, `Height at width ${width} must be exactly 5 lines`);
+		assert.equal(lines.length, 6, `Height at width ${width} must be exactly 6 lines`);
 		for (const line of lines) {
 			const visible = visibleWidth(stripAnsi(line));
 			assert.ok(
