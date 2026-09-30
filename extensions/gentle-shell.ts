@@ -116,7 +116,6 @@ import { REVIEW_SIDEBAR_EVENT, isReviewSidebarSnapshot, type ReviewSidebarSnapsh
 import { installSessionChangeCapture } from "../lib/session-change-capture.ts";
 import { SelectionEngine } from "../lib/selection-engine.ts";
 import { withOverlayRepaint } from "../lib/overlay-repaint.ts";
-import { renderHudCard, hudDigest, type HudModel, type HudMcpServerStatus, type HudMcpModel } from "../lib/shell-hud.ts";
 
 // Gentle Shell: the visual layer gentle-pi puts on top of pi. It installs the
 // status bar, the petal prompt, the working-tree changes widget and overlay,
@@ -249,64 +248,6 @@ function sessionCost(ctx: ExtensionContext): number {
 		total += entry.message.usage?.cost?.total ?? 0;
 	}
 	return total;
-}
-
-export function buildHudMcpModel(footerData: ShellFooterData, pi: ExtensionAPI): HudMcpModel {
-	const allTools = typeof pi.getAllTools === "function" ? pi.getAllTools() : [];
-	const mcpTools = allTools.filter((t) => t.name.startsWith("mcp__"));
-	const serverTools = new Map<string, number>();
-	for (const tool of mcpTools) {
-		const parts = tool.name.slice(5).split("__");
-		const serverName = parts[0] || "mcp";
-		serverTools.set(serverName, (serverTools.get(serverName) ?? 0) + 1);
-	}
-
-	const servers: HudMcpServerStatus[] = [];
-	for (const [name, count] of serverTools.entries()) {
-		servers.push({
-			name,
-			status: "connected",
-			description: `${count} ${count === 1 ? "tool" : "tools"}`,
-		});
-	}
-
-	const mcpStatus = footerData.getExtensionStatuses().get("mcp");
-	let serverCount = servers.length;
-	let totalServers = servers.length;
-	let toolsCount = mcpTools.length;
-
-	if (mcpStatus) {
-		const ratioMatch = mcpStatus.match(/(\d+)\s*\/\s*(\d+)/);
-		if (ratioMatch) {
-			serverCount = Number.parseInt(ratioMatch[1]!, 10);
-			totalServers = Number.parseInt(ratioMatch[2]!, 10);
-		} else {
-			const countMatch = mcpStatus.match(/(\d+)\s*(?:servers?|connected)/i);
-			if (countMatch) {
-				serverCount = Number.parseInt(countMatch[1]!, 10);
-				if (totalServers < serverCount) totalServers = serverCount;
-			}
-		}
-		const toolMatch = mcpStatus.match(/(\d+)\s*tools?/i);
-		if (toolMatch) {
-			toolsCount = Number.parseInt(toolMatch[1]!, 10);
-		}
-	}
-
-	if (serverCount > 0 && servers.length === 0) {
-		servers.push({
-			name: "mcp",
-			status: "connected",
-			description: mcpStatus,
-		});
-	}
-
-	return {
-		serverCount,
-		totalServers,
-		servers,
-		toolsCount,
-	};
 }
 
 export function buildShellBarModel(
@@ -1657,21 +1598,6 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		renderHost?.invalidateSidebar?.();
 		renderHost?.requestRender();
 	});
-	let turnRequestStartTime: number | null = null;
-	let lastTurnLatencyMs: number | null = null;
-	pi.on("before_provider_request", () => {
-		turnRequestStartTime = deps.now();
-	});
-	const completeTurnLatency = () => {
-		if (turnRequestStartTime !== null) {
-			lastTurnLatencyMs = Math.max(0, deps.now() - turnRequestStartTime);
-			turnRequestStartTime = null;
-			renderHost?.invalidateSidebar?.();
-			renderHost?.requestRender();
-		}
-	};
-	pi.on("turn_end", completeTurnLatency);
-	pi.on("message_end", completeTurnLatency);
 	pi.registerMessageRenderer(REVIEW_PREFLIGHT_TYPE, (message, options, theme) => {
 		const body = messageText(message.content as string | Array<{ type: string; text?: string }>).split("\n");
 		const hint = keyHint("app.tools.expand", options.expanded ? "collapse" : "expand");
@@ -1846,45 +1772,8 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			const statusOwner = () => narrowStatusOwner({ mode: (tui as TUI & { mode?: string }).mode, columns: tui.terminal?.columns ?? 0, statusPlacement: visualSettings.statusPlacement, headerPlacement: visualSettings.headerPlacement });
 			const bottomBar = { ...bottom, render: (width: number) => statusOwner() === STATUS_OWNER.BOTTOM ? renderShellBottomOnlyBar(footerModel(), theme, width, usageShortcutKey, visualSettings) : bottom.render(width) };
 			const part = sidebarPart(tui, "footer", bottomBar, {
-				digest: () => JSON.stringify([footerModel(), visualSettings, sidebarState(tui).parts.has("hud")]),
-				render: (width) => renderShellSidebarBar(footerModel(), theme, width, visualSettings, { hudActive: sidebarState(tui).parts.has("hud") }),
-				invalidate() {},
-			});
-			const buildHudModel = (): HudModel => {
-				const files = tracker?.model.files.length ?? 0;
-				const added = tracker?.model.added ?? 0;
-				const deleted = tracker?.model.deleted ?? 0;
-				const clean = files === 0 && added === 0 && deleted === 0;
-				const usageData = ctx.getContextUsage();
-				const model = ctx.model;
-
-				return {
-					project: {
-						cwd: shortenHome(ctx.sessionManager.getCwd(), os.homedir()),
-						branch: footerData.getGitBranch(),
-						profile: deps.activeProfile(),
-						diff: {
-							files,
-							added,
-							deleted,
-							clean,
-							notice: tracker?.model.notice,
-						},
-					},
-					mcp: buildHudMcpModel(footerData, pi),
-					telemetry: {
-						costTotal: sessionCost(ctx),
-						subscription: model ? ctx.modelRegistry.isUsingOAuth(model) : false,
-						latencyMs: lastTurnLatencyMs,
-						contextTokens: usageData?.tokens ?? null,
-						contextWindow: usageData?.contextWindow ?? model?.contextWindow ?? 0,
-						contextPercent: usageData?.percent ?? null,
-					},
-				};
-			};
-			const disposeHud = sidebarPart(tui, "hud", { render: () => [], invalidate() {}, dispose() {} }, {
-				digest: () => hudDigest(buildHudModel(), visualSettings),
-				render: (width) => renderHudCard(buildHudModel(), theme, width),
+				digest: () => JSON.stringify([footerModel(), visualSettings]),
+				render: (width) => renderShellSidebarBar(footerModel(), theme, width, visualSettings),
 				invalidate() {},
 			});
 			// The header row carries everything that ticks every frame (model,
@@ -1918,7 +1807,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 					return { handled: true, render: true };
 				},
 			}), { placement: "belowEditor" });
-			return { ...part, dispose() { ctx.ui.setWidget(HEADER_WIDGET_KEY, undefined); disposeHeader(); disposeHud.dispose(); uninstall(); part.dispose(); if (sidebarTui === tui) sidebarTui = undefined; } };
+			return { ...part, dispose() { ctx.ui.setWidget(HEADER_WIDGET_KEY, undefined); disposeHeader(); uninstall(); part.dispose(); if (sidebarTui === tui) sidebarTui = undefined; } };
 		});
 		void refreshUsage(ctx, true);
 		const ownsPrompt = installPrompt(
@@ -1956,8 +1845,6 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		stopProfilePoll();
 		oddPhaseRegistry.clear(ctx.sessionManager.getSessionId());
 		oddPhaseRegistry.clearRenderRequest(ctx.sessionManager.getSessionId());
-		turnRequestStartTime = null;
-		lastTurnLatencyMs = null;
 		pendingQueuedText = undefined;
 		prompt?.dispose();
 		prompt = undefined;

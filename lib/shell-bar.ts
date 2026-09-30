@@ -186,20 +186,9 @@ function joinSegments(segments: string[], theme: ShellBarTheme): string {
 	return segments.join(` ${theme.fg(ROLE.SEPARATOR, SHELL_BAR_SEPARATOR)} `);
 }
 
-export interface SidebarBarOptions {
-	omitProjectChanges?: boolean;
-	hudActive?: boolean;
-}
-
 // Sidebar groups use structured fields, never positional compact-bar segments
 // or inferred meanings from opaque extension status strings.
-export function renderShellSidebarBar(
-	model: ShellBarModel,
-	theme: ShellBarTheme,
-	width: number,
-	presentation?: Presentation,
-	options?: SidebarBarOptions,
-): string[] {
+export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme, width: number, presentation?: Presentation): string[] {
 	const value = (text: string) => theme.fg(ROLE.VALUE, theme.bold(text));
 	const label = (text: string) => theme.fg(ROLE.LABEL, text);
 	const changes = model.changes;
@@ -208,55 +197,42 @@ export function renderShellSidebarBar(
 	// the same inset without consuming the card's right border.
 	const innerWidth = cardInnerWidth(width);
 	const inset = Math.min(1, innerWidth - 1);
-	const omitProjectChanges = options?.omitProjectChanges || options?.hudActive;
 	// Model, effort, context, cost, and the per-model usage table now live in
 	// the always-visible header row (and /gentle:usage for the full table);
 	// this event-driven card keeps only what a footer/model-switch event does
-	// not already refresh every frame. When the HUD card is active, Project and
-	// Changes are already displayed at the top of the rail, so Status omits them.
-	const projectGroup = {
-		title: "Project",
-		lines: [
-			value(model.cwd),
-			...(branch ? [branch] : []),
-			...(model.sessionName ? [`${label("Session")} ${value(model.sessionName)}`] : []),
-			...(model.profile ? [`${label("Profile")} ${value(sanitizeStatus(model.profile))}`] : []),
-		],
-	};
-	const changesGroup = {
-		title: "Changes",
-		lines: [
-			changes?.files
-				? `${changes.files} ${changes.files === 1 ? "file" : "files"} · ${theme.fg("success", `+${changes.added}`)} ${theme.fg("error", `−${changes.deleted}`)}`
-				: label("No captured changes"),
-			...(changes?.notice ? [theme.fg("warning", sanitizeStatus(changes.notice))] : []),
-			label("/gentle:changes"),
-		],
-	};
-	const rddGroup = model.review && presentation?.visibility.rdd !== false ? {
-		title: "🌹 RDD",
-		lines: [
-			value(REVIEW_SIDEBAR_LABELS[model.review.state]),
-			// Unknown scope is an internal sentinel, not something the user acts on.
-			...(model.review.scope !== REVIEW_SCOPE_UNAVAILABLE ? [label(sanitizeStatus(model.review.scope))] : []),
-		],
-	} : undefined;
-	const integrationsGroup = model.statuses.length ? {
-		title: "Integrations",
-		lines: model.statuses.map((status) => theme.fg(ROLE.STATUS, sanitizeStatus(status))),
-	} : (!omitProjectChanges ? {
-		title: "Integrations",
-		lines: [label("No status reported")],
-	} : undefined);
-
+	// not already refresh every frame.
 	const groups: Array<{ title: string; lines: string[] }> = [
-		...(!omitProjectChanges ? [projectGroup] : []),
-		...(!omitProjectChanges && presentation?.visibility.changes !== false ? [changesGroup] : []),
-		...(rddGroup ? [rddGroup] : []),
-		...(integrationsGroup ? [integrationsGroup] : []),
+		{
+			title: "Project",
+			lines: [
+				value(model.cwd),
+				...(branch ? [branch] : []),
+				...(model.sessionName ? [`${label("Session")} ${value(model.sessionName)}`] : []),
+				...(model.profile ? [`${label("Profile")} ${value(sanitizeStatus(model.profile))}`] : []),
+			],
+		},
+		...(presentation?.visibility.changes === false ? [] : [{
+			title: "Changes",
+			lines: [
+				changes?.files
+					? `${changes.files} ${changes.files === 1 ? "file" : "files"} · ${theme.fg("success", `+${changes.added}`)} ${theme.fg("error", `−${changes.deleted}`)}`
+					: label("No captured changes"),
+				...(changes?.notice ? [theme.fg("warning", sanitizeStatus(changes.notice))] : []),
+				label("/gentle:changes"),
+			],
+		}]),
+		...(model.review && presentation?.visibility.rdd !== false ? [{
+			title: "🌹 RDD",
+			lines: [
+				value(REVIEW_SIDEBAR_LABELS[model.review.state]),
+				// Unknown scope is an internal sentinel, not something the user acts on.
+				...(model.review.scope !== REVIEW_SCOPE_UNAVAILABLE ? [label(sanitizeStatus(model.review.scope))] : []),
+			],
+		}] : []),
+		{ title: "Integrations", lines: model.statuses.length
+			? model.statuses.map((status) => theme.fg(ROLE.STATUS, sanitizeStatus(status)))
+			: [label("No status reported")] },
 	];
-	if (groups.length === 0) return [];
-
 	// Wrap and indent every group line before it reaches the card, so Unicode and
 	// ANSI continuation lines keep the same inset without consuming the right border.
 	const body = groups.flatMap((group, index) => [
