@@ -6,7 +6,7 @@ import { installSidebar, invalidateSidebar, narrowStatusOwner } from "../lib/she
 import { sidebarHeader, sidebarPart, sidebarState } from "../lib/shell-sidebar.ts";
 import { renderShellSidebarBar } from "../lib/shell-bar.ts";
 import { renderTodoCard, type TodoState } from "../lib/shell-todo.ts";
-import { renderHudCard } from "../lib/shell-hud.ts";
+import { CARD_STYLE, cardStyle, setCardStyle } from "../lib/shell-card.ts";
 
 const NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
@@ -39,23 +39,29 @@ function railWithHeader(f: ReturnType<typeof fixture>): ScrollView {
 	return hstackOf(f).entries[1].component as ScrollView;
 }
 
-test("grouped Status preserves structured fields and opaque integration text", () => {
-	const lines = renderShellSidebarBar({
-		cwd: "/project", branch: "main", dirty: 2, sessionName: "session",
-		modelId: "model", effort: "high", contextPercent: 45, contextWindow: 1000,
-		costTotal: 1, subscription: false, statuses: ["opaque integration"],
-		usage: undefined,
-	}, theme, 46);
-	const text = lines.join("\n");
-	let previous = -1;
-	for (const heading of ["Status", "Project", "Changes", "Integrations"]) {
-		const index = text.indexOf(heading);
-		assert.ok(index > previous, heading);
-		previous = index;
+test("grouped Status preserves structured fields and opaque integration text", (t) => {
+	const found = cardStyle();
+	t.after(() => setCardStyle(found));
+	// Both styles keep the group order; float panels need a theme background.
+	const painted = { ...theme, bg: (_color: string, text: string) => `\x1b[48;5;22m${text}\x1b[49m` };
+	for (const style of [CARD_STYLE.NEON, CARD_STYLE.FLOAT]) {
+		setCardStyle(style);
+		const lines = renderShellSidebarBar({
+			cwd: "/project", branch: "main", dirty: 2, sessionName: "session",
+			modelId: "model", effort: "high", contextPercent: 45, contextWindow: 1000,
+			costTotal: 1, subscription: false, statuses: ["opaque integration"],
+		}, painted, 46);
+		const text = lines.join("\n");
+		let previous = -1;
+		for (const heading of ["Status", "Project", "Changes", "Integrations"]) {
+			const index = text.indexOf(heading);
+			assert.ok(index > previous, `${style}: ${heading}`);
+			previous = index;
+		}
+		assert.match(text, /opaque integration/);
+		assert.match(text, /Branch.*main/);
+		assert.doesNotMatch(text, /Usage/);
 	}
-	assert.match(text, /opaque integration/);
-	assert.match(text, /Branch.*main/);
-	assert.doesNotMatch(text, /Usage/);
 });
 
 test("scrollable TODO keeps every task while bottom and collapsed cards stay bounded", () => {
@@ -421,7 +427,7 @@ test("rail rejects removed or replaced parts before cached geometry is prepared 
 			return { handled: true };
 		},
 	};
-	const mounted = sidebarPart(f.tui, "todo", { render: () => ["Todo bottom"], invalidate() {}, dispose() {} }, original);
+	const mounted = sidebarPart(f.tui, "todo", { render: () => ["Todo bottom"], invalidate() {} }, original);
 	const dispose = installSidebar(f.tui, theme);
 	t.after(dispose);
 	const scroll = rail(f);
@@ -810,6 +816,9 @@ test("a part replaced under the same key never reuses the previous part's cached
 // header (every fixture above) keep the exact old hstack-direct shape.
 
 test("an active header wraps the hstack in a vstack and removes the banner from the rail", (t) => {
+	const found = cardStyle();
+	t.after(() => setCardStyle(found));
+	setCardStyle(CARD_STYLE.NEON);
 	const f = fixture();
 	sidebarHeader(f.tui, { render: (width: number) => [`HEADER ${width}`], invalidate() {} });
 	t.after(installSidebar(f.tui, theme));
@@ -840,6 +849,71 @@ test("an active header wraps the hstack in a vstack and removes the banner from 
 	// not sit flush against the header.
 	assert.equal(rail[0]?.trim(), "", "the rail opens with a blank row under the header");
 	assert.notEqual(rail[1]?.trim(), "", "the first card starts on the second row");
+});
+
+test("float rail alignment starts Status background at the conversation body row with either header placement", (t) => {
+	const found = cardStyle();
+	t.after(() => setCardStyle(found));
+	setCardStyle(CARD_STYLE.FLOAT);
+	const painted = { ...theme, bg: (_color: string, text: string) => `\x1b[48;5;22m${text}\x1b[49m` };
+	for (const placement of ["top", "below-input"] as const) {
+		const f = fixture();
+		const received: TuiMouseEvent[] = [];
+		const status = renderShellSidebarBar({
+			cwd: "/project", branch: "main", dirty: 0, sessionName: undefined,
+			modelId: "model", effort: "high", contextPercent: 45, contextWindow: 1000,
+			costTotal: 1, subscription: false, usage: undefined, statuses: [],
+		}, painted, 48);
+		sidebarPart(f.tui, "footer", {
+			render: () => status,
+			invalidate() {},
+			handleMouse(event) { received.push(event); return { handled: true }; },
+		});
+		sidebarHeader(f.tui, { render: () => ["HEADER", "RULE"], invalidate() {} });
+		const transcript = { render: () => ["CONVERSATION"], invalidate() {} };
+		f.root[NODE] = () => ({ type: "vstack", entries: [{ component: transcript }] });
+		t.after(installSidebar(f.tui, painted, () => "auto", () => placement));
+		const frame = renderLayoutFrame(f.root, 140, 8, () => {});
+		const bodyY = placement === "top" ? 2 : 0;
+		assert.match(frame.lines[bodyY], /CONVERSATION/);
+		assert.match(frame.lines[bodyY], /\x1b\[48;5;22m/, `${placement}: the first painted padding row aligns with conversation content`);
+		assert.doesNotMatch(frame.lines.slice(0, bodyY).join("\n"), /\x1b\[48;5;22m/);
+		const scroll = railWithHeader(f);
+		const content = scroll.render(50);
+		assert.deepEqual(content, status.map((line) => ` ${line} `), "no external blank row; every internal padding byte survives");
+		const height = 8 - bodyY;
+		const click = (y: number): TuiMouseEvent => ({ type: "click", button: "left", x: 2, y, screenX: 92, screenY: bodyY + y, width: 50, height, shift: false, alt: false, ctrl: false });
+		assert.equal(scroll.handleMouse(click(0))?.handled, true);
+		assert.equal(received.at(-1)?.y, 0, "first painted row is also the first part hit row");
+		assert.equal(scroll.handleMouse(click(1))?.handled, true);
+		assert.equal(received.at(-1)?.y, 1, "approved internal header offset is preserved");
+		scroll.scrollBy(1000);
+		assert.equal(scroll.scrollTop, status.length - height, "scroll bounds contain only actual card rows");
+		assert.equal(scroll.handleMouse(click(height - 1))?.handled, true);
+		assert.equal(received.at(-1)?.y, status.length - 1, "last clipped viewport row hits the last card row");
+		const count = received.length;
+		assert.equal(scroll.handleMouse(click(height)), undefined, "outside the viewport is inert");
+		assert.equal(received.length, count);
+	}
+});
+
+test("float rail alignment preserves fallback banners and neon bytes across live style switches", (t) => {
+	const found = cardStyle();
+	t.after(() => setCardStyle(found));
+	for (const header of [undefined, "", "HEADER"]) {
+		setCardStyle(CARD_STYLE.NEON);
+		const f = fixture();
+		if (header !== undefined) sidebarHeader(f.tui, { render: () => [header], invalidate() {} });
+		sidebarPart(f.tui, "todo", { render: () => ["TODO"], invalidate() {} });
+		t.after(installSidebar(f.tui, theme));
+		const baseline = railWithHeader(f).render(50);
+		if (header) assert.deepEqual(baseline, ["", " Status ", "", " TODO "]);
+		else assert.match(baseline.join("\n"), /✿ Gentle Shell ✿/);
+		setCardStyle(CARD_STYLE.FLOAT);
+		assert.deepEqual(railWithHeader(f).render(50), header ? baseline.slice(1) : baseline, "only the active-header external gap changes");
+		setCardStyle(CARD_STYLE.NEON);
+		assert.deepEqual(railWithHeader(f).render(50), baseline, "neon is byte-identical after switching back");
+	}
 });
 
 test("the header leaf carries the rule row: a two-line header renders both lines at full width", (t) => {
@@ -992,137 +1066,3 @@ test("rail scrollbar stays hidden when the rail does not overflow", (t) => {
 	scroll.scrollBy(1);
 	assert.equal(scroll.isScrollbarVisible, false);
 });
-
-test("when a hud part is registered in sidebarState, it renders at the top of the rail before footer and todo", (t) => {
-	const f = fixture();
-	sidebarPart(f.tui, "hud", { render: () => ["HUD card", ""], invalidate() {} });
-	sidebarPart(f.tui, "todo", { render: () => ["todo", ""], invalidate() {} });
-	sidebarPart(f.tui, "agents", { render: () => ["agents", ""], invalidate() {} });
-	t.after(installSidebar(f.tui, theme));
-	assert.deepEqual(rail(f).render(50).map((line) => line.trim()), ["✿ Gentle Shell ✿", "", "HUD card", "", "Status", "", "agents", "", "todo"]);
-});
-
-test("changes to the hud digest re-render only the hud section while leaving unaffected sibling sections cached", (t) => {
-	const f = fixture();
-	let hudLabel = "one";
-	const counts = { hud: 0, footer: 0, agents: 0, todo: 0 };
-	sidebarPart(f.tui, "hud", { render: () => ["HUD"], invalidate() {} }, {
-		digest: () => hudLabel,
-		render: () => { counts.hud++; return [`HUD ${hudLabel}`]; },
-		invalidate() {},
-	});
-	sidebarPart(f.tui, "footer", { render: () => ["Status"], invalidate() {} }, {
-		digest: () => "footer-static",
-		render: () => { counts.footer++; return ["Footer static"]; },
-		invalidate() {},
-	});
-	for (const key of ["agents", "todo"] as const) {
-		sidebarPart(f.tui, key, { render: () => [key], invalidate() {} }, {
-			render: () => { counts[key]++; return [key]; },
-			invalidate() {},
-		});
-	}
-	t.after(installSidebar(f.tui, theme));
-
-	assert.match(rail(f).render(50).join("\n"), /HUD one/);
-	assert.deepEqual(counts, { hud: 1, footer: 1, agents: 1, todo: 1 });
-
-	// Re-render with nothing changed at all
-	assert.match(rail(f).render(50).join("\n"), /HUD one/);
-	assert.deepEqual(counts, { hud: 1, footer: 1, agents: 1, todo: 1 });
-
-	hudLabel = "two";
-	assert.match(rail(f).render(50).join("\n"), /HUD two/);
-	assert.deepEqual(counts, { hud: 2, footer: 1, agents: 1, todo: 1 }, "only the hud section whose digest changed re-renders");
-
-	invalidateSidebar(f.tui);
-	assert.match(rail(f).render(50).join("\n"), /HUD two/);
-	assert.deepEqual(counts, { hud: 2, footer: 1, agents: 2, todo: 2 }, "revision invalidation reaches only sections with no digest of their own");
-});
-
-test("Status card omits Project and Changes when HUD is active, retaining Integrations and RDD", () => {
-	const model = {
-		cwd: "/project",
-		branch: "feat/compact-hud",
-		dirty: 2,
-		sessionName: "session",
-		modelId: "model",
-		effort: "high",
-		contextPercent: 45,
-		contextWindow: 1000,
-		costTotal: 1,
-		subscription: false,
-		statuses: ["mcp-server: active"],
-		usage: undefined,
-		review: { state: "reviewing" as const, scope: "lib/shell-hud.ts" },
-	};
-
-	const deduplicated = renderShellSidebarBar(model, theme, 46, undefined, { hudActive: true });
-	const text = deduplicated.join("\n");
-
-	// Project and Changes are omitted to prevent duplication with HUD
-	assert.doesNotMatch(text, /Project/);
-	assert.doesNotMatch(text, /\/project/);
-	assert.doesNotMatch(text, /Changes/);
-	assert.doesNotMatch(text, /\/gentle:changes/);
-
-	// RDD and unique Integrations survive in Status
-	assert.match(text, /🌹 RDD/);
-	assert.match(text, /Integrations/);
-	assert.match(text, /mcp-server: active/);
-});
-
-test("Status card is completely omitted when HUD is active and no unique integrations or RDD exist", () => {
-	const model = {
-		cwd: "/project",
-		branch: "main",
-		dirty: 0,
-		sessionName: "session",
-		modelId: "model",
-		effort: "low",
-		contextPercent: 10,
-		contextWindow: 1000,
-		costTotal: 0,
-		subscription: false,
-		statuses: [],
-		usage: undefined,
-	};
-
-	const deduplicated = renderShellSidebarBar(model, theme, 46, undefined, { hudActive: true });
-	assert.deepEqual(deduplicated, [], "returns empty array so sidebar rail filters it out entirely");
-});
-
-test("dense HUD card combined with TODO eliminates vertical overflow on typical viewports", (t) => {
-	const f = fixture();
-	const todoState: TodoState = {
-		tasks: [
-			{ id: 1, title: "Task 1", status: "done" },
-			{ id: 2, title: "Task 2", status: "in_progress" },
-			{ id: 3, title: "Task 3", status: "pending" },
-		],
-		nextId: 4,
-		updatedTurn: 1,
-	};
-	const todoTheme = { ...theme, strikethrough: (s: string) => s };
-	const hudModel = {
-		project: { cwd: "/workspace/gentle-pi", branch: "feat/hud", profile: "developer", diff: { files: 1, added: 5, deleted: 1, clean: false } },
-		mcp: { serverCount: 2, totalServers: 2, servers: [{ name: "s1", status: "ready" as const }], toolsCount: 5 },
-		telemetry: { costTotal: 0.01, subscription: false, latencyMs: 200, contextTokens: 1000, contextWindow: 100000, contextPercent: 1 },
-	};
-
-	sidebarPart(f.tui, "hud", { render: (w: number) => renderHudCard(hudModel, theme, w), invalidate() {} });
-	sidebarPart(f.tui, "footer", { render: () => [], invalidate() {} }); // Deduplicated footer produces 0 lines
-	sidebarPart(f.tui, "todo", { render: (w: number) => renderTodoCard(todoState, todoTheme, w, { scrollable: false, collapsed: false, staleTurns: 0 }), invalidate() {} });
-
-	t.after(installSidebar(f.tui, theme));
-	const railScroll = rail(f);
-	const renderedLines = railScroll.render(50);
-
-	// Total height must be compact (banner + gap + 6 hud + gap + todo <= 20 rows)
-	assert.ok(renderedLines.length <= 20, `Rail lines ${renderedLines.length} exceeds compact height budget`);
-	assert.ok(renderedLines.some((l) => l.includes("ENVIRONMENT HUD")));
-	assert.ok(renderedLines.some((l) => l.includes("Task 1")));
-	assert.doesNotMatch(renderedLines.join("\n"), /Status/);
-});
-
-
