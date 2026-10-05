@@ -2066,11 +2066,11 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	pi.on("session_tree", (_event, ctx) => {
 		helperPermission.clear();
 		if (sessions !== ctx.sessionManager) return;
-		stateCache.load(ctx.sessionManager);
+		if (typeof ctx.sessionManager?.getBranch === "function") stateCache.load(ctx.sessionManager);
 		publishActivity();
 	});
 	pi.on("session_start", async (event, ctx) => {
-		stateCache.load(ctx.sessionManager);
+		if (typeof ctx.sessionManager?.getBranch === "function") stateCache.load(ctx.sessionManager);
 		// A resumed, reloaded, or replaced session starts with an empty completion
 		// queue so nothing pending from another session can replay here.
 		completions.dropAll();
