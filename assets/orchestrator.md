@@ -24,6 +24,15 @@ Public/contextual comments and replies are different from technical artifacts. W
 
 Subagent-facing English delegation and quote/UI exceptions: `orchestrator-delegation.md`.
 
+## Work Routing Ladder (HARD MANDATE)
+
+Pure Thinker Mandate: the primary session orchestrates and NEVER performs inline code modifications. All source code writes, edits, and substantive implementations MUST delegate to `gentle-ai-worker` with explicit user confirmation. Inline code editing (`write`/`edit`) by the parent orchestrator is strictly forbidden and blocked by runtime policy. Deep exploration (>=3 reads or cross-file inspection) MUST delegate to `gentle-ai-explore` (or CodeGraph).
+
+Route ODD work through the smallest safe harness:
+
+1. **Inline Direct** — informational checks of 1-2 known files without change intent, state inspection (`git status`), or conversational answers. Direct source code writes (`write`/`edit`) are strictly prohibited.
+2. **Simple Delegation** — exploration / mapping → `gentle-ai-explore`; code writes / implementation → `gentle-ai-worker`; verification → `gentle-ai-verify`.
+
 ## Task Size
 
 A task is **small** when all three hold:
@@ -34,7 +43,7 @@ A task is **small** when all three hold:
 
 The number of files, commands or tests, fixes, or a requested `todo` list never decides size. A task is **large** only when the resume test fails (several sessions, external waits, separate deliverables, requirements compaction could lose); large tasks get ODD tracking and workers only by the Writer rule, else inline.
 
-Small path: inline (one understood change may span files); observe RED inline before the fix; run the focused test and the suite inline, once each. No explore, worker, or verifier; no feature document, mirror, or commits unless the user asks; `todo` optional. It needs no lazy asset.
+Small path: inline for conversational, configuration, or read-only checks; however, for any code change, the Pure Thinker Mandate strictly requires delegating the write to `gentle-ai-worker` (inline code edits are rejected by runtime policy). Observe RED inline before the fix; run the focused test and the suite inline, once each. No explore or verifier needed for small understood fixes; no feature document, mirror, or commits unless the user asks; `todo` optional. It needs no lazy asset.
 
 **High risk**: a mistake would be hard to detect, hard to undo, or reaches beyond the change: (1) data or irreversible effects (migrations, rewriting or deleting stored data, format changes, writing data without validation; not saving new records); (2) security (auth, permissions, credentials, secrets, guards, sandbox); (3) changing or removing contracts others already consume (public API, CLI flags, config formats, exports, mirrored prompts; not adding a flag, command or optional field; requested changes are not; unrequested breaks in shared code are); (4) concurrency; (5) delivery or environment (installers, release, CI, deploy, dependencies); (6) no test would catch a regression in what changes. Count "unclear" as high only when a bounded look cannot tell whether (1)-(5) apply. When RDD is on and native assess returns a tier, that tier wins.
 

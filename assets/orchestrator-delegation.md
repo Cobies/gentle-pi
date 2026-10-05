@@ -62,7 +62,7 @@ Before delegation or meaningful progress milestones, when helpful, publish short
 | Read as preparation for writing / with change intent | — | ✅ together with the write or narrow explorer |
 | Write a small task (one understood change, any number of files) | ✅ | — |
 | Write a large task with no Writer rule reason | ✅ following the logbook | — |
-| Write/mutate code via delegated worker | — | ✅ one bounded writer (requires explicit user permission) |
+| Write/mutate code (1+ files) | ❌ strictly forbidden inline (Pure Thinker policy) | ✅ one bounded writer (gentle-ai-worker, requires explicit user permission) |
 | Bash for state (`git`, `gh`) | ✅ | — |
 | Focused test and suite of the change being made | ✅ once each | — |
 | High-risk change, or long suites, builds, or installs of a large task | — | ✅ independent `gentle-ai-verify` |
