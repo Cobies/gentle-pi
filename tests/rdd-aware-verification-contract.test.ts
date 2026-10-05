@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createGentleAiExtension } from "../extensions/gentle-ai.ts";
+import { readDelegationDetail } from "./support/orchestrator-modules.ts";
 
 // ---------------------------------------------------------------------------
 // gentle-pi#661/#662: RDD-aware verification rule for delegated work.
@@ -39,7 +42,7 @@ function countOccurrences(haystack: string, needle: string): number {
 	return haystack.split(needle).length - 1;
 }
 
-const delegation = read("assets/orchestrator-delegation.md");
+const delegation = readDelegationDetail();
 const worker = read("assets/agents/gentle-ai-worker.md");
 
 const ON_SENTENCE =
@@ -108,15 +111,15 @@ test("trigger 5 never restates the retired #661 off/unknown non-trivial judgment
 	assert.doesNotMatch(delegation, /purely passive documentation with no behavior to verify/);
 });
 
-test("the Simple Delegation paragraph references trigger 5 instead of restating the on/off/unknown routing", () => {
+test("the Simple Delegation paragraph references trigger 3 instead of restating the on/off/unknown routing", () => {
 	assert.match(
 		delegation,
-		/per the RDD-aware Verification rule \(trigger 5 under Mandatory Delegation Triggers, gentle-pi#661\)/,
+		/per the RDD-aware Verification rule \(trigger 3 under Mandatory Delegation Triggers, gentle-pi#661\)/,
 	);
-	assert.match(delegation, /the normative on\/off\/unknown routing lives there, not here/);
+	assert.match(delegation, /the normative on\/off\/unknown routing lives in `orchestrator-verification.md`, not here/);
 });
 
-test("delegation overlay's trigger 5 (Verification rule) is RDD-aware", () => {
+test("delegation overlay's Verification rule is RDD-aware", () => {
 	assert.match(delegation, /\*\*Verification rule\*\*.*RDD-aware/);
 });
 
@@ -223,5 +226,77 @@ test("worker asset keeps the existing Return contract fields", () => {
 		"interaction_required:",
 	]) {
 		assert.ok(worker.includes(field), `worker asset lost Return contract field: ${field}`);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// gentle-pi#1175: the verification policy is stated on three surfaces -- the
+// `gentle_review` tool contract (description, guidelines, parameters), the
+// delegation asset, and docs/delegated-verification.md -- and they must say
+// the same thing about the behavior ASSESS implements: closure only from the
+// native `candidate.consumed` fact for this candidate, the runtime writer
+// profile with a caller fallback, the conservative small-model bias, the
+// declined/unavailable/unknown fallback, and functional checks that a native
+// review never replaces. Assertions use short stable phrases, normalized for
+// case, quoting, and line wrapping, not whole paragraphs.
+// ---------------------------------------------------------------------------
+
+interface RegisteredPolicyTool {
+	name: string;
+	description?: string;
+	promptSnippet?: string;
+	promptGuidelines?: readonly string[];
+	parameters?: unknown;
+}
+
+function registeredReviewToolContract(): string {
+	const tools = new Map<string, RegisteredPolicyTool>();
+	const pi = {
+		on() {},
+		registerCommand() {},
+		registerTool(definition: RegisteredPolicyTool) {
+			tools.set(definition.name, definition);
+		},
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null })(pi);
+	const tool = tools.get("gentle_review");
+	assert.ok(tool, "gentle_review must be registered");
+	return [tool.description ?? "", tool.promptSnippet ?? "", ...(tool.promptGuidelines ?? []), JSON.stringify(tool.parameters)].join("\n");
+}
+
+function normalizePolicyText(text: string): string {
+	return text.replace(/\\"/g, "").replace(/[`"']/g, "").replace(/\s+/g, " ").toLowerCase();
+}
+
+const POLICY_SURFACES: ReadonlyArray<readonly [string, string]> = [
+	["gentle_review tool contract", normalizePolicyText(registeredReviewToolContract())],
+	["assets/orchestrator-delegation.md", normalizePolicyText(delegation)],
+	["docs/delegated-verification.md", normalizePolicyText(read("docs/delegated-verification.md"))],
+];
+
+const SHARED_POLICY_PHRASES: ReadonlyArray<readonly [string, string]> = [
+	["closure only from native consumed evidence", "only from the native candidate.consumed fact for this exact candidate"],
+	["caller closure claim is not authority", "a caller-supplied closed is not authority"],
+	["runtime writer profile", "runtime-recorded model and effort of the pending mutations"],
+	["caller profile is only a fallback", "only a fallback when no runtime evidence exists"],
+	["conservative small-model bias", "keeps the conservative small-model bias"],
+	["non-closed outcomes fall back", "declined, unavailable, or unknown"],
+	["unknown is never closed", "unknown is never treated as closed"],
+	["functional checks still run", "a native code review is not a substitute for applicable functional checks"],
+];
+
+test("the three verification policy surfaces carry the same ASSESS closure, profile, fallback, and functional-check statements (gentle-pi#1175)", () => {
+	for (const [surface, text] of POLICY_SURFACES) {
+		for (const [statement, phrase] of SHARED_POLICY_PHRASES) {
+			assert.ok(text.includes(phrase), `${surface} is missing the ${statement} statement: "${phrase}"`);
+		}
+	}
+});
+
+test("no verification policy surface still tells callers to pass closed explicitly (gentle-pi#1175)", () => {
+	for (const [surface, text] of POLICY_SURFACES) {
+		for (const stale of ["closed is never derived", "closed is never auto-derived", "closed is never inferred", "pass it explicitly", "pass it only right after"]) {
+			assert.ok(!text.includes(stale), `${surface} still carries the retired explicit-closure wording: "${stale}"`);
+		}
 	}
 });

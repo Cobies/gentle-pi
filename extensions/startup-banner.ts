@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { VERSION } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, VERSION } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import * as os from "node:os";
 import { execFile } from "node:child_process";
@@ -8,8 +8,6 @@ import { join } from "node:path";
 import { resolveAnimationPolicy } from "../lib/animation-policy.ts";
 import { PI_SUBCOMMANDS } from "../lib/gentle-shell-launcher.ts";
 
-const PI_AGENT_DIR = join(os.homedir(), ".pi", "agent");
-const PI_NPM_DIR = join(PI_AGENT_DIR, "npm", "node_modules");
 
 export type BannerColor = "pink" | "cyan" | "yellow" | "green";
 export interface BannerConfig {
@@ -515,7 +513,7 @@ function currentIntroMode(): IntroMode {
 
 async function countBackgroundAgents(): Promise<number> {
   try {
-    const entries = await readdir(join(PI_AGENT_DIR, "agents"), { withFileTypes: true });
+    const entries = await readdir(join(getAgentDir(), "agents"), { withFileTypes: true });
     return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".md") && !/^sdd-/.test(entry.name)).length;
   } catch {
     return 0;
@@ -533,17 +531,18 @@ function packageNameFromSpec(spec: unknown): string | undefined {
 }
 
 async function countPackageExtensions(packages: unknown[]): Promise<number> {
+  const npmDir = join(getAgentDir(), "npm", "node_modules");
   let count = 0;
   for (const spec of packages) {
     const name = packageNameFromSpec(spec);
     if (!name) continue;
     try {
-      const raw = await readFile(join(PI_NPM_DIR, name, "package.json"), "utf8");
+      const raw = await readFile(join(npmDir, name, "package.json"), "utf8");
       const pkg = JSON.parse(raw);
       const extensions = pkg?.pi?.extensions;
       if (Array.isArray(extensions)) count += extensions.length;
     } catch {
-      // Packages installed from non-npm sources may not live in PI_NPM_DIR.
+      // Packages installed from non-npm sources may not live in the npm dir.
     }
   }
   return count;
@@ -574,8 +573,7 @@ export function isPiCliSubcommandInvocation(argv: readonly string[]): boolean {
   return first !== undefined && (PI_SUBCOMMANDS as readonly string[]).includes(first);
 }
 
-export default function (pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env) {
-  if (env.GENTLE_PI_AGENTS_CHILD === "1") return;
+export default function (pi: ExtensionAPI) {
   let disposeHeader = () => {};
   pi.on("session_shutdown", () => disposeHeader());
   const notifyBannerConfig = (ctx: any, config: BannerConfig) => {
@@ -649,6 +647,9 @@ export default function (pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env)
   pi.on("session_start", async (_event, ctx) => {
     disposeHeader();
     if (!ctx.hasUI) return;
+    // Delegated rpc children report hasUI=true but have no terminal to paint
+    // (gentle-shell#1690); do not rely on a piped stdout lacking rows/columns.
+    if (process.env.GENTLE_PI_AGENTS_CHILD === "1") return;
 
     // CLI subcommands such as `pi update` or `pi install` skip the animated intro.
     if (isPiCliSubcommandInvocation(process.argv)) return;
@@ -685,15 +686,11 @@ export default function (pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env)
     setTimeout(() => {
       (async () => {
         try {
-          const agentDir = join(os.homedir(), ".pi", "agent");
+          // Same global mcp.json Pi itself loads: <agentDir>/mcp.json, which
+          // follows PI_CODING_AGENT_DIR (for example the Gentle Shell home).
           const raw = await readFile(
-            join(agentDir, "mcp-adapter.json"),
+            join(getAgentDir(), "mcp.json"),
             "utf8",
-          ).catch(() =>
-            readFile(
-              join(agentDir, "mcp.json"),
-              "utf8",
-            ),
           );
           const cfg = JSON.parse(raw);
           mcpServersCount = Object.keys(cfg.mcpServers || {}).length;
@@ -708,8 +705,9 @@ export default function (pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env)
       (async () => {
         try {
           backgroundAgentsCount = await countBackgroundAgents();
+          // Active agent dir settings, like mcp.json above.
           const raw = await readFile(
-            join(PI_AGENT_DIR, "settings.json"),
+            join(getAgentDir(), "settings.json"),
             "utf8",
           );
           const cfg = JSON.parse(raw);
