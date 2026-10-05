@@ -23,7 +23,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
 	ExtensionAPI,
@@ -762,6 +762,59 @@ function hasTaskScopedAllowedEditSurfaces(...values: unknown[]): boolean {
 	}
 
 	return hasSection;
+}
+
+
+async function confirmBoundedWriterDispatch(
+	input: unknown,
+	ctx: ExtensionContext,
+): Promise<{ block: true; reason: string } | undefined> {
+	if (
+		!isRecord(input) ||
+		typeof input.agent !== "string" ||
+		!(BOUNDED_WRITER_AGENT_NAMES as readonly string[]).includes(input.agent)
+	) {
+		return undefined;
+	}
+
+	if (!ctx.hasUI || typeof ctx.ui?.confirm !== "function") {
+		return undefined;
+	}
+
+	const agentName = input.agent;
+	const label = typeof input.label === "string" ? input.label : "code modification";
+	const targetRoot = resolveTargetRepositoryRoot(input, ctx.cwd);
+	
+	let surfaces = "Not specified";
+	if (typeof input.task === "string") {
+		const match = input.task.match(ALLOWED_EDIT_SURFACES_HEADING);
+		if (match && match.index !== undefined) {
+			const bodyStart = match.index + match[0].length;
+			const entries = readAllowedEditSurfaceEntries(input.task.slice(bodyStart));
+			if (entries.length > 0) {
+				surfaces = entries.map((e) => e.value).join(", ");
+			}
+		}
+	}
+
+	const promptTitle = "Authorize worker subagent dispatch";
+	const promptMessage = `Agent: ${agentName}\nLabel: ${label}\nTarget root: ${targetRoot}\nAllowed edit surfaces: ${surfaces}\n\nDo you authorize this worker subagent to proceed with editing files?`;
+
+	let approved = false;
+	try {
+		approved = (await ctx.ui.confirm(promptTitle, promptMessage)) === true;
+	} catch {
+		approved = false;
+	}
+
+	if (!approved) {
+		return {
+			block: true,
+			reason: "Gentle AI safety policy: dispatch of bounded writer subagent was declined or not authorized by the user.",
+		};
+	}
+
+	return undefined;
 }
 
 function rejectUnscopedBoundedWriterDispatch(input: unknown, defaultRoot?: string): { block: true; reason: string } | undefined {
@@ -1955,6 +2008,150 @@ function isAllowedOrchestratorMutationPath(rawPath: string, cwd: string): boolea
 
 	if (isInsideCwd) {
 		return false;
+	}
+
+	return false;
+}
+
+const CODE_FILE_EXTENSIONS = new Set([
+	".ts",
+	".tsx",
+	".js",
+	".jsx",
+	".mjs",
+	".cjs",
+	".go",
+	".py",
+	".pyw",
+	".rs",
+	".c",
+	".h",
+	".cpp",
+	".hpp",
+	".cc",
+	".cxx",
+	".java",
+	".kt",
+	".kts",
+	".scala",
+	".rb",
+	".php",
+	".cs",
+	".swift",
+	".sh",
+	".bash",
+	".zsh",
+	".lua",
+	".zig",
+	".nim",
+	".dart",
+	".vue",
+	".svelte",
+	".sql",
+	".graphql",
+	".proto",
+]);
+
+const COMMON_CONFIG_FILENAMES = new Set([
+	"package.json",
+	"tsconfig.json",
+	"pnpm-lock.yaml",
+	"package-lock.json",
+	"go.mod",
+	"go.sum",
+	".gitignore",
+	".env",
+]);
+
+const ALLOWLIST_PATH_PREFIXES = [
+	"odd/tasks/",
+	".atl/",
+	"skills/",
+	".pi/",
+	".git/",
+	".engram/",
+];
+
+const SOURCE_DIRECTORY_PREFIXES = [
+	"src/",
+	"lib/",
+	"extensions/",
+	"cmd/",
+	"internal/",
+	"test/",
+	"tests/",
+	"bin/",
+	"app/",
+	"packages/",
+];
+
+function isCodeSourcePath(rawPath: string, cwd: string): boolean {
+	if (typeof rawPath !== "string" || !rawPath.trim()) return false;
+	const normalized = rawPath.trim().replace(/\\/g, "/");
+	const strippedLeadingDot = normalized.replace(/^\.\//, "");
+
+	const resolvedCwd = resolve(cwd);
+	const absPath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(resolvedCwd, rawPath);
+	const normalizedAbs = absPath.replace(/\\/g, "/");
+	const relFromCwd = relative(resolvedCwd, absPath).replace(/\\/g, "/");
+	const cleanRel = relFromCwd.replace(/^\.\//, "");
+
+	// 1. Check OS temp directory or /tmp/**
+	const resolvedTemp = resolve(tmpdir());
+	const relFromTemp = relative(resolvedTemp, absPath).replace(/\\/g, "/");
+	const isInsideTemp = !relFromTemp.startsWith("..") && !isAbsolute(relFromTemp);
+	const lowerAbs = normalizedAbs.toLowerCase();
+	if (
+		isInsideTemp ||
+		lowerAbs.startsWith("/tmp/") ||
+		lowerAbs.startsWith("/var/tmp/") ||
+		lowerAbs.startsWith("/private/tmp/") ||
+		strippedLeadingDot.startsWith("/tmp/") ||
+		strippedLeadingDot.startsWith("tmp/")
+	) {
+		return false;
+	}
+
+	// 2. Check documentation files (*.md, AGENTS.md, CLAUDE.md, SKILL.md, etc.)
+	if (normalized.toLowerCase().endsWith(".md") || lowerAbs.endsWith(".md")) {
+		return false;
+	}
+
+	// 3. Check allowlisted directory prefixes (odd/tasks/**, .atl/**, skills/**, .pi/**, .git/**, .engram/**)
+	for (const prefix of ALLOWLIST_PATH_PREFIXES) {
+		if (
+			strippedLeadingDot === prefix.slice(0, -1) ||
+			strippedLeadingDot.startsWith(prefix) ||
+			cleanRel === prefix.slice(0, -1) ||
+			cleanRel.startsWith(prefix) ||
+			lowerAbs.includes("/" + prefix)
+		) {
+			return false;
+		}
+	}
+
+	// 4. Check common configuration files (package.json, tsconfig.json, pnpm-lock.yaml, package-lock.json, go.mod, go.sum, .gitignore, .env, .env.*)
+	const baseName = basename(absPath).toLowerCase();
+	if (COMMON_CONFIG_FILENAMES.has(baseName) || baseName.startsWith(".env.")) {
+		return false;
+	}
+
+	// 5. Code source detection: source directory prefixes or code extensions
+	for (const prefix of SOURCE_DIRECTORY_PREFIXES) {
+		if (
+			cleanRel.startsWith(prefix) ||
+			cleanRel.includes("/" + prefix) ||
+			strippedLeadingDot.startsWith(prefix) ||
+			strippedLeadingDot.includes("/" + prefix)
+		) {
+			return true;
+		}
+	}
+
+	const ext = extname(absPath).toLowerCase();
+	const rawExt = extname(normalized).toLowerCase();
+	if (CODE_FILE_EXTENSIONS.has(ext) || CODE_FILE_EXTENSIONS.has(rawExt)) {
+		return true;
 	}
 
 	return false;
@@ -6204,6 +6401,11 @@ const processRetainedNativeStatusSelections = new Map<PendingReviewConsentSessio
 // named-agent start increments the depth, a matching end decrements it,
 // and a fresh primary-loop start resets it to 0.
 const processAgentEndSubagentDepth = new Map<PendingReviewConsentSessionKey, number>();
+const processTurnCodeReadCounts = new Map<PendingReviewConsentSessionKey, number>();
+
+function resetTurnCodeReadCountsForTesting(): void {
+	processTurnCodeReadCounts.clear();
+}
 
 // gentle-pi#677: gentle-ai#4309 owns anonymous usage telemetry end to end;
 // Pi only nudges it once per process. This is a plain process-lifetime
@@ -8978,6 +9180,9 @@ async function executeReviewControllerOperation(
 /** @internal */
 export const __testing = {
 	isAllowedOrchestratorMutationPath,
+	isCodeSourcePath,
+	processTurnCodeReadCounts,
+	resetTurnCodeReadCountsForTesting,
 	resolveReviewModeGate,
 	readEffectiveModelConfig,
 	readEffectiveModelConfigAsync,
@@ -9140,6 +9345,7 @@ function createGentleAiExtensionForTesting(
 		cleanupAllPendingReviewConsents(pendingReviewConsentRegistry, sessionKey);
 		processRetainedNativeStatusSelections.delete(sessionKey);
 		processAgentEndSubagentDepth.delete(sessionKey);
+		processTurnCodeReadCounts.delete(sessionKey);
 	});
 
 	// gentle-pi ODD input phase labels: the explicit half of the bounded ODD
@@ -9653,6 +9859,11 @@ function createGentleAiExtensionForTesting(
 		consumeReviewMutation(pi, ctx.sessionManager, root, mutation, "nudged", targetIdentity);
 	});
 
+	pi.on("turn_start", (_event, ctx) => {
+		const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
+		processTurnCodeReadCounts.set(sessionKey, 0);
+	});
+
 	pi.on("tool_result", (event, ctx) => {
 		if (!reminderSessionActive || event.isError !== false || (event.toolName !== "write" && event.toolName !== "edit")) return;
 		if (!isRecord(event.input) || typeof event.input.path !== "string" || !event.input.path.trim()) return;
@@ -9668,6 +9879,25 @@ function createGentleAiExtensionForTesting(
 			event.input,
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
+		if (event.toolName === "read") {
+			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
+				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
+				Boolean((ctx as unknown as { agent?: unknown })?.agent);
+			if (!isChild) {
+				const targetPath = isRecord(event.input) && typeof event.input.path === "string" ? event.input.path : "";
+				if (isCodeSourcePath(targetPath, ctx.cwd)) {
+					const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
+					const currentCount = processTurnCodeReadCounts.get(sessionKey) ?? 0;
+					if (currentCount >= 2) {
+						return {
+							block: true,
+							reason: "Gentle AI Pure Thinker policy: inline code read cap exceeded (max 2 source files per turn). You MUST delegate codebase exploration to gentle-ai-explore to preserve orchestrator context (<20k tokens).",
+						};
+					}
+					processTurnCodeReadCounts.set(sessionKey, currentCount + 1);
+				}
+			}
+		}
 		if (event.toolName === "write" || event.toolName === "edit") {
 			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
 				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
@@ -9687,6 +9917,8 @@ function createGentleAiExtensionForTesting(
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
 			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input, ctx.cwd);
 			if (writerScopeDenied) return writerScopeDenied;
+			const writerConsentDenied = await confirmBoundedWriterDispatch(event.input, ctx);
+			if (writerConsentDenied) return writerConsentDenied;
 			try {
 				injectReviewCandidateView(event.input, candidateViews);
 				return undefined;

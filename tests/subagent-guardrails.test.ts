@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import test, { after } from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import gentleAgents, { type AgentsDeps, type SessionTransportFactory } from "../extensions/gentle-agents.ts";
-import { createGentleAiExtension } from "../extensions/gentle-ai.ts";
+import { createGentleAiExtension, __testing } from "../extensions/gentle-ai.ts";
 import { fakeChild, type FakeChild } from "./agents-fake-child.ts";
 
 const root = mkdtempSync(join(tmpdir(), "subagent-guardrails-test-"));
@@ -331,4 +331,402 @@ test("child subagent processes and named worker contexts are exempt from inline 
 			assert.equal(res, undefined, "named subagent worker should be allowed to write source files");
 		}
 	}
+});
+
+test("subagent_run targeting bounded writer prompts for confirmation in interactive session", async () => {
+	type ToolCallHandler = (
+		event: { toolName: string; input: unknown },
+		ctx: ExtensionContext,
+	) => Promise<ToolCallEventResult | undefined>;
+
+	const handlers = new Map<string, ToolCallHandler[]>();
+	const pi = {
+		on(name: string, handler: ToolCallHandler) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		events: { emit() {} },
+		registerCommand() {},
+		registerTool() {},
+	} as unknown as ExtensionAPI;
+
+	createGentleAiExtension({
+		nativeReviewCli: null,
+		processEnv: {},
+		resolveTelemetryTriggerBinary: () => "/usr/bin/true",
+		telemetryTriggerSpawn: (() => undefined) as never,
+	})(pi);
+
+	let confirmAsked = false;
+	let confirmApproved = false;
+
+	const ctx = {
+		cwd: "/mock-project/root",
+		hasUI: true,
+		sessionManager: { getSessionId: () => "sess-interactive" },
+		ui: {
+			confirm: async (_title: string, _message: string) => {
+				confirmAsked = true;
+				return confirmApproved;
+			},
+		},
+	} as unknown as ExtensionContext;
+
+	const toolCall = handlers.get("tool_call")?.[0];
+	assert.ok(toolCall, "tool_call hook must exist");
+
+	const writerInput = {
+		agent: "gentle-ai-worker",
+		task: "## Allowed edit surfaces\n- src/app.ts\n\n### Work\nDo work",
+	};
+
+	// 1. User declines
+	confirmAsked = false;
+	confirmApproved = false;
+	const declinedRes = await toolCall({ toolName: "subagent_run", input: writerInput }, ctx);
+	assert.equal(confirmAsked, true, "confirm should be called");
+	assert.equal(declinedRes?.block, true, "declined dispatch should be blocked");
+	assert.match(declinedRes?.reason ?? "", /declined or not authorized/i);
+
+	// 2. User approves
+	confirmAsked = false;
+	confirmApproved = true;
+	const approvedRes = await toolCall({ toolName: "subagent_run", input: writerInput }, ctx);
+	assert.equal(confirmAsked, true, "confirm should be called");
+	assert.equal(approvedRes, undefined, "approved dispatch should proceed");
+
+	// 3. Non-writer subagent does not prompt
+	confirmAsked = false;
+	const exploreRes = await toolCall({ toolName: "subagent_run", input: { agent: "gentle-ai-explore", task: "Explore codebase" } }, ctx);
+	assert.equal(confirmAsked, false, "explore agent should not prompt for confirmation");
+	assert.equal(exploreRes, undefined, "explore agent should proceed");
+});
+
+test("primary orchestrator inline code read guardrail caps source reads at 2 per turn and blocks the 3rd", async () => {
+	type Handler = (event: unknown, ctx: ExtensionContext) => Promise<ToolCallEventResult | undefined>;
+
+	const handlers = new Map<string, Handler[]>();
+	const pi = {
+		on(name: string, handler: Handler) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		events: { emit() {} },
+		registerCommand() {},
+		registerTool() {},
+	} as unknown as ExtensionAPI;
+
+	createGentleAiExtension({
+		nativeReviewCli: null,
+		processEnv: {},
+		resolveTelemetryTriggerBinary: () => "/usr/bin/true",
+		telemetryTriggerSpawn: (() => undefined) as never,
+	})(pi);
+
+	const ctx = {
+		cwd: "/mock-project/root",
+		hasUI: true,
+		sessionManager: { getSessionId: () => "sess-read-guardrail" },
+	} as unknown as ExtensionContext;
+
+	const fireToolCall = async (toolName: string, input: Record<string, unknown>): Promise<ToolCallEventResult | undefined> => {
+		for (const h of handlers.get("tool_call") ?? []) {
+			const res = await h({ toolName, input }, ctx);
+			if (res?.block) return res;
+		}
+		return undefined;
+	};
+
+	const expectedBlockedReason =
+		"Gentle AI Pure Thinker policy: inline code read cap exceeded (max 2 source files per turn). You MUST delegate codebase exploration to gentle-ai-explore to preserve orchestrator context (<20k tokens).";
+
+	// 1st source code read succeeds
+	const read1 = await fireToolCall("read", { path: "src/index.ts" });
+	assert.equal(read1, undefined, "1st source read should succeed");
+
+	// 2nd source code read succeeds
+	const read2 = await fireToolCall("read", { path: "extensions/gentle-ai.ts" });
+	assert.equal(read2, undefined, "2nd source read should succeed");
+
+	// 3rd source code read is blocked
+	const read3 = await fireToolCall("read", { path: "lib/agents-runner.ts" });
+	assert.equal(read3?.block, true, "3rd source read must be blocked");
+	assert.equal(read3?.reason, expectedBlockedReason);
+
+	// 4th source code read is also blocked
+	const read4 = await fireToolCall("read", { path: "tests/example.test.ts" });
+	assert.equal(read4?.block, true, "4th source read must also be blocked");
+	assert.equal(read4?.reason, expectedBlockedReason);
+});
+
+test("allowlisted non-source paths do not consume code read quota or block", async () => {
+	type Handler = (event: unknown, ctx: ExtensionContext) => Promise<ToolCallEventResult | undefined>;
+
+	const handlers = new Map<string, Handler[]>();
+	const pi = {
+		on(name: string, handler: Handler) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		events: { emit() {} },
+		registerCommand() {},
+		registerTool() {},
+	} as unknown as ExtensionAPI;
+
+	createGentleAiExtension({
+		nativeReviewCli: null,
+		processEnv: {},
+		resolveTelemetryTriggerBinary: () => "/usr/bin/true",
+		telemetryTriggerSpawn: (() => undefined) as never,
+	})(pi);
+
+	const ctx = {
+		cwd: "/mock-project/root",
+		hasUI: true,
+		sessionManager: { getSessionId: () => "sess-allowlist-reads" },
+	} as unknown as ExtensionContext;
+
+	const fireToolCall = async (toolName: string, input: Record<string, unknown>): Promise<ToolCallEventResult | undefined> => {
+		for (const h of handlers.get("tool_call") ?? []) {
+			const res = await h({ toolName, input }, ctx);
+			if (res?.block) return res;
+		}
+		return undefined;
+	};
+
+	const expectedBlockedReason =
+		"Gentle AI Pure Thinker policy: inline code read cap exceeded (max 2 source files per turn). You MUST delegate codebase exploration to gentle-ai-explore to preserve orchestrator context (<20k tokens).";
+
+	const allowlistPaths = [
+		"odd/tasks/enforce-pure-thinker-read-guardrail.md",
+		"./odd/tasks/foo.md",
+		"/mock-project/root/odd/tasks/nested/task.md",
+		".atl/skill-registry.md",
+		"skills/gentle-ai/SKILL.md",
+		"AGENTS.md",
+		"CLAUDE.md",
+		"SKILL.md",
+		"README.md",
+		"docs/overview.md",
+		"package.json",
+		"tsconfig.json",
+		"pnpm-lock.yaml",
+		"package-lock.json",
+		"go.mod",
+		"go.sum",
+		".gitignore",
+		".pi/config.json",
+		".git/config",
+		".engram/state.json",
+		"/tmp/scratchpad.txt",
+		join(tmpdir(), "temp-debug.log"),
+	];
+
+	// Allowlisted paths should all succeed and never consume quota
+	for (const p of allowlistPaths) {
+		const res = await fireToolCall("read", { path: p });
+		assert.equal(res, undefined, `Allowlisted path ${p} should not be blocked`);
+	}
+
+	// 1st source code read succeeds
+	const source1 = await fireToolCall("read", { path: "src/index.ts" });
+	assert.equal(source1, undefined, "1st source read should succeed");
+
+	// Interleaved allowlist reads should still succeed without incrementing source count
+	const allowInterleaved = await fireToolCall("read", { path: "package.json" });
+	assert.equal(allowInterleaved, undefined, "Interleaved allowlisted read should succeed");
+
+	// 2nd source code read succeeds
+	const source2 = await fireToolCall("read", { path: "cmd/main.go" });
+	assert.equal(source2, undefined, "2nd source read should succeed");
+
+	// Another interleaved allowlist read
+	const docInterleaved = await fireToolCall("read", { path: "odd/tasks/foo.md" });
+	assert.equal(docInterleaved, undefined, "Interleaved doc read should succeed");
+
+	// 3rd source code read must be blocked
+	const source3 = await fireToolCall("read", { path: "internal/service.go" });
+	assert.equal(source3?.block, true, "3rd source read must be blocked");
+	assert.equal(source3?.reason, expectedBlockedReason);
+});
+
+test("turn_start event resets the code read counter", async () => {
+	type Handler = (event: unknown, ctx: ExtensionContext) => Promise<ToolCallEventResult | undefined>;
+
+	const handlers = new Map<string, Handler[]>();
+	const pi = {
+		on(name: string, handler: Handler) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		events: { emit() {} },
+		registerCommand() {},
+		registerTool() {},
+	} as unknown as ExtensionAPI;
+
+	createGentleAiExtension({
+		nativeReviewCli: null,
+		processEnv: {},
+		resolveTelemetryTriggerBinary: () => "/usr/bin/true",
+		telemetryTriggerSpawn: (() => undefined) as never,
+	})(pi);
+
+	const ctx = {
+		cwd: "/mock-project/root",
+		hasUI: true,
+		sessionManager: { getSessionId: () => "sess-turn-reset" },
+	} as unknown as ExtensionContext;
+
+	const fireToolCall = async (toolName: string, input: Record<string, unknown>): Promise<ToolCallEventResult | undefined> => {
+		for (const h of handlers.get("tool_call") ?? []) {
+			const res = await h({ toolName, input }, ctx);
+			if (res?.block) return res;
+		}
+		return undefined;
+	};
+
+	const fireTurnStart = async () => {
+		for (const h of handlers.get("turn_start") ?? []) {
+			await h({}, ctx);
+		}
+	};
+
+	// 1st and 2nd source reads succeed
+	assert.equal(await fireToolCall("read", { path: "src/a.ts" }), undefined);
+	assert.equal(await fireToolCall("read", { path: "src/b.ts" }), undefined);
+
+	// 3rd source read is blocked
+	const blocked = await fireToolCall("read", { path: "src/c.ts" });
+	assert.equal(blocked?.block, true);
+
+	// Turn resets
+	await fireTurnStart();
+
+	// After turn_start, quota is fresh: 2 reads succeed again
+	assert.equal(await fireToolCall("read", { path: "src/c.ts" }), undefined);
+	assert.equal(await fireToolCall("read", { path: "src/d.ts" }), undefined);
+
+	// 3rd read of the new turn is blocked
+	const blockedAgain = await fireToolCall("read", { path: "src/e.ts" });
+	assert.equal(blockedAgain?.block, true);
+});
+
+test("child subagents and worker contexts are exempt from code read guardrail", async () => {
+	type Handler = (event: unknown, ctx: ExtensionContext) => Promise<ToolCallEventResult | undefined>;
+
+	// 1. Child process exemption via GENTLE_PI_AGENTS_CHILD = "1"
+	{
+		const handlers = new Map<string, Handler[]>();
+		const pi = {
+			on(name: string, handler: Handler) {
+				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+			},
+			events: { emit() {} },
+			registerCommand() {},
+			registerTool() {},
+		} as unknown as ExtensionAPI;
+
+		createGentleAiExtension({
+			nativeReviewCli: null,
+			processEnv: { GENTLE_PI_AGENTS_CHILD: "1" },
+			resolveTelemetryTriggerBinary: () => "/usr/bin/true",
+			telemetryTriggerSpawn: (() => undefined) as never,
+		})(pi);
+
+		const ctx = {
+			cwd: "/mock-project/root",
+			hasUI: false,
+			sessionManager: { getSessionId: () => "sess-child-read" },
+		} as unknown as ExtensionContext;
+
+		for (let i = 0; i < 5; i++) {
+			for (const h of handlers.get("tool_call") ?? []) {
+				const res = await h({ toolName: "read", input: { path: `src/file${i}.ts` } }, ctx);
+				assert.equal(res, undefined, `Child subagent read ${i} should not be blocked`);
+			}
+		}
+	}
+
+	// 2. Named subagent start event context exemption
+	{
+		const handlers = new Map<string, Handler[]>();
+		const pi = {
+			on(name: string, handler: Handler) {
+				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+			},
+			events: { emit() {} },
+			registerCommand() {},
+			registerTool() {},
+		} as unknown as ExtensionAPI;
+
+		createGentleAiExtension({
+			nativeReviewCli: null,
+			processEnv: {},
+			resolveTelemetryTriggerBinary: () => "/usr/bin/true",
+			telemetryTriggerSpawn: (() => undefined) as never,
+		})(pi);
+
+		const ctx = {
+			cwd: "/mock-project/root",
+			hasUI: true,
+			sessionManager: { getSessionId: () => "sess-named-worker-read" },
+		} as unknown as ExtensionContext;
+
+		// Simulate before_agent_start for a named subagent (gentle-ai-explore)
+		for (const h of handlers.get("before_agent_start") ?? []) {
+			await h({ agent: { name: "gentle-ai-explore" }, systemPrompt: "explore prompt" }, ctx);
+		}
+
+		for (let i = 0; i < 5; i++) {
+			for (const h of handlers.get("tool_call") ?? []) {
+				const res = await h({ toolName: "read", input: { path: `src/explore${i}.ts` } }, ctx);
+				assert.equal(res, undefined, `Named explorer read ${i} should not be blocked`);
+			}
+		}
+	}
+});
+
+test("isCodeSourcePath accurately classifies source vs allowlisted paths", () => {
+	const cwd = "/workspace/project";
+
+	// Allowlisted paths -> false
+	assert.equal(__testing.isCodeSourcePath("odd/tasks/feature.md", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("./odd/tasks/nested/task.md", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("/workspace/project/odd/tasks/task.txt", cwd), false);
+	assert.equal(__testing.isCodeSourcePath(".atl/skill-registry.md", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("skills/gentle-ai/SKILL.md", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("AGENTS.md", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("CLAUDE.md", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("SKILL.md", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("README.md", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("docs/API.MD", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("package.json", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("tsconfig.json", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("pnpm-lock.yaml", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("package-lock.json", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("go.mod", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("go.sum", cwd), false);
+	assert.equal(__testing.isCodeSourcePath(".gitignore", cwd), false);
+	assert.equal(__testing.isCodeSourcePath(".env", cwd), false);
+	assert.equal(__testing.isCodeSourcePath(".env.local", cwd), false);
+	assert.equal(__testing.isCodeSourcePath(".env.production", cwd), false);
+	assert.equal(__testing.isCodeSourcePath(".pi/config.json", cwd), false);
+	assert.equal(__testing.isCodeSourcePath(".git/HEAD", cwd), false);
+	assert.equal(__testing.isCodeSourcePath(".engram/state.json", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("/tmp/scratchpad.txt", cwd), false);
+	assert.equal(__testing.isCodeSourcePath(join(tmpdir(), "temp-test.ts"), cwd), false);
+	assert.equal(__testing.isCodeSourcePath("", cwd), false);
+	assert.equal(__testing.isCodeSourcePath("   ", cwd), false);
+
+	// Code source paths -> true
+	assert.equal(__testing.isCodeSourcePath("src/index.ts", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("src\\utils\\helper.ts", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("/workspace/project/src/app.tsx", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("extensions/gentle-ai.ts", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("lib/agents-runner.ts", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("tests/subagent-guardrails.test.ts", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("test/unit.test.js", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("cmd/server/main.go", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("internal/api/handler.go", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("script.py", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("server.js", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("packages/core/src/model.rs", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("scripts/deploy.sh", cwd), true);
+	assert.equal(__testing.isCodeSourcePath("db/migrations.sql", cwd), true);
 });
