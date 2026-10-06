@@ -119,21 +119,21 @@ test("T16: the verify handoff names probe command forms and the scratch location
 // T17b (L42): after4 B x5 read two files, then the core Evidence-budget rule
 // fired and delegated a 1.5 min exploration on a small task the parent then
 // implemented inline. The trigger itself must exclude reading for an inline write.
-test("T17b: the core Evidence-budget rule never fires to prepare an inline write", () => {
+test("T17b: the core Evidence-budget rule mandates delegation for codebase inspection", () => {
 	const core = read("assets/orchestrator.md");
 	const rule = core.split("\n").find((line) => line.includes("**Evidence-budget rule**"));
 	assert.ok(rule, "Evidence-budget rule is missing");
-	assert.ok(rule.includes("never for reading before an inline write"), "Evidence-budget rule must exclude reading for an inline write");
+	assert.ok(rule.includes("all codebase inspection delegates to gentle-ai-explore"), "Evidence-budget rule must mandate delegation to gentle-ai-explore");
 });
 
-test("T17: the always-on Explore step delegates exploration only for a map the parent needs", () => {
+test("T17: the always-on Explore step delegates codebase exploration to gentle-ai-explore", () => {
 	for (const persona of ["gentleman", "neutral"] as const) {
 		const prompt = __testing.buildGentlePrompt(persona);
 		const step = prompt.split("\n").find((line) => line.startsWith("2. **Explore.**"));
 		assert.ok(step, "ODD step 2 Explore is missing");
-		containsAll(step, [
-			"Do not delegate exploration of files you will read anyway to work inline",
-			"explore only for a map you need to decide or route",
-		], "ODD Explore step");
+		assert.ok(
+			step.includes("Codebase exploration across multiple files, architecture, or code flow MUST be delegated to gentle-ai-explore"),
+			"ODD Explore step must mandate delegation to gentle-ai-explore",
+		);
 	}
 });

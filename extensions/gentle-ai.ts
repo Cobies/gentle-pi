@@ -1,7 +1,7 @@
 import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
 import { recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
-import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, prepareBoundSessionRepository, rejectUnscopedBoundedWriterDispatch, safeBootstrapDirectory, sourcePathWithinProject } from "../lib/bounded-writer-admission.ts";
+import { allowedEditSurfaces, allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, prepareBoundSessionRepository, rejectUnscopedBoundedWriterDispatch, safeBootstrapDirectory, sourcePathWithinProject } from "../lib/bounded-writer-admission.ts";
 import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProfiles, recordReviewMutation, type ReceiptSession } from "../lib/review-reminder-receipt.ts";
 import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
 import { isOddPhase, oddPhaseRegistry, ODD_PHASES } from "../lib/odd-phase.ts";
@@ -503,6 +503,39 @@ function isAllowedOrchestratorMutationPath(rawPath: string, cwd: string): boolea
 	return false;
 }
 
+const ORCHESTRATOR_READ_ALLOWLIST_PREFIXES = ["odd/tasks/", "skills/", ".atl/", "docs/"] as const;
+
+function isAllowedOrchestratorReadPath(rawPath: string, cwd?: string): boolean {
+	if (typeof rawPath !== "string" || !rawPath.trim()) return false;
+	const normalized = rawPath.trim().replace(/\\/g, "/");
+	if (normalized === "." || normalized === "./") return false;
+	const strippedLeadingDot = normalized.replace(/^\.\//, "");
+	if (!strippedLeadingDot || strippedLeadingDot === ".") return false;
+
+	for (const prefix of ORCHESTRATOR_READ_ALLOWLIST_PREFIXES) {
+		const prefixWithoutSlash = prefix.slice(0, -1);
+		if (strippedLeadingDot === prefixWithoutSlash || strippedLeadingDot.startsWith(prefix)) {
+			return true;
+		}
+	}
+
+	if (cwd) {
+		const resolvedCwd = resolve(cwd);
+		const absPath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(resolvedCwd, rawPath);
+		const relFromCwd = relative(resolvedCwd, absPath).replace(/\\/g, "/").replace(/^\.\//, "");
+		if (relFromCwd && relFromCwd !== "." && !relFromCwd.startsWith("..") && !isAbsolute(relFromCwd)) {
+			for (const prefix of ORCHESTRATOR_READ_ALLOWLIST_PREFIXES) {
+				const prefixWithoutSlash = prefix.slice(0, -1);
+				if (relFromCwd === prefixWithoutSlash || relFromCwd.startsWith(prefix)) {
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
 const BOUNDED_WRITER_AGENT_NAMES = Object.freeze(["gentle-ai-worker", "worker", "jd-fix-agent"] as const);
 
 async function confirmBoundedWriterDispatch(
@@ -525,13 +558,11 @@ async function confirmBoundedWriterDispatch(
 	const label = typeof input.label === "string" ? input.label : "code modification";
 	const targetRoot = (input.repository_root as string) || (input.workspace_root as string) || ctx.cwd;
 	
-	let surfaces = "Not specified";
-	if (typeof input.task === "string") {
-		const match = input.task.match(/^## Allowed edit surfaces[ \t]*$/gim);
-		if (match && match.index !== undefined) {
-			surfaces = "Declared in task";
-		}
-	}
+	const parsedSurfaces = allowedEditSurfaces(input.task, input.context) ??
+		(Array.isArray(input.task) ? allowedEditSurfaces(...input.task) : undefined);
+	const surfaces = parsedSurfaces && parsedSurfaces.length > 0
+		? parsedSurfaces.join(", ")
+		: "Not specified";
 
 	const promptTitle = "Authorize worker subagent dispatch";
 	const promptMessage = `Agent: ${agentName}\nLabel: ${label}\nTarget root: ${targetRoot}\nAllowed edit surfaces: ${surfaces}\n\nDo you authorize this worker subagent to proceed with editing files?`;
@@ -1409,7 +1440,7 @@ ${languageBoundary}
 Default workflow: Organic Driven Development (MANDATORY)
 Organic Driven Development (ODD) is the predefined workflow of this orchestrator. Every request enters it, without the user asking for a workflow, a plan, or task tracking. Never describe this workflow only when asked about it: run it. Run these steps in this order on every request:
 1. **Authorize.** Investigation, explanation, review, comparison, and proposal-only requests stay read-only: no writer, apply, or implementation artifacts. Ambiguous or conditional change intent gets one clarification; stop and wait. Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via \`repository_root\`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously.
-2. **Explore.** Explore existing code and requirements first, proportionately to the request, before proposing or writing anything. Do not delegate exploration of files you will read anyway to work inline; explore only for a map you need to decide or route.
+2. **Explore.** Explore existing code and requirements first, proportionately to the request, before proposing or planning anything. Codebase exploration across multiple files, architecture, or code flow MUST be delegated to gentle-ai-explore; the orchestrator never reads extensive code inline to protect reasoning context.
 3. **Resolve uncertainty.** Recommend optional research only for a named uncertainty; ask one focused user question only for a real unresolved product decision, then stop and wait; use at most one scoped read-only assumption challenge for a high-consequence unproven premise.
 4. **Classify.** Size the task by the orchestrator's Task Size section: small when understood, risk is contained, and the work could be resumed from the original request and \`git diff\` alone; large only when that resume test fails. Never classify by counting files, commands, tests, fixes, or a requested todo list. Small work stays inline and creates no durable task artifacts.
 5. **Track before the first write.** For large authorized implementation, create \`odd/tasks/<feature-name>.md\` and its Engram mirror \`odd/<feature-name>/tasks\` automatically, then create or rebuild the visible \`todo\` list from the reconciled feature tasks, all before the first source write and without asking permission for tasks or storage. Tell the user in one line which feature document was created and how many tasks it holds. The document is the specification subagents read, in this order: a two- or three-line header; \`## Specs\` with numbered \`S#\` that quote the user's exact strings, error messages, and examples verbatim, never summarized and never adding unrequested requirements; \`## Tasks\` with one line per task (ID, linked \`S#\`, route, commit); \`## Log\` last, where \`L1\` is the user's original request verbatim and later user corrections, evidence, and decisions are appended. A requirement change appends its verbatim Log entry, rewrites only the affected \`S#\`, and reopens only its task.
@@ -9410,6 +9441,7 @@ async function executeReviewControllerOperation(
 /** @internal */
 export const __testing = {
 	isAllowedOrchestratorMutationPath,
+	isAllowedOrchestratorReadPath,
 	isCodeSourcePath,
 	processTurnCodeReadCounts,
 	resetTurnCodeReadCountsForTesting,
@@ -10168,6 +10200,7 @@ function createGentleAiExtensionForTesting(
 			event.toolName,
 			event.input,
 		);
+		if (sensitivePathDenied) return sensitivePathDenied;
 		if (event.toolName === "read") {
 			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
 				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
@@ -10202,29 +10235,12 @@ function createGentleAiExtensionForTesting(
 			}
 		}
 		if (event.toolName === "subagent_run") {
-			const writerConsentDenied = await confirmBoundedWriterDispatch(event.input, ctx);
-			if (writerConsentDenied) return writerConsentDenied;
-		}
-		if (sensitivePathDenied) return sensitivePathDenied;
-		if (event.toolName === "write" || event.toolName === "edit") {
-			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
-				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
-				Boolean((ctx as unknown as { agent?: unknown })?.agent);
-			if (!isChild) {
-				const targetPath = isRecord(event.input) && typeof event.input.path === "string" ? event.input.path : "";
-				if (!isAllowedOrchestratorMutationPath(targetPath, ctx.cwd)) {
-					return {
-						block: true,
-						reason: "Gentle AI Pure Thinker policy: direct source code editing by the parent orchestrator is strictly prohibited. All code modifications must be delegated to gentle-ai-worker. Dispatch a worker subagent with explicit ## Allowed edit surfaces.",
-					};
-				}
-			}
-		}
-		if (event.toolName === "subagent_run") {
 			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input);
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
 			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input);
 			if (writerScopeDenied) return writerScopeDenied;
+			const writerConsentDenied = await confirmBoundedWriterDispatch(event.input, ctx);
+			if (writerConsentDenied) return writerConsentDenied;
 			try {
 				injectReviewCandidateView(event.input, candidateViews);
 				return undefined;
@@ -10234,6 +10250,21 @@ function createGentleAiExtensionForTesting(
 					reason: error instanceof Error ? error.message : "review subagent dispatch is invalid",
 				};
 			}
+		}
+		if (event.toolName === "grep" || event.toolName === "find") {
+			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
+				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
+				Boolean((ctx as unknown as { agent?: unknown })?.agent);
+			if (!isChild) {
+				const targetPath = isRecord(event.input) && typeof event.input.path === "string" ? event.input.path : "";
+				if (!isAllowedOrchestratorReadPath(targetPath, ctx.cwd)) {
+					return {
+						block: true,
+						reason: `Gentle AI Pure Thinker policy: inline codebase exploration via ${event.toolName} is strictly prohibited in the primary orchestrator. Codebase search and discovery must be delegated to gentle-ai-explore to preserve orchestrator context (<20k tokens). Dispatch gentle-ai-explore with explicit search scope.`,
+					};
+				}
+			}
+			return undefined;
 		}
 		if (event.toolName !== "bash") return undefined;
 		if (!isRecord(event.input) || typeof event.input.command !== "string") {

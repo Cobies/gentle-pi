@@ -358,14 +358,16 @@ test("subagent_run targeting bounded writer prompts for confirmation in interact
 
 	let confirmAsked = false;
 	let confirmApproved = false;
+	let capturedPromptMessage = "";
 
 	const ctx = {
 		cwd: "/mock-project/root",
 		hasUI: true,
 		sessionManager: { getSessionId: () => "sess-interactive" },
 		ui: {
-			confirm: async (_title: string, _message: string) => {
+			confirm: async (_title: string, message: string) => {
 				confirmAsked = true;
+				capturedPromptMessage = message;
 				return confirmApproved;
 			},
 		},
@@ -386,6 +388,8 @@ test("subagent_run targeting bounded writer prompts for confirmation in interact
 	assert.equal(confirmAsked, true, "confirm should be called");
 	assert.equal(declinedRes?.block, true, "declined dispatch should be blocked");
 	assert.match(declinedRes?.reason ?? "", /declined or not authorized/i);
+	assert.match(capturedPromptMessage, /Allowed edit surfaces: src\/app\.ts/);
+	assert.doesNotMatch(capturedPromptMessage, /Declared in task/);
 
 	// 2. User approves
 	confirmAsked = false;
@@ -393,12 +397,98 @@ test("subagent_run targeting bounded writer prompts for confirmation in interact
 	const approvedRes = await toolCall({ toolName: "subagent_run", input: writerInput }, ctx);
 	assert.equal(confirmAsked, true, "confirm should be called");
 	assert.equal(approvedRes, undefined, "approved dispatch should proceed");
+	assert.match(capturedPromptMessage, /Allowed edit surfaces: src\/app\.ts/);
+	assert.doesNotMatch(capturedPromptMessage, /Declared in task/);
 
 	// 3. Non-writer subagent does not prompt
 	confirmAsked = false;
 	const exploreRes = await toolCall({ toolName: "subagent_run", input: { agent: "gentle-ai-explore", task: "Explore codebase" } }, ctx);
 	assert.equal(confirmAsked, false, "explore agent should not prompt for confirmation");
 	assert.equal(exploreRes, undefined, "explore agent should proceed");
+});
+
+test("subagent_run rejects invalid or missing edit surfaces without prompting confirmation, and prompts with parsed surfaces", async () => {
+	type ToolCallHandler = (
+		event: { toolName: string; input: unknown },
+		ctx: ExtensionContext,
+	) => Promise<ToolCallEventResult | undefined>;
+
+	const handlers = new Map<string, ToolCallHandler[]>();
+	const pi = {
+		on(name: string, handler: ToolCallHandler) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		events: { emit() {} },
+		registerCommand() {},
+		registerTool() {},
+	} as unknown as ExtensionAPI;
+
+	createGentleAiExtension({
+		nativeReviewCli: null,
+		processEnv: {},
+		resolveTelemetryTriggerBinary: () => "/usr/bin/true",
+		telemetryTriggerSpawn: (() => undefined) as never,
+	})(pi);
+
+	let confirmAsked = false;
+	let confirmPromptMessage = "";
+
+	const ctx = {
+		cwd: "/mock-project/root",
+		hasUI: true,
+		sessionManager: { getSessionId: () => "sess-surface-validation" },
+		ui: {
+			confirm: async (_title: string, message: string) => {
+				confirmAsked = true;
+				confirmPromptMessage = message;
+				return true;
+			},
+		},
+	} as unknown as ExtensionContext;
+
+	const toolCall = handlers.get("tool_call")?.[0];
+	assert.ok(toolCall, "tool_call hook must exist");
+
+	// 1. Missing edit surfaces: rejected by rejectUnscopedBoundedWriterDispatch and ctx.ui.confirm is NOT invoked
+	confirmAsked = false;
+	const missingRes = await toolCall({
+		toolName: "subagent_run",
+		input: {
+			agent: "gentle-ai-worker",
+			task: "Fix something without surfaces",
+		},
+	}, ctx);
+	assert.equal(confirmAsked, false, "confirm should NOT be invoked when edit surfaces are missing");
+	assert.equal(missingRes?.block, true);
+	assert.match(missingRes?.reason ?? "", /## Allowed edit surfaces/);
+
+	// 2. Invalid edit surfaces (e.g. '.'): rejected and ctx.ui.confirm is NOT invoked
+	confirmAsked = false;
+	const invalidRes = await toolCall({
+		toolName: "subagent_run",
+		input: {
+			agent: "gentle-ai-worker",
+			task: "## Allowed edit surfaces\n.\n\n### Task\nDo something",
+		},
+	}, ctx);
+	assert.equal(confirmAsked, false, "confirm should NOT be invoked when edit surfaces are invalid");
+	assert.equal(invalidRes?.block, true);
+	assert.match(invalidRes?.reason ?? "", /not a narrow repository-relative path/);
+
+	// 3. Valid edit surfaces: confirm IS invoked, and prompt message includes parsed surfaces list instead of 'Declared in task'
+	confirmAsked = false;
+	confirmPromptMessage = "";
+	const validRes = await toolCall({
+		toolName: "subagent_run",
+		input: {
+			agent: "gentle-ai-worker",
+			task: "## Allowed edit surfaces\n- src/app.ts\n- tests/app.test.ts\n\n### Task\nDo work",
+		},
+	}, ctx);
+	assert.equal(confirmAsked, true, "confirm should be invoked when edit surfaces are valid");
+	assert.equal(validRes, undefined);
+	assert.doesNotMatch(confirmPromptMessage, /Declared in task/, "prompt should not merely state 'Declared in task'");
+	assert.match(confirmPromptMessage, /Allowed edit surfaces: src\/app\.ts, tests\/app\.test\.ts/);
 });
 
 test("primary orchestrator inline code read guardrail caps source reads at 2 per turn and blocks the 3rd", async () => {
@@ -730,3 +820,215 @@ test("isCodeSourcePath accurately classifies source vs allowlisted paths", () =>
 	assert.equal(__testing.isCodeSourcePath("scripts/deploy.sh", cwd), true);
 	assert.equal(__testing.isCodeSourcePath("db/migrations.sql", cwd), true);
 });
+
+test("primary orchestrator grep and find guardrail blocks repo-wide and source exploration and allows tracking/doc paths", async () => {
+	type ToolCallHandler = (
+		event: { toolName: string; input: unknown },
+		ctx: ExtensionContext,
+	) => Promise<ToolCallEventResult | undefined>;
+
+	const handlers = new Map<string, ToolCallHandler[]>();
+	const pi = {
+		on(name: string, handler: ToolCallHandler) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
+		events: { emit() {} },
+		registerCommand() {},
+		registerTool() {},
+	} as unknown as ExtensionAPI;
+
+	createGentleAiExtension({
+		nativeReviewCli: null,
+		processEnv: {},
+		resolveTelemetryTriggerBinary: () => "/usr/bin/true",
+		telemetryTriggerSpawn: (() => undefined) as never,
+	})(pi);
+
+	const ctx = {
+		cwd: "/mock-project/root",
+		hasUI: true,
+		sessionManager: { getSessionId: () => "sess-grep-find-guardrail" },
+	} as unknown as ExtensionContext;
+
+	const fireToolCall = async (toolName: string, input: Record<string, unknown>): Promise<ToolCallEventResult | undefined> => {
+		for (const h of handlers.get("tool_call") ?? []) {
+			const res = await h({ toolName, input }, ctx);
+			if (res?.block) return res;
+		}
+		return undefined;
+	};
+
+	const blockedInputs = [
+		{},
+		{ path: "" },
+		{ path: "   " },
+		{ path: "." },
+		{ path: "./" },
+		{ path: "/mock-project/root" },
+		{ path: "/mock-project/root/" },
+		{ path: "src" },
+		{ path: "src/" },
+		{ path: "src/index.ts" },
+		{ path: "/mock-project/root/src" },
+		{ path: "lib" },
+		{ path: "extensions" },
+		{ path: "tests" },
+	];
+
+	for (const tool of ["grep", "find"] as const) {
+		const expectedReason = `Gentle AI Pure Thinker policy: inline codebase exploration via ${tool} is strictly prohibited in the primary orchestrator. Codebase search and discovery must be delegated to gentle-ai-explore to preserve orchestrator context (<20k tokens). Dispatch gentle-ai-explore with explicit search scope.`;
+
+		for (const input of blockedInputs) {
+			const res = await fireToolCall(tool, { ...input, pattern: "query" });
+			assert.equal(res?.block, true, `${tool} on ${JSON.stringify(input)} should be blocked`);
+			assert.equal(res?.reason, expectedReason);
+		}
+	}
+
+	const allowedInputs = [
+		{ path: "odd/tasks" },
+		{ path: "odd/tasks/" },
+		{ path: "odd/tasks/feature-x.md" },
+		{ path: "./odd/tasks" },
+		{ path: "./odd/tasks/" },
+		{ path: "/mock-project/root/odd/tasks" },
+		{ path: "/mock-project/root/odd/tasks/sub" },
+		{ path: "skills" },
+		{ path: "skills/" },
+		{ path: "skills/gentle-ai/SKILL.md" },
+		{ path: "./skills" },
+		{ path: "/mock-project/root/skills" },
+		{ path: ".atl" },
+		{ path: ".atl/" },
+		{ path: "docs" },
+		{ path: "docs/" },
+		{ path: "docs/readme.md" },
+	];
+
+	for (const tool of ["grep", "find"] as const) {
+		for (const input of allowedInputs) {
+			const res = await fireToolCall(tool, { ...input, pattern: "query" });
+			assert.equal(res, undefined, `${tool} on ${JSON.stringify(input)} should be allowed`);
+		}
+	}
+});
+
+test("child subagents and worker contexts are exempt from grep and find exploration guardrail", async () => {
+	type ToolCallHandler = (
+		event: { toolName: string; input: unknown },
+		ctx: ExtensionContext,
+	) => Promise<ToolCallEventResult | undefined>;
+
+	// 1. Child process exemption via GENTLE_PI_AGENTS_CHILD = "1"
+	{
+		const handlers = new Map<string, ToolCallHandler[]>();
+		const pi = {
+			on(name: string, handler: ToolCallHandler) {
+				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+			},
+			events: { emit() {} },
+			registerCommand() {},
+			registerTool() {},
+		} as unknown as ExtensionAPI;
+
+		createGentleAiExtension({
+			nativeReviewCli: null,
+			processEnv: { GENTLE_PI_AGENTS_CHILD: "1" },
+			resolveTelemetryTriggerBinary: () => "/usr/bin/true",
+			telemetryTriggerSpawn: (() => undefined) as never,
+		})(pi);
+
+		const ctx = {
+			cwd: "/mock-project/root",
+			hasUI: false,
+			sessionManager: { getSessionId: () => "sess-child-grep-find" },
+		} as unknown as ExtensionContext;
+
+		for (const tool of ["grep", "find"] as const) {
+			for (const path of [".", "", "src", "src/index.ts", "/mock-project/root"]) {
+				for (const h of handlers.get("tool_call") ?? []) {
+					const res = await h({ toolName: tool, input: { path, pattern: "search" } }, ctx);
+					assert.equal(res, undefined, `Child subagent ${tool} on ${path} should not be blocked`);
+				}
+			}
+		}
+	}
+
+	// 2. Child context via ctx.agent
+	{
+		const handlers = new Map<string, ToolCallHandler[]>();
+		const pi = {
+			on(name: string, handler: ToolCallHandler) {
+				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+			},
+			events: { emit() {} },
+			registerCommand() {},
+			registerTool() {},
+		} as unknown as ExtensionAPI;
+
+		createGentleAiExtension({
+			nativeReviewCli: null,
+			processEnv: {},
+			resolveTelemetryTriggerBinary: () => "/usr/bin/true",
+			telemetryTriggerSpawn: (() => undefined) as never,
+		})(pi);
+
+		const ctx = {
+			cwd: "/mock-project/root",
+			hasUI: true,
+			sessionManager: { getSessionId: () => "sess-subagent-ctx-agent" },
+			agent: "gentle-ai-explore",
+		} as unknown as ExtensionContext;
+
+		for (const tool of ["grep", "find"] as const) {
+			for (const path of [".", "", "src", "src/index.ts", "/mock-project/root"]) {
+				for (const h of handlers.get("tool_call") ?? []) {
+					const res = await h({ toolName: tool, input: { path, pattern: "search" } }, ctx);
+					assert.equal(res, undefined, `Subagent with ctx.agent ${tool} on ${path} should not be blocked`);
+				}
+			}
+		}
+	}
+});
+
+test("isAllowedOrchestratorReadPath correctly classifies allowlisted vs blocked exploration paths", () => {
+	const cwd = "/workspace/project";
+
+	// Blocked exploration paths -> false
+	assert.equal(__testing.isAllowedOrchestratorReadPath("", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("   ", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath(".", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("./", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("src", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("src/", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("src/index.ts", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("lib", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("extensions", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("odd", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("odd/", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("skills_extra", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("/workspace/project", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("/workspace/project/", cwd), false);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("/workspace/project/src", cwd), false);
+
+	// Allowlisted documentation / tracking paths -> true
+	assert.equal(__testing.isAllowedOrchestratorReadPath("odd/tasks", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("odd/tasks/", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("odd/tasks/feature.md", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("./odd/tasks", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("./odd/tasks/", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("skills", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("skills/", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("skills/gentle-ai/SKILL.md", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("./skills", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath(".atl", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath(".atl/", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath(".atl/skill-registry.md", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("docs", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("docs/", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("docs/architecture.md", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("/workspace/project/odd/tasks", cwd), true);
+	assert.equal(__testing.isAllowedOrchestratorReadPath("/workspace/project/docs/api.md", cwd), true);
+});
+
+
