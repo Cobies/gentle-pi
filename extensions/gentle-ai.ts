@@ -2,7 +2,7 @@ import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
 import { recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
-import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, prepareBoundSessionRepository, rejectUnscopedBoundedWriterDispatch, safeBootstrapDirectory, sourcePathWithinProject } from "../lib/bounded-writer-admission.ts";
+import { allowedEditSurfaces, allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, prepareBoundSessionRepository, rejectUnscopedBoundedWriterDispatch, safeBootstrapDirectory, sourcePathWithinProject } from "../lib/bounded-writer-admission.ts";
 import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProfiles, recordReviewMutation, type ReceiptSession } from "../lib/review-reminder-receipt.ts";
 import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
 import { isOddPhase, oddPhaseRegistry, ODD_PHASES } from "../lib/odd-phase.ts";
@@ -28,8 +28,8 @@ import {
 	readdir,
 	writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
 	ExtensionAPI,
@@ -49,7 +49,7 @@ import {
 	type BackgroundSubagentsPolicy,
 	type BackgroundSubagentsResolution,
 } from "../lib/background-subagents-policy.ts";
-import { installPackageAssets, getPackageAssetOwner, hasPackageAssetOwnerInstallation, type PackageAssetOwner, isPackageManagedSddAsset, updatePackageManagedSddAgentOwnership } from "../lib/agent-assets.ts";
+import { installPackageAssets, getPackageAssetOwner, type PackageAssetOwner, isPackageManagedSddAsset, updatePackageManagedSddAgentOwnership } from "../lib/agent-assets.ts";
 import {
 	THINKING_LEVELS,
 	normalizeModelConfig,
@@ -467,6 +467,159 @@ function renderBackgroundSubagentsReport(
 
 const SUBAGENTS_PACKAGE_NAMES = ["pi-subagents-j0k3r", "pi-subagents"] as const;
 const SUBAGENT_RUN_TOOL = "subagent_run";
+function isAllowedOrchestratorMutationPath(rawPath: string, cwd: string): boolean {
+	if (typeof rawPath !== "string" || !rawPath.trim()) return false;
+	const normalized = rawPath.trim().replace(/\\/g, "/");
+	const strippedLeadingDot = normalized.replace(/^\.\//, "");
+
+	const allowedBookkeepingPrefixes = ["odd/tasks/", ".atl/", ".pi/", ".git/", ".engram/"];
+	if (allowedBookkeepingPrefixes.some((prefix) => strippedLeadingDot === prefix.slice(0, -1) || strippedLeadingDot.startsWith(prefix))) {
+		return true;
+	}
+
+	const resolvedCwd = resolve(cwd);
+	const absPath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(resolvedCwd, rawPath);
+	const relFromCwd = relative(resolvedCwd, absPath).replace(/\\/g, "/");
+	const isInsideCwd = !relFromCwd.startsWith("..") && !isAbsolute(relFromCwd);
+
+	if (isInsideCwd) {
+		const cleanRel = relFromCwd.replace(/^\.\//, "");
+		if (allowedBookkeepingPrefixes.some((prefix) => cleanRel === prefix.slice(0, -1) || cleanRel.startsWith(prefix))) {
+			return true;
+		}
+		const blockedSourcePrefixes = ["src/", "lib/", "extensions/", "assets/", "tests/", "bin/", "skills/", "prompts/"];
+		const blockedExactFiles = ["package.json", "package-lock.json", "tsconfig.json", "pnpm-lock.yaml"];
+		if (blockedSourcePrefixes.some((prefix) => cleanRel.startsWith(prefix)) || blockedExactFiles.includes(cleanRel)) {
+			return false;
+		}
+	}
+
+	const resolvedTemp = resolve(tmpdir());
+	const relFromTemp = relative(resolvedTemp, absPath).replace(/\\/g, "/");
+	const isInsideTemp = !relFromTemp.startsWith("..") && !isAbsolute(relFromTemp);
+	const normalizedAbs = absPath.replace(/\\/g, "/").toLowerCase();
+	if (isInsideTemp || normalizedAbs.startsWith("/tmp/") || normalizedAbs.startsWith("/var/tmp/") || normalizedAbs.startsWith("/private/tmp/")) {
+		return true;
+	}
+	return false;
+}
+
+const ORCHESTRATOR_READ_ALLOWLIST_PREFIXES = ["odd/tasks/", "skills/", ".atl/", "docs/"] as const;
+
+function isAllowedOrchestratorReadPath(rawPath: string, cwd?: string): boolean {
+	if (typeof rawPath !== "string" || !rawPath.trim()) return false;
+	const normalized = rawPath.trim().replace(/\\/g, "/");
+	if (normalized === "." || normalized === "./") return false;
+	const strippedLeadingDot = normalized.replace(/^\.\//, "");
+	if (!strippedLeadingDot || strippedLeadingDot === ".") return false;
+
+	for (const prefix of ORCHESTRATOR_READ_ALLOWLIST_PREFIXES) {
+		const prefixWithoutSlash = prefix.slice(0, -1);
+		if (strippedLeadingDot === prefixWithoutSlash || strippedLeadingDot.startsWith(prefix)) {
+			return true;
+		}
+	}
+
+	if (cwd) {
+		const resolvedCwd = resolve(cwd);
+		const absPath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(resolvedCwd, rawPath);
+		const relFromCwd = relative(resolvedCwd, absPath).replace(/\\/g, "/").replace(/^\.\//, "");
+		if (relFromCwd && relFromCwd !== "." && !relFromCwd.startsWith("..") && !isAbsolute(relFromCwd)) {
+			for (const prefix of ORCHESTRATOR_READ_ALLOWLIST_PREFIXES) {
+				const prefixWithoutSlash = prefix.slice(0, -1);
+				if (relFromCwd === prefixWithoutSlash || relFromCwd.startsWith(prefix)) {
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+const BOUNDED_WRITER_AGENT_NAMES = Object.freeze(["gentle-ai-worker", "worker", "jd-fix-agent"] as const);
+
+async function confirmBoundedWriterDispatch(
+	input: unknown,
+	ctx: ExtensionContext,
+): Promise<{ block: true; reason: string } | undefined> {
+	if (
+		!isRecord(input) ||
+		typeof input.agent !== "string" ||
+		!(BOUNDED_WRITER_AGENT_NAMES as readonly string[]).includes(input.agent)
+	) {
+		return undefined;
+	}
+
+	if (!ctx.hasUI || typeof ctx.ui?.confirm !== "function") {
+		return undefined;
+	}
+
+	const agentName = input.agent;
+	const label = typeof input.label === "string" ? input.label : "code modification";
+	const targetRoot = (input.repository_root as string) || (input.workspace_root as string) || ctx.cwd;
+	
+	const parsedSurfaces = allowedEditSurfaces(input.task, input.context) ??
+		(Array.isArray(input.task) ? allowedEditSurfaces(...input.task) : undefined);
+	const surfaces = parsedSurfaces && parsedSurfaces.length > 0
+		? parsedSurfaces.join(", ")
+		: "Not specified";
+
+	const promptTitle = "Authorize worker subagent dispatch";
+	const promptMessage = `Agent: ${agentName}\nLabel: ${label}\nTarget root: ${targetRoot}\nAllowed edit surfaces: ${surfaces}\n\nDo you authorize this worker subagent to proceed with editing files?`;
+
+	let approved = false;
+	try {
+		approved = (await ctx.ui.confirm(promptTitle, promptMessage)) === true;
+	} catch {
+		approved = false;
+	}
+
+	if (!approved) {
+		return {
+			block: true,
+			reason: "Gentle AI safety policy: dispatch of bounded writer subagent was declined or not authorized by the user.",
+		};
+	}
+
+	return undefined;
+}
+
+const CODE_FILE_EXTENSIONS = new Set([
+	".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".py", ".pyw", ".rs", ".c", ".h", ".cpp",
+	".hpp", ".cc", ".cxx", ".java", ".kt", ".kts", ".scala", ".rb", ".php", ".cs", ".swift", ".sh",
+	".bash", ".zsh", ".lua", ".zig", ".nim", ".dart", ".vue", ".svelte", ".sql", ".graphql", ".proto"
+]);
+
+const COMMON_CONFIG_FILENAMES = new Set([
+	"package.json", "tsconfig.json", "pnpm-lock.yaml", "package-lock.json", "go.mod", "go.sum", ".gitignore", ".env"
+]);
+
+const ALLOWLIST_PATH_PREFIXES = ["odd/tasks/", ".atl/", "skills/", ".pi/", ".git/", ".engram/"];
+const SOURCE_DIRECTORY_PREFIXES = ["src/", "lib/", "extensions/", "cmd/", "internal/", "test/", "tests/", "bin/", "app/", "packages/"];
+
+function isCodeSourcePath(rawPath: string, cwd: string): boolean {
+	if (typeof rawPath !== "string" || !rawPath.trim()) return false;
+	const normalized = rawPath.trim().replace(/\\/g, "/");
+	const strippedLeadingDot = normalized.replace(/^\.\//, "");
+	const absPath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(cwd, rawPath);
+	const normalizedAbs = absPath.replace(/\\/g, "/");
+	const relFromCwd = relative(resolve(cwd), absPath).replace(/\\/g, "/").replace(/^\.\//, "");
+
+	const lowerAbs = normalizedAbs.toLowerCase();
+	if (lowerAbs.startsWith("/tmp/") || lowerAbs.startsWith("/var/tmp/") || strippedLeadingDot.startsWith("tmp/")) return false;
+	if (normalized.toLowerCase().endsWith(".md")) return false;
+	for (const prefix of ALLOWLIST_PATH_PREFIXES) {
+		if (strippedLeadingDot.startsWith(prefix) || relFromCwd.startsWith(prefix)) return false;
+	}
+	const baseName = basename(absPath).toLowerCase();
+	if (COMMON_CONFIG_FILENAMES.has(baseName) || baseName.startsWith(".env.")) return false;
+	for (const prefix of SOURCE_DIRECTORY_PREFIXES) {
+		if (relFromCwd.startsWith(prefix) || strippedLeadingDot.startsWith(prefix)) return true;
+	}
+	if (CODE_FILE_EXTENSIONS.has(extname(absPath).toLowerCase())) return true;
+	return false;
+}
 const JUDGMENT_DAY_FIX_AGENT_NAME = "jd-fix-agent";
 const JUDGMENT_DAY_ACTIVATION_HEADING = "## Judgment Day activation";
 const JUDGMENT_DAY_ACTIVATION_SENTENCE = "User explicitly requested Judgment Day.";
@@ -1287,12 +1440,12 @@ ${languageBoundary}
 
 Default workflow: Organic Driven Development (MANDATORY)
 Organic Driven Development (ODD) is the predefined workflow of this orchestrator. Every request enters it, without the user asking for a workflow, a plan, or task tracking. Never describe this workflow only when asked about it: run it. Run these steps in this order on every request:
-1. **Authorize.** Investigation, explanation, review, comparison, and proposal-only requests stay read-only: no writer, apply, or implementation artifacts. Ambiguous or conditional change intent (unclear whether a change is authorized at all) gets one clarification; stop and wait. A user saying they may stop you or resume later asks for notes and separate commits, not a stop.
-2. **Explore.** Explore existing code and requirements first, proportionately to the request, before proposing or writing anything. Do not delegate exploration of files you will read anyway to work inline; explore only for a map you need to decide or route.
+1. **Authorize.** Investigation, explanation, review, comparison, and proposal-only requests stay read-only: no writer, apply, or implementation artifacts. Ambiguous or conditional change intent gets one clarification; stop and wait. Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via \`repository_root\`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously.
+2. **Explore.** Explore existing code and requirements first, proportionately to the request, before proposing or planning anything. Codebase exploration across multiple files, architecture, or code flow MUST be delegated to gentle-ai-explore; the orchestrator never reads extensive code inline to protect reasoning context.
 3. **Resolve uncertainty.** Recommend optional research only for a named uncertainty; ask one focused user question only for a real unresolved product decision, then stop and wait; use at most one scoped read-only assumption challenge for a high-consequence unproven premise.
 4. **Classify.** Size the task by the orchestrator's Task Size section: small when understood, risk is contained, and the work could be resumed from the original request and \`git diff\` alone; large only when that resume test fails. Never classify by counting files, commands, tests, fixes, or a requested todo list. Small work stays inline and creates no durable task artifacts.
 5. **Track before the first write.** For large authorized implementation, create \`odd/tasks/<feature-name>.md\` and its Engram mirror \`odd/<feature-name>/tasks\` automatically, then create or rebuild the visible \`todo\` list from the reconciled feature tasks, all before the first source write and without asking permission for tasks or storage. Tell the user in one line which feature document was created and how many tasks it holds. The document is the specification subagents read, in this order: a two- or three-line header; \`## Specs\` with numbered \`S#\` that quote the user's exact strings, error messages, and examples verbatim, never summarized and never adding unrequested requirements; \`## Tasks\` with one line per task (ID, linked \`S#\`, route, commit); \`## Log\` last, where \`L1\` is the user's original request verbatim and later user corrections, evidence, and decisions are appended. A requirement change appends its verbatim Log entry, rewrites only the affected \`S#\`, and reopens only its task.
-6. **Implement task by task.** Hand off by reference, never by paraphrase: name the document, task, and specs (for example \`Spec: odd/tasks/<feature>.md, T2, S3-S4\`), tell workers to read until \`## Log\`, and ask which \`S#\` were covered. Without a feature document, include the user's request verbatim. Verify reads the whole document, runs the spec's examples the parent authorized, against isolated state when they mutate data, and returns a verdict per \`S#\`. When the user reports a failure, reproduce it before deciding it already works. Each test asserts every observable effect of the rule it covers (exit code, exact stdout and stderr, and that rejected input leaves stored data and counters unchanged), covers the cases the rule itself names (its examples, boundaries, and errors), and checks through the public interface, never internal storage. When you add or change a command, option, or message, update the help text and docs that describe it. Route each task through the orchestrator's Mechanisms, honoring its mandatory delegation triggers, with applicable test-first development and checks. These triggers are mandatory, not advisory: executing past a fired trigger inline is a routing defect even if the work succeeds. Check an item off only after its outcome and checks were observed; update the file, mirror, and visible \`todo\` projection after every task transition and material plan change. Every tracked task closes with at least one work-unit commit on the feature branch, branch first when on the default branch, with tests and docs alongside the behavior, using a Conventional Commit message; record the commit identity in the feature document as evidence. Work-unit commits on the feature branch are part of authorized large ODD implementation; push, pull request creation, and merge remain the user's decisions.
+6. **Implement task by task.** Route each task through the orchestrator's Work Routing Ladder, honoring its mandatory delegation triggers, with applicable test-first development and checks. These triggers are mandatory, not advisory: executing past a fired trigger inline is a routing defect even if the work succeeds. Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via \`repository_root\`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously. Hand off by reference, never by paraphrase: name the document, task, and specs (for example \`Spec: odd/tasks/<feature>.md, T2, S3-S4\`), tell workers to read until \`## Log\`, and ask which \`S#\` were covered. Without a feature document, include the user's request verbatim. Verify reads the whole document, runs the spec's examples the parent authorized, against isolated state when they mutate data, and returns a verdict per \`S#\`. When the user reports a failure, reproduce it before deciding it already works. Each test asserts every observable effect of the rule it covers (exit code, exact stdout and stderr, and that rejected input leaves stored data and counters unchanged), covers the cases the rule itself names (its examples, boundaries, and errors), and checks through the public interface, never internal storage. When you add or change a command, option, or message, update the help text and docs that describe it. Check an item off only after its outcome and checks were observed; update the file, mirror, and visible \`todo\` projection after every task transition and material plan change. Every tracked task closes with at least one work-unit commit on the feature branch, branch first when on the default branch, with tests and docs alongside the behavior, using a Conventional Commit message; record the commit identity in the feature document as evidence. Work-unit commits on the feature branch are part of authorized large ODD implementation; push, pull request creation, and merge remain the user's decisions.
 7. **Close.** Report the verified outcome, every failed, skipped, or pending check, and the next step. Before writing \`Risk: none\`, check whether your diff changes code that existing behavior the request did not mention also uses (shared options, parsers, helpers); if it does, that is item 3. Never end with a tracked task pending unless you quote the user's explicit stop. An applicable quick check runs once; an unavailable verifier or subagent is reported as unavailable, never retried or escalated into extra ceremony. Partial, blocked, unavailable, or exhausted proof becomes one **Needs your decision** result naming the open blockers or missing proof, never more verification; that result is a valid stop, hedged wording is not. The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch; native review runs only under the user-owned RDD switch.
 Phase reporting: the Gentle Shell prompt label is inferred automatically from the primary session's tool activity (reads show \`exploring\`, edits \`implementing\`, test runs \`checking\`, user questions \`deciding\`). When the \`gentle_odd_phase\` tool is available, use it to refine that label with phases tools cannot show (\`authorizing\`, \`researching\`, \`deciding\`, \`closing\`): call \`gentle_odd_phase\` only when the primary session's ODD phase actually changes, never per tool call or on a fixed cadence, and never from a subagent. It drives the Gentle Shell prompt label only.
 Resume an interrupted feature with \`mem_context\`, then project- and feature-scoped \`mem_search\`, then \`mem_get_observation\` for the full document, then the task file itself; reconcile before continuing the next unfinished task. Detail for steps 3–7: \`orchestrator-delegation.md\` and \`orchestrator-memory.md\`.
@@ -6450,6 +6603,8 @@ const processRetainedNativeStatusSelections = new Map<PendingReviewConsentSessio
 // loop's `agent_end` preflight suppressed for the rest of the session: a
 // named-agent start increments the depth, a matching end decrements it,
 // and a fresh primary-loop start resets it to 0.
+const processTurnCodeReadCounts = new Map<PendingReviewConsentSessionKey, number>();
+function resetTurnCodeReadCountsForTesting(): void { processTurnCodeReadCounts.clear(); }
 const processAgentEndSubagentDepth = new Map<PendingReviewConsentSessionKey, number>();
 
 // gentle-shell#1064 slice 1: the parent-session profile binding store lives in
@@ -9302,6 +9457,11 @@ async function executeReviewControllerOperation(
 
 /** @internal */
 export const __testing = {
+	isAllowedOrchestratorMutationPath,
+	isAllowedOrchestratorReadPath,
+	isCodeSourcePath,
+	processTurnCodeReadCounts,
+	resetTurnCodeReadCountsForTesting,
 	parseReviewControllerParameters,
 	parseReviewCaptureParameters,
 	parseReviewCaptureGroupParameters,
@@ -10044,6 +10204,11 @@ function createGentleAiExtensionForTesting(
 		consumeReviewMutation(pi, ctx.sessionManager, root, mutation, "nudged", targetIdentity);
 	});
 
+	pi.on("turn_start", (_event, ctx) => {
+		const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
+		processTurnCodeReadCounts.set(sessionKey, 0);
+	});
+
 	pi.on("tool_result", async (event, ctx) => {
 		if (!reminderSessionActive || (reminderManager && reminderManager !== ctx.sessionManager) || event.isError !== false || (event.toolName !== "write" && event.toolName !== "edit")) return;
 		if (!isRecord(event.input) || typeof event.input.path !== "string" || !event.input.path.trim()) return;
@@ -10066,11 +10231,46 @@ function createGentleAiExtensionForTesting(
 			event.input,
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
+		if (event.toolName === "read") {
+			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
+				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
+				Boolean((ctx as unknown as { agent?: unknown })?.agent);
+			if (!isChild) {
+				const targetPath = isRecord(event.input) && typeof event.input.path === "string" ? event.input.path : "";
+				if (isCodeSourcePath(targetPath, ctx.cwd)) {
+					const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
+					const currentCount = processTurnCodeReadCounts.get(sessionKey) ?? 0;
+					if (currentCount >= 2) {
+						return {
+							block: true,
+							reason: "Gentle AI Pure Thinker policy: inline code read cap exceeded (max 2 source files per turn). You MUST delegate codebase exploration to gentle-ai-explore to preserve orchestrator context (<20k tokens).",
+						};
+					}
+					processTurnCodeReadCounts.set(sessionKey, currentCount + 1);
+				}
+			}
+		}
+		if (event.toolName === "write" || event.toolName === "edit") {
+			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
+				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
+				Boolean((ctx as unknown as { agent?: unknown })?.agent);
+			if (!isChild) {
+				const targetPath = isRecord(event.input) && typeof event.input.path === "string" ? event.input.path : "";
+				if (!isAllowedOrchestratorMutationPath(targetPath, ctx.cwd)) {
+					return {
+						block: true,
+						reason: "Gentle AI Pure Thinker policy: direct source code editing by the parent orchestrator is strictly prohibited. All code modifications must be delegated to gentle-ai-worker. Dispatch a worker subagent with explicit ## Allowed edit surfaces.",
+					};
+				}
+			}
+		}
 		if (event.toolName === "subagent_run") {
 			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input);
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
 			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input);
 			if (writerScopeDenied) return writerScopeDenied;
+			const writerConsentDenied = await confirmBoundedWriterDispatch(event.input, ctx);
+			if (writerConsentDenied) return writerConsentDenied;
 			try {
 				injectReviewCandidateView(event.input, candidateViews);
 				return undefined;
@@ -10081,12 +10281,34 @@ function createGentleAiExtensionForTesting(
 				};
 			}
 		}
+		if (event.toolName === "grep" || event.toolName === "find") {
+			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
+				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
+				Boolean((ctx as unknown as { agent?: unknown })?.agent);
+			if (!isChild) {
+				const targetPath = isRecord(event.input) && typeof event.input.path === "string" ? event.input.path : "";
+				if (!isAllowedOrchestratorReadPath(targetPath, ctx.cwd)) {
+					return {
+						block: true,
+						reason: `Gentle AI Pure Thinker policy: inline codebase exploration via ${event.toolName} is strictly prohibited in the primary orchestrator. Codebase search and discovery must be delegated to gentle-ai-explore to preserve orchestrator context (<20k tokens). Dispatch gentle-ai-explore with explicit search scope.`,
+					};
+				}
+			}
+			return undefined;
+		}
 		if (!SHELL_COMMAND_TOOLS.has(event.toolName) || !isRecord(event.input)) return undefined;
 		const command = (event.input as { command?: unknown }).command;
 		if (typeof command !== "string") return undefined;
 		if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") {
 			const childDenied = blockChildDestructiveCommand(command);
 			if (childDenied) return childDenied;
+		}
+		const trimmedBashCommand = command.trim();
+		if (/^sleep(?:\s+\d+(?:\.\d+)?|\s*);?$/i.test(trimmedBashCommand)) {
+			return {
+				block: true,
+				reason: "Gentle AI safety policy: do not run sleep in bash to wait for background tasks. End your turn now; background subagent results are delivered automatically via session message when settled.",
+			};
 		}
 		return await confirmCommand(command, ctx, pi.events, herdrLifecycle, yoloActive);
 	});
