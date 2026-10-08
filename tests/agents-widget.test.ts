@@ -59,24 +59,24 @@ test("formatElapsed renders seconds, minutes, and hours compactly", () => {
 	assert.equal(formatElapsed(-5), "0s");
 });
 
-test("widgetTasks keeps active tasks in start order and only recently finished ones", () => {
+test("widgetTasks keeps active tasks in start order and excludes finished tasks", () => {
 	const tasks = [
 		task({ id: "old-done", status: TASK_STATUS.COMPLETED, endedAt: 10_000 }),
 		task({ id: "new-done", status: TASK_STATUS.FAILED, endedAt: 95_000 }),
 		task({ id: "queued", status: TASK_STATUS.QUEUED, createdAt: 3000, startedAt: null }),
 		task({ id: "running", createdAt: 2000, startedAt: 2000 }),
 	];
-	assert.deepEqual(widgetTasks(tasks, 100_000).map((entry) => entry.id), ["new-done", "running", "queued"]);
+	assert.deepEqual(widgetTasks(tasks, 100_000).map((entry) => entry.id), ["running", "queued"]);
 	assert.deepEqual(widgetTasks([], 100_000), []);
 });
 
-test("widgetExpiryMs says how long until the next finished row leaves the card", () => {
+test("widgetExpiryMs returns undefined because finished rows leave the card immediately", () => {
 	const running = task({ id: "running", createdAt: 2000, startedAt: 2000 });
 	const done = task({ id: "done", status: TASK_STATUS.COMPLETED, endedAt: 95_000 });
 	const later = task({ id: "later", status: TASK_STATUS.COMPLETED, endedAt: 99_000 });
-	assert.equal(widgetExpiryMs([running, done, later], 100_000), 55_000, "the oldest shown row expires first");
-	assert.equal(widgetExpiryMs([done], 155_000), undefined, "a row past its minute is already gone");
-	assert.equal(widgetExpiryMs([running], 100_000), undefined, "active rows never expire");
+	assert.equal(widgetExpiryMs([running, done, later], 100_000), undefined);
+	assert.equal(widgetExpiryMs([done], 155_000), undefined);
+	assert.equal(widgetExpiryMs([running], 100_000), undefined);
 	assert.equal(widgetExpiryMs([], 100_000), undefined);
 });
 
@@ -89,15 +89,15 @@ test("renderAgentsCard paints the quiet-state INFO card with the rose frame (bor
 
 test("renderAgentsCard draws columns for agent, task, and model · tokens · cost · time, with the batch time in the rule", () => {
 	const tasks = [
-		task({ id: "a", status: TASK_STATUS.COMPLETED, startedAt: 1000, endedAt: 26_000 }),
+		task({ id: "a", status: TASK_STATUS.RUNNING, startedAt: 1000, endedAt: null }),
 		task({ id: "b", agent: "sdd-apply", label: "write gentle-shell footer", startedAt: 44_000, tokens: 12_000, cost: 0.09 }),
 	];
 	const lines = renderAgentsCard(tasks, plainTheme, 84, 85_000, { collapsed: false });
 	for (const line of lines) assert.equal(visibleWidth(line), 84, `"${stripAnsi(line)}" is not 84 wide`);
 	const plain = lines.map(stripAnsi);
-	assert.match(plain[0], /^╭─ ❀ Agents · 1 active · 1 done ─+ 1m24s ╮$/);
-	assert.match(plain[1], /^│ ✓  sdd-explore  map footer data sources +claude-sonnet-5 · 34k · \$0\.270 · 25s │$/);
-	assert.match(plain[2], /^│ ◐  sdd-apply    write gentle-shell footer +claude-sonnet-5 · 12k · \$0\.090 · 41s │$/);
+	assert.match(plain[0], /^╭─ ❀ Agents · 2 active ─+ 1m24s ╮$/);
+	assert.match(plain[1], /^│ ◐  sdd-explore  map footer data sources +claude-sonnet-5 · 34k · \$0\.270 · 1m24s │$/);
+	assert.match(plain[2], /^│ ◐  sdd-apply    write gentle-shell foot.*  claude-sonnet-5 · 12k · \$0\.090 · +41s │$/);
 	assert.match(plain[3], /^╰─+╯$/);
 	assert.deepEqual(renderAgentsCard([], plainTheme, 60, 0, { collapsed: false }), []);
 });
@@ -191,16 +191,16 @@ test("renderAgentsCard degrades every row of a mixed card together so columns st
 test("renderAgentsCard shows questions and failures in place of the task, and collapses to the first row", () => {
 	const tasks = [
 		task({ id: "a", status: TASK_STATUS.WAITING, lastStep: "asked: Delete?", tokens: 0, cost: 0 }),
-		task({ id: "b", status: TASK_STATUS.FAILED, endedAt: 2000, error: "pi exited with code 1", lastStep: "pi exited with code 1" }),
+		task({ id: "b", status: TASK_STATUS.RUNNING, startedAt: 1000, endedAt: null, tokens: 34_000, cost: 0.27 }),
 		task({ id: "c", status: TASK_STATUS.QUEUED, createdAt: 1500, startedAt: null, tokens: 0, cost: 0 }),
 	];
 	const plain = renderAgentsCard(tasks, plainTheme, 80, 3000, { collapsed: false }).map(stripAnsi);
-	assert.match(plain[0], /^╭─ ❀ Agents · 1 waiting · 1 queued · 1 failed ─+ 2s ╮$/);
-	// The waiting row carries no tokens/cost of its own, but the failed row
+	assert.match(plain[0], /^╭─ ❀ Agents · 1 active · 1 waiting · 1 queued ─+ 2s ╮$/);
+	// The waiting row carries no tokens/cost of its own, but the running row
 	// below it does, so those columns stay reserved (blank) rather than
 	// collapsing — the whole point of fixed columns over the old per-row join.
 	assert.match(plain[1], /^│ \?  sdd-explore  asked: Delete\? +claude-sonnet-5 · {5}· {8}· {5}2s │$/);
-	assert.match(plain[2], /^│ ✗  sdd-explore  pi exited with cod… +claude-sonnet-5 · 34k · \$0\.270 · {5}1s │$/);
+	assert.match(plain[2], /^│ ◐  sdd-explore  map footer data so.* +claude-sonnet-5 · 34k · \$0\.270 · {5}2s │$/);
 	// Queued fills only the elapsed column with the literal word; model,
 	// tokens, and cost stay blank rather than the row's text spilling past them.
 	assert.match(plain[3], /^│ ○  sdd-explore  map footer data so… +· {5}· {8}· queued │$/);
@@ -247,17 +247,17 @@ test("widgetRows caps the card at a quarter of the terminal, between three and e
 	assert.equal(widgetRows(undefined), 8, "without a terminal the widest default applies");
 });
 
-test("renderAgentsCard caps the rows at maxRows, keeps active tasks ahead of finished ones, and says how many are hidden", () => {
+test("renderAgentsCard caps the rows at maxRows, keeps active tasks ahead, and says how many are hidden", () => {
 	const tasks = [
-		task({ id: "done", status: TASK_STATUS.COMPLETED, startedAt: 500, endedAt: 2000 }),
+		task({ id: "queued0", status: TASK_STATUS.QUEUED, createdAt: 500, startedAt: null }),
 		...Array.from({ length: 6 }, (_, index) => task({ id: `run${index}`, label: `job ${index}`, createdAt: 1000 + index, startedAt: 1000 + index })),
 	];
 	const plain = renderAgentsCard(tasks, plainTheme, 80, 5000, { collapsed: false, maxRows: 4, viewKey: "alt+a" }).map(stripAnsi);
 	assert.equal(plain.length, 6, "frame plus four rows");
-	assert.match(plain[0], /6 active · 1 done/, "the title still counts every shown task");
+	assert.match(plain[0], /6 active · 1 queued/, "the title still counts every shown task");
 	assert.match(plain[1], /◐  sdd-explore  job 0/);
 	assert.match(plain[3], /◐  sdd-explore  job 2/);
-	assert.match(plain[4], /^│ … 4 more · alt\+a to view +│$/, "the finished row gives way to running ones");
+	assert.match(plain[4], /^│ … 4 more · alt\+a to view +│$/, "overflow rows give way to running ones");
 	assert.equal(renderAgentsCard(tasks, plainTheme, 80, 5000, { collapsed: false }).length, 9, "without a cap every row shows");
 	assert.equal(renderAgentsCard(tasks, plainTheme, 80, 5000, { collapsed: false, maxRows: 7 }).length, 9, "at the cap no row is hidden");
 	assert.match(renderAgentsCard(tasks, plainTheme, 80, 5000, { collapsed: false, maxRows: 4 }).map(stripAnsi)[4], /^│ … 4 more +│$/, "no view key, no hint");
@@ -267,7 +267,7 @@ test("renderAgentsCard caps the rows at maxRows, keeps active tasks ahead of fin
 
 test("renderAgentsCard in the float style spends its padding and separator rows from maxRows, so a capped card is exactly as tall as neon", (t) => {
 	const tasks = [
-		task({ id: "done", status: TASK_STATUS.COMPLETED, startedAt: 500, endedAt: 2000 }),
+		task({ id: "queued0", status: TASK_STATUS.QUEUED, createdAt: 500, startedAt: null }),
 		...Array.from({ length: 6 }, (_, index) => task({ id: `run${index}`, label: `job ${index}`, createdAt: 1000 + index, startedAt: 1000 + index })),
 	];
 	const theme = withBackground(plainTheme);
@@ -276,7 +276,7 @@ test("renderAgentsCard in the float style spends its padding and separator rows 
 	const float = renderAgentsCard(tasks, theme, 80, 5000, { collapsed: false, maxRows: 4, viewKey: "alt+a" }).map(stripAnsi);
 	assert.equal(neon.length, 6, "neon: frame plus four rows");
 	assert.equal(float.length, neon.length, "float: padding, header, separator, two rows, padding");
-	assert.match(float[1]!, /6 active · 1 done/, "the title still counts every shown task");
+	assert.match(float[1]!, /6 active · 1 queued/, "the title still counts every shown task");
 	assert.match(float[2]!, /^ ▎ +$/, "a blank separator row follows the header");
 	assert.match(float[3]!, /◐  sdd-explore  job 0/);
 	assert.match(float[4]!, /^ ▎ … 6 more · alt\+a to view +$/, "two more tasks fold into the overflow row");
@@ -339,7 +339,7 @@ test("renderAgentsCard formats subagent cost with formatCost (three decimals bel
 
 test("renderAgentsCard in the float style is a float panel two rows taller than neon with unclipped columns", (t) => {
 	const tasks = [
-		task({ id: "a", status: TASK_STATUS.COMPLETED, startedAt: 1000, endedAt: 26_000 }),
+		task({ id: "a", status: TASK_STATUS.RUNNING, startedAt: 1000, endedAt: null }),
 		task({ id: "b", agent: "sdd-apply", label: "write gentle-shell footer", startedAt: 44_000, tokens: 12_000, cost: 0.09 }),
 	];
 	const theme = withBackground(plainTheme);
@@ -349,7 +349,7 @@ test("renderAgentsCard in the float style is a float panel two rows taller than 
 		const float = renderAgentsCard(tasks, theme, 84, 85_000, options);
 		setCardStyle(CARD_STYLE.NEON);
 		assert.equal(float.length, neon.length + 2, "the top padding and separator rows add two rows");
-		assert.match(stripAnsi(float[1]!), /^ ▎ ❀ Agents  1 active · 1 done +\S.*\S {3}$/, "header on row 1, hint right-aligned");
+		assert.match(stripAnsi(float[1]!), /^ ▎ ❀ Agents  2 active +\S.*\S {3}$/, "header on row 1, hint right-aligned");
 		assert.match(stripAnsi(float[2]!), /^ ▎ +$/, "a blank separator row follows the header");
 		assertFloatRows(float, 84);
 		for (const [index, row] of float.slice(3, -1).entries()) {

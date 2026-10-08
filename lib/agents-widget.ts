@@ -62,7 +62,7 @@ const LOOK: Record<TaskStatus, StatusLook> = {
 	[TASK_STATUS.CANCELLED]: { glyph: "–", role: "dim" },
 	[TASK_STATUS.TIMED_OUT]: { glyph: "✗", role: "error" },
 };
-const FINISHED_TTL_MS = 60_000;
+const FINISHED_TTL_MS = 0;
 const MAX_FINISHED = 3;
 const ROWS_MIN = 3;
 const ROWS_MAX = 8;
@@ -104,25 +104,17 @@ function clip(text: string, width: number): string {
 	return `${out}${ELLIPSIS}`;
 }
 
-// Every active task plus the few that finished within the last minute, in
-// the order they started, so a batch reads top to bottom like a timeline.
-export function widgetTasks(tasks: readonly TaskRecord[], now: number): TaskRecord[] {
-	const active = tasks.filter((task) => !isFinished(task.status));
-	const finished = tasks
-		.filter((task) => isFinished(task.status) && task.endedAt !== null && now - task.endedAt < FINISHED_TTL_MS)
-		.sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))
-		.slice(0, MAX_FINISHED);
-	return [...active, ...finished].sort(startOrder);
+// Every active task in the order they started, so a batch reads top to
+// bottom like a timeline. Finished tasks leave the card immediately.
+export function widgetTasks(tasks: readonly TaskRecord[], _now?: number): TaskRecord[] {
+	return tasks.filter((task) => !isFinished(task.status)).sort(startOrder);
 }
 
 // How long until the next finished row leaves the card, or undefined when no
-// shown row is waiting to expire. The host asks for exactly one frame at that
-// moment instead of ticking while the terminal is idle.
-export function widgetExpiryMs(tasks: readonly TaskRecord[], now: number): number | undefined {
-	const deadlines = widgetTasks(tasks, now)
-		.filter((task) => isFinished(task.status) && task.endedAt !== null)
-		.map((task) => (task.endedAt ?? now) + FINISHED_TTL_MS - now);
-	return deadlines.length === 0 ? undefined : Math.max(1, Math.min(...deadlines));
+// shown row is waiting to expire. Because finished rows leave the card
+// immediately upon completion, widgetExpiryMs returns undefined.
+export function widgetExpiryMs(_tasks: readonly TaskRecord[], _now?: number): number | undefined {
+	return undefined;
 }
 
 // A quarter of the terminal, never fewer than three rows nor more than eight.
