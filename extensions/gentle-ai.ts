@@ -10088,6 +10088,14 @@ function createGentleAiExtensionForTesting(
 			const childDenied = blockChildDestructiveCommand(command);
 			if (childDenied) return childDenied;
 		}
+		const trimmedBashCommand = command.trim();
+		if (/^sleep(?:\s+\d+(?:\.\d+)?|\s*);?$/i.test(trimmedBashCommand)) {
+			return {
+				block: true,
+				reason:
+					"Gentle AI safety policy: do not run sleep in bash to wait for background tasks. End your turn now; background subagent results are delivered automatically via session message when settled.",
+			};
+		}
 		return await confirmCommand(command, ctx, pi.events, herdrLifecycle, yoloActive);
 	});
 

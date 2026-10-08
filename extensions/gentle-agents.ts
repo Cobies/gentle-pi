@@ -2077,12 +2077,12 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		},
 	);
 
-	tool("status", "Report the status of one subagent task.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params, ctx) => {
+	tool("status", "Report the status of one subagent task. Polling active (queued or running) background tasks is blocked by runtime policy; results arrive automatically via session message.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params, ctx) => {
 		const task = await resolveTask(String(params.task_id));
 		return task ? text(describeTask(task), taskDetails(task)) : unknownTask(params.task_id, ctx);
 	});
 
-	tool("result", "Return the final answer of a finished subagent task, or its current state if it is still running.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params, ctx) => {
+	tool("result", "Return the final answer of a finished subagent task, or its current state if it is still running. Polling active (queued or running) background tasks is blocked by runtime policy; results arrive automatically via session message.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params, ctx) => {
 		const task = await resolveTask(String(params.task_id));
 		if (!task) return unknownTask(params.task_id, ctx);
 		// The parent just pulled a finished result; its pending completion must
@@ -2091,7 +2091,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			completions.consume(task.id);
 			messages.invalidateTask(task.id);
 		}
-		return text(isFinished(task.status) ? finishedText(task) : `Task ${task.id} is still ${task.status} (last: ${task.lastStep}).`, taskDetails(task));
+		return text(isFinished(task.status) ? finishedText(task) : `Task ${task.id} is still ${task.status} (last: ${task.lastStep}). Do not poll: background task results are delivered automatically when settled. End your turn now.`, taskDetails(task));
 	});
 
 	tool("list_tasks", "List the subagent tasks of this session, newest first.", { properties: {} }, async (_params, ctx) => {
@@ -2198,6 +2198,23 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			handler: async (ctx) => stopAll(ctx),
 		});
 	}
+
+	pi.on("tool_call", async (event) => {
+		if (event.toolName === "subagent_status" || event.toolName === "subagent_result") {
+			const rawId = isRecord(event.input) ? event.input.task_id : undefined;
+			const taskId = typeof rawId === "string" ? rawId.trim() : typeof rawId === "number" ? String(rawId) : undefined;
+			if (taskId) {
+				const task = await resolveTask(taskId);
+				if (task && (task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.QUEUED)) {
+					return {
+						block: true,
+						reason: "Gentle AI safety policy: polling subagent_status or subagent_result while a background task is running is strictly forbidden. Results arrive automatically via session message when settled. You MUST end your turn immediately without calling further tools.",
+					};
+				}
+			}
+		}
+		return undefined;
+	});
 
 	pi.on("session_tree", (_event, ctx) => {
 		helperPermission.clear();
