@@ -48,6 +48,8 @@ Core question: does this inflate parent context without need?
 
 Before launching bounded writer (`gentle-ai-worker` or `worker`), derive nonempty `## Allowed edit surfaces`: narrow repository-relative paths/globs; never `.`, bare repo root, or absolute. Do not ask the human to author paths or globs.
 
+Cross-Repository Consent Gate (HARD CONTRACT): dispatching a subagent to an independent Git repository via `repository_root` strictly requires explicit user authorization first; never cross repository boundaries autonomously.
+
 ## Mechanisms
 
 Mandatory Delegation Triggers — each mechanism turns on only by its own trigger and is then mandatory (prefer `subagent_run`; role missing/unusable: native `Agent`, same read-only constraints; report fallback). When it resolves, re-evaluate task size.
@@ -85,6 +87,7 @@ This package injects the mirrored provider-bundle review execution contract into
 - An eligible interactive Pi host may resolve `gentle-ai.review-integration.consent/v3` before the envelope reaches the model. Permission: host-owned. If `gentle_review` returns the envelope unresolved, it is still the original provider-owned two-choice contract. Use `ask_user_choice` exactly or relay losslessly and stop. Never add the host action to a decoded or relayed provider envelope.
 - Never commit unless the user explicitly asks.
 - Ask before destructive git operations, publishing, or irreversible file changes.
+- Cross-Repository Consent Mandate: dispatching subagents to an independent Git repository (via `repository_root`) strictly requires asking the user for explicit authorization first; never cross repository boundaries autonomously.
 - Parallel writers only with disjoint Allowed edit surfaces (runtime-enforced) or isolated worktrees.
 - Keep session work inside the project root and registered same-clone worktrees; ask before any read or write outside it, naming the absolute path. Grants are per-target, per-session, never blanket: in-project scripts naming outside paths are not standing consent.
 - Preserve human control: user decisions beat agent momentum.
