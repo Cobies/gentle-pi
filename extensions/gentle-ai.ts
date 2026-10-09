@@ -1,4 +1,5 @@
 import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
+import { pruneContextMessages } from "../lib/context-pruning.ts";
 import { recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
@@ -10187,6 +10188,17 @@ function createGentleAiExtensionForTesting(
 	pi.on("turn_start", (_event, ctx) => {
 		const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
 		processTurnCodeReadCounts.set(sessionKey, 0);
+	});
+
+	pi.on("context", (event, _ctx) => {
+		if (event.messages && event.messages.length > 0) {
+			const pruned = pruneContextMessages(event.messages);
+			const hasChanged = pruned !== event.messages && (pruned.length !== event.messages.length || pruned.some((msg, index) => msg !== event.messages[index]));
+			if (hasChanged) {
+				return { messages: pruned };
+			}
+		}
+		return undefined;
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
