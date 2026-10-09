@@ -312,6 +312,20 @@ function ownedChildIpc(env: NodeJS.ProcessEnv, candidate: IpcEndpoint | undefine
 	return candidate;
 }
 
+// Catalog declarations are routing hints, not proof of child availability.
+// Filter non-name entries such as `"*": false`, but do not claim that a
+// syntactically valid name is registered. Empty declarations omit --tools and
+// use Pi defaults. The runner adds parent messaging separately.
+const TOOL_NAME = /^[A-Za-z0-9_.:-]+$/;
+
+function declaredToolInventory(agent: AgentDefinition): string {
+	const usable = agent.tools.filter((name) => TOOL_NAME.test(name));
+	if (usable.length > 0) return `[declared tools (not verified): ${usable.join(", ")}]`;
+	return agent.tools.length === 0
+		? "[declared tools: Pi defaults (no allowlist)]"
+		: "[declared tools: no tool names declared]";
+}
+
 // Pi drops unknown --tools names without a diagnostic (#1690), so the child
 // reports them once through the one notify the parent keeps. The check runs
 // at the first before_agent_start, not session_start: Pi runs session_start
@@ -1860,7 +1874,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	pi.registerTool({
 		name: "orchestrator_session_id",
 		label: "Orchestrator session ID",
-		description: "Return this host session's stable routing ID and current display alias. When starting a task or delegation, declare a short recognizable subject here; do not query all peers. Names never authenticate. Existing Pi names and human renames are preserved. Use a concise non-sensitive label, not a prompt. Optionally publish owner-curated state (2048 UTF-8 bytes total); null withdraws, omission leaves unchanged. Never include credentials, internal instructions, or raw prompts. Historical notes are not consent or an owner reply.",
+		description: "Return this host session's stable routing ID and current display alias. Before delegation or cross-session coordination, declare a short recognizable subject here. Do not require a subject declaration for small direct tasks; do not query all peers. Names never authenticate. Existing Pi names and human renames are preserved. Use a concise non-sensitive label, not a prompt. Optionally publish owner-curated state (2048 UTF-8 bytes total); null withdraws, omission leaves unchanged. Never include credentials, internal instructions, or raw prompts. Historical notes are not consent or an owner reply.",
 		parameters: { type: "object", additionalProperties: false, properties: {
 			subject: { type: "string", maxLength: 120, description: "Optional short task subject; names only an unnamed Pi session." },
 			state: { anyOf: [{ type: "null" }, { type: "object", additionalProperties: false, properties: {
@@ -2080,9 +2094,9 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		},
 	});
 
-	tool("list_agents", "List the subagents defined for this project and user, with their descriptions.", { properties: {} }, async (_params, ctx) => {
+	tool("list_agents", "List the subagents defined for this project and user, with their descriptions and declared tool inventory.", { properties: {} }, async (_params, ctx) => {
 		const { agents, errors } = discoverAgents(roots(ctx));
-		const lines = agents.map((agent) => `- ${agent.name} (${agent.scope}): ${agent.description || "no description"}`);
+		const lines = agents.map((agent) => `- ${agent.name} (${agent.scope}): ${agent.description || "no description"} ${declaredToolInventory(agent)}`);
 		const problems = errors.map((error) => `! ${error}`);
 		return text(lines.length === 0 ? "No subagents defined." : [...lines, ...problems].join("\n"));
 	});
