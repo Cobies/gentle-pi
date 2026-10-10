@@ -171,7 +171,8 @@ try {
 // about reused tools in folders another account can change. The paths travel as
 // one environment value joined by `|`, which no Windows path holds. One line per
 // path, in order: `safe`, a walk rejection exactly as above, or `unknown` for any
-// other error on that path. A policy denial prints only `unsafe:policy`.
+// other error on that path (such as an owner that denies READ_CONTROL). A policy
+// denial prints only `unsafe:policy`.
 const aclCheckMany = String.raw`
 $ErrorActionPreference = 'Stop';
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { 'unsafe:policy'; exit 0 };
@@ -238,7 +239,8 @@ export function verifyWindowsStorage(path, env, processAdapter = windowsProcessC
 
 /** Walks every path (local drive paths, never holding `|`) in one Windows
  * PowerShell launch (aclCheckMany). Returns one entry per path, in order: null
- * when it passes or its walk failed unexpectedly, else what failed,
+ * when it passes, { check: "unchecked", at } when its walk failed for another
+ * reason (it could not be checked), else what failed,
  * { check, at?, sid?, account?, rights? }. A policy denial, a result count that
  * does not match, or any other line rejects the whole result; nothing to walk
  * launches nothing.
@@ -250,8 +252,9 @@ export function verifyWindowsStorageMany(paths, env, { processAdapter = windowsP
 	const rejected = () => new Error("Windows ACL evidence rejected");
 	const lines = windowsPowerShell(env, aclCheckMany, { GENTLE_WINDOWS_CHECKS: paths.join("|") }, processAdapter).split(/\r?\n/);
 	if (lines.length !== paths.length) throw rejected();
-	return lines.map((line) => {
-		if (line === "safe" || line === "unknown") return null;
+	return lines.map((line, index) => {
+		if (line === "safe") return null;
+		if (line === "unknown") return { check: "unchecked", at: paths[index] };
 		const match = storageOutput.exec(line);
 		const detail = match?.[2] === undefined ? undefined : storageDetail(match[2]);
 		if (!match || !untrustedStorage.test(match[1]) || detail === null) throw rejected();

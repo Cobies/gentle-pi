@@ -615,6 +615,41 @@ test("stale planId or a changed re-inventory returns 409 plan-changed without ru
 	}
 });
 
+// A2: the reused-folder notice is advisory. A re-inventory whose walk timed out (no
+// notice), or found another one, still installs the consented plan: no 409 loop.
+test("a re-inventory that differs only in the reused-folder notice still installs the consented plan", async () => {
+	const weak = { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming" };
+	const windows = { platform: "win32", node: { available: true, version: "24.18.0", usable: true, persistent: true, npm: true },
+		pnpm: { available: true, version: "11.1.1", usable: true, compatible: true, persistent: true }, go: { available: true, version: "1.26.0", usable: true } };
+	for (const later of [{}, { folders: { node: { check: "unchecked", at: "C:\\nodejs\\node.exe" } } }]) {
+		let current = collected({ ...windows, folders: { node: weak } });
+		const { host, port, login, runs } = await start({ collect: async () => current });
+		try {
+			const cookie = await login();
+			const { planId } = await plan(port, cookie);
+			current = collected({ ...windows, ...later });
+			const response = await post(port, "/api/install", cookie, { planId, consent: true });
+			assert.equal(response.status, 202, response.body);
+			assert.equal(runs.length, 1);
+			assert.deepEqual(runs[0].request.plan.tools.folders?.reused.map((entry: { tool: string }) => entry.tool), ["node"], "the consented plan runs");
+		} finally {
+			await host.close("test");
+		}
+	}
+	// Any other change still stops it.
+	let current = collected({ ...windows, folders: { node: weak } });
+	const { host, port, login, runs } = await start({ collect: async () => current });
+	try {
+		const cookie = await login();
+		const { planId } = await plan(port, cookie);
+		current = collected({ ...windows, folders: { node: weak }, globalBin: { available: true, path: BIN, writable: true, onPath: true } });
+		assert.equal((await post(port, "/api/install", cookie, { planId, consent: true })).status, 409);
+		assert.equal(runs.length, 0);
+	} finally {
+		await host.close("test");
+	}
+});
+
 test("install runs the server-stored plan once, single-flight, and reports progress with guidance", async () => {
 	const gate = deferred<void>();
 	const runInstall: RunInstall = async (_request, log) => {
@@ -1220,6 +1255,10 @@ test("/api/plan notes reused tools in folders another account can change, withou
 	names(view.sharedFolders.description, ["Node.js", "npm", "Pi", "S-1-5-21-1-2-3-1002 (PC\\other) can change C:\\Users\\m\\AppData\\Roaming", "0x001301BF",
 		"C:\\Users\\m\\AppData\\Roaming\\npm\\pi.cmd is owned by S-1-5-21-9", "never creates or runs its own programs there", "accepted risk", "not a blocker"]);
 	assert.deepEqual(view.sharedFolders.tools, ["node", "npm", "pi"]);
+	// A1: a path the walk could not check says so, and still does not block.
+	const unchecked = await windowsView({ available: true, path: W_DEFAULT, source: "default" }, { ...reused, folders: { node: { check: "unchecked", at: "C:\\nodejs\\node.exe" } } });
+	assert.deepEqual(unchecked.blockers, []);
+	names(unchecked.sharedFolders.description, ["Node.js: the permissions of C:\\nodejs\\node.exe could not be checked", "could not be checked", "not a blocker"]);
 	// Nothing to note: no record.
 	assert.equal((await windowsView({ available: true, path: W_DEFAULT, source: "default" }, reused)).sharedFolders, null);
 });

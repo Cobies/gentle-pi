@@ -195,8 +195,12 @@ function sameSecret(expected, actual) {
 	const [a, b] = [Buffer.from(expected), Buffer.from(String(actual))];
 	return a.length === b.length && timingSafeEqual(a, b);
 }
+/** What must not change between review and install. The reused-folder notice
+ * (tools.folders) is advisory and changes no action, so it is left out: a walk
+ * that times out on re-inventory must not turn into a plan-changed loop. */
 function fingerprint(collected) {
-	return createHash("sha256").update(JSON.stringify({ plan: collected.plan, binDir: collected.inventory?.globalBin?.path ?? null }))
+	const tools = Object.fromEntries(Object.entries(collected.plan?.tools ?? {}).filter(([name]) => name !== "folders"));
+	return createHash("sha256").update(JSON.stringify({ plan: { ...collected.plan, tools }, binDir: collected.inventory?.globalBin?.path ?? null }))
 		.digest("hex");
 }
 
@@ -253,6 +257,7 @@ function findingText(finding) {
 	const account = plainText(finding?.account);
 	const who = sid ? `${sid}${account ? ` (${account})` : ""}` : "another account";
 	const check = String(finding?.check ?? "");
+	if (check === "unchecked") return `the permissions of ${at} could not be checked`;
 	if (check.endsWith("-acl-mask")) return `${who} can change ${at} (allowed rights ${plainText(finding.rights) ?? "beyond read and execute"})`;
 	if (check.endsWith("-owner")) return `${at} is owned by ${who}, which this installer does not trust`;
 	if (check.endsWith("-reparse")) return `${at} is a link (reparse point) to another location`;
@@ -380,7 +385,7 @@ function sharedFoldersView(plan) {
 	const found = reused.map((entry) => `${folderTools[entry.tool]}: ${findingText(entry)}`).join("; ");
 	return {
 		tools: reused.map((entry) => entry.tool),
-		description: `These tools are reused as they are, from folders another account can change. ${found}. ` +
+		description: `These tools are reused as they are, from folders another account can change or whose permissions could not be checked. ${found}. ` +
 			"The installer never creates or runs its own programs there, but whoever can change those folders can change what these tools run for you, including for Gentle Shell. " +
 			"This is an accepted risk and not a blocker. To remove it, remove that account's write access, then select Check again.",
 	};

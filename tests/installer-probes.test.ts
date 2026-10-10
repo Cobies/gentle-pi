@@ -466,6 +466,75 @@ test("Windows: the folders probe walks every tool found on the user's PATH in on
 	assert.equal(await probes({ ...userNode }).probes.folders(), null);
 });
 
+// S6 notice, pnpm's own layout: a global package is reached through pnpm's link
+// global\v11\<hash>\node_modules\<pkg> (a junction into the store), and `pnpm runtime`
+// links node.exe. The walk sees each file where it really is, plus the folder that
+// holds each link, and never reports pnpm's link itself.
+const W_PNPM = `${W_LOCAL}\\pnpm`;
+const W_PNPM_BIN = `${W_PNPM}\\bin`;
+const W_SCOPE = `${W_PNPM}\\global\\v11\\5f1a\\node_modules\\@earendil-works`;
+const W_JUNCTION = `${W_SCOPE}\\pi-coding-agent`;
+const W_STORE = `${W_PNPM}\\store`;
+const W_STORE_PI = `${W_STORE}\\v11\\links\\@earendil-works\\pi-coding-agent\\1.0.0\\abc\\node_modules\\@earendil-works\\pi-coding-agent`;
+const W_RUNTIME_NODE = `${W_PNPM}\\nodejs\\24.21.0\\node.exe`;
+const pnpmJsShim = (target: string) => `@SETLOCAL\r\n@IF EXIST "%~dp0\\node.exe" (\r\n  "%~dp0\\node.exe"  "%~dp0\\${target}" %*\r\n) ELSE (\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n  node  "%~dp0\\${target}" %*\r\n)\r\n`;
+type Finding = { check: string; at?: string } | null;
+/** The walk as Windows runs it: a path through the junction stops at it; a weak folder rejects what is below it. */
+function pnpmLayout({ weak = [] as string[], unreadable = [] as string[] } = {}) {
+	const launches: string[][] = [];
+	const lower = (path: string) => path.toLowerCase();
+	const under = (path: string, root: string) => lower(path) === lower(root) || lower(path).startsWith(`${lower(root)}\\`);
+	const walk = (path: string): Finding => {
+		if (under(path, W_JUNCTION)) return { check: "ancestor-reparse", at: W_JUNCTION };
+		const folder = weak.find((root) => under(path, root));
+		return folder ? { check: "ancestor-acl-mask", at: folder } : null;
+	};
+	const entry = `${W_JUNCTION}\\dist\\cli.js`;
+	const instance = createProbes({ platform: "win32", env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: W_PNPM_BIN, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+		run: async () => ({ code: 1, signal: null, timedOut: false, stdout: "" }), storage: () => {},
+		storageMany: (list: string[]) => { launches.push(list); return list.map(walk); },
+		fs: { isFile: async (path: string) => [`${W_PNPM_BIN}\\pi.cmd`, `${W_PNPM_BIN}\\node.exe`, entry].includes(path),
+			isDirectory: async () => false, exists: async () => false, writable: async () => false,
+			realpath: async (path: string) => {
+				if (unreadable.includes(path)) throw new Error("EACCES");
+				if (lower(path) === lower(`${W_PNPM_BIN}\\node.exe`)) return W_RUNTIME_NODE;
+				return under(path, W_JUNCTION) ? W_STORE_PI + path.slice(W_JUNCTION.length) : path;
+			},
+			readText: async (path: string) => (path === `${W_PNPM_BIN}\\pi.cmd` ? pnpmJsShim("..\\global\\v11\\5f1a\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js")
+				: Promise.reject(new Error("ENOENT"))) } });
+	return { instance, launches, entry };
+}
+test("Windows: pnpm's own global and runtime links are walked where they lead, so the installer's own Pi raises no notice", async () => {
+	const clean = pnpmLayout();
+	assert.equal(await clean.instance.folders(), null, "pnpm's junction is not a finding");
+	assert.deepEqual(clean.launches, [[W_RUNTIME_NODE, W_PNPM_BIN, `${W_PNPM_BIN}\\pi.cmd`, `${W_STORE_PI}\\dist\\cli.js`, W_SCOPE]],
+		"each file's real location and the folder holding each link, in one launch, never a path through the link");
+	// A weak ACL on the resolved folders or their ancestors is still reported.
+	assert.deepEqual(await pnpmLayout({ weak: [W_STORE] }).instance.folders(), { pi: { check: "ancestor-acl-mask", at: W_STORE } });
+	assert.deepEqual(await pnpmLayout({ weak: [`${W_PNPM}\\nodejs`] }).instance.folders(),
+		{ node: { check: "ancestor-acl-mask", at: `${W_PNPM}\\nodejs` }, pi: { check: "ancestor-acl-mask", at: `${W_PNPM}\\nodejs` } }, "Pi runs that node.exe too");
+	// So is a weak folder holding the link: another account could point it elsewhere.
+	assert.deepEqual(await pnpmLayout({ weak: [W_SCOPE] }).instance.folders(), { pi: { check: "ancestor-acl-mask", at: W_SCOPE } });
+	// A file whose real location cannot be read could not be checked.
+	const hidden = pnpmLayout({ unreadable: [`${W_JUNCTION}\\dist\\cli.js`] });
+	assert.deepEqual(await hidden.instance.folders(), { pi: { check: "unchecked", at: hidden.entry } });
+});
+
+// A1: a path the walk could not check (an owner denying READ_CONTROL, for example)
+// is a notice of its own; a concrete finding for the same tool comes first.
+test("Windows: a tool path the walk could not check is reported as such, after any concrete finding", async () => {
+	const exe = "C:\\Go\\bin\\go.exe";
+	const cmd = `${W_APPDATA_NPM}\\pi.cmd`;
+	const layout = (results: Record<string, Finding>) => createProbes({ platform: "win32", env: { Path: `C:\\Go\\bin;${W_APPDATA_NPM};${W_NODE_DIR}`, PATHEXT: ".EXE;.CMD" },
+		run: async () => ({ code: 1 }), storage: () => {}, storageMany: (list: string[]) => list.map((path) => results[path] ?? null),
+		fs: { isFile: async (path: string) => [exe, cmd, W_NODE, W_PI_ENTRY].includes(path), isDirectory: async () => false, exists: async () => false,
+			realpath: async (path: string) => path, writable: async () => false,
+			readText: async (path: string) => (path === cmd ? cmdShim("node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js") : Promise.reject(new Error("ENOENT"))) } });
+	const weak = { check: "parent-acl-mask", at: W_NPM_ROOT };
+	assert.deepEqual(await layout({ [exe]: { check: "unchecked", at: exe }, [cmd]: { check: "unchecked", at: cmd }, [W_PI_ENTRY]: weak }).folders(),
+		{ go: { check: "unchecked", at: exe }, pi: weak });
+});
+
 test("Windows npm counts by behavior whatever installed it: Node.js, nvm-windows, fnm or a Volta npm.exe", async () => {
 	const layouts = {
 		node: { dir: W_NODE_DIR, npm: "npm.cmd" },

@@ -299,6 +299,23 @@ export function createProbes({ platform, env, run, fs, home, verifyGentleAi = pa
 		}
 		return null;
 	};
+	/** Where `file` really is (realpath) and, for every link on its path, the real
+	 * folder that holds that link: whoever can change that folder can retarget the
+	 * link. Null when the real location cannot be read.
+	 */
+	const canonicalFiles = async (file) => {
+		const chain = [file];
+		while (path.dirname(chain.at(-1)) !== chain.at(-1)) chain.push(path.dirname(chain.at(-1)));
+		const real = await Promise.all(chain.map((entry) => fs.realpath(entry).catch(() => null)));
+		if (real[0] === null) return null;
+		const result = [real[0]];
+		for (let index = 0; index < chain.length - 1; index += 1) {
+			const [own, parent] = [real[index], real[index + 1]];
+			if (own === null || parent === null) continue;
+			if (!samePath(own, path.join(parent, path.basename(chain[index])), platform)) result.push(parent);
+		}
+		return result;
+	};
 	let npmRoot;
 	/** `npm root -g`, real path, from the user's npm (npmInvocation). */
 	const npmGlobalRoot = () => (npmRoot ??= (async () => {
@@ -319,30 +336,42 @@ export function createProbes({ platform, env, run, fs, home, verifyGentleAi = pa
 	const probes = {
 		/** Windows (S6 notice): the folders of the tools the user's PATH resolves (Node,
 		 * npm, Go, Pi, Gentle Shell), each command and what it runs, walked in one
-		 * storageMany launch. { node?, npm?, go?, pi?, shell? }: the first failing path's
-		 * finding per tool, or null when nothing fails or the walk cannot finish.
+		 * storageMany launch where they really are (canonicalFiles): links such as
+		 * pnpm's global `node_modules\<pkg>` junction or a `pnpm runtime` node.exe are
+		 * followed, never reported, and the folder holding each link is walked too.
+		 * { node?, npm?, go?, pi?, shell? }: per tool the first concrete finding, else
+		 * the first path that could not be checked ({ check: "unchecked", at }); null
+		 * when nothing fails or the walk cannot finish.
 		 */
 		async folders() {
 			if (!storageMany) return null;
 			const files = {};
+			const unchecked = new Map();
 			for (const [tool, command] of [["node", "node"], ["npm", "npm"], ["go", "go"], ["pi", "pi"], ["shell", "gentle-shell"]]) {
 				const found = await lookPath(command, user, platform, fs);
 				if (!found) continue;
 				const runs = await invocation(found).catch(() => null);
-				files[tool] = [found, ...(runs ? [runs.command, ...runs.prefix] : [])];
+				files[tool] = [];
+				for (const file of [found, ...(runs ? [runs.command, ...runs.prefix] : [])]) {
+					const canonical = await canonicalFiles(file);
+					if (canonical === null) unchecked.set(file.toLowerCase(), { check: "unchecked", at: file });
+					files[tool].push(...(canonical ?? [file]));
+				}
 			}
 			const key = (file) => file.toLowerCase();
-			const paths = [...new Map(Object.values(files).flat().map((file) => [key(file), file])).values()];
-			if (paths.length === 0) return null;
+			const paths = [...new Map(Object.values(files).flat().filter((file) => !unchecked.has(key(file))).map((file) => [key(file), file])).values()];
+			if (paths.length === 0 && unchecked.size === 0) return null;
 			let results;
 			try {
-				results = await storageMany(paths);
+				results = paths.length === 0 ? [] : await storageMany(paths);
 			} catch {
 				return null;
 			}
-			const byPath = new Map(paths.map((file, index) => [key(file), results[index] ?? null]));
-			const findings = Object.fromEntries(Object.entries(files).map(([tool, list]) => [tool, list.map((file) => byPath.get(key(file))).find(Boolean)])
-				.filter(([, finding]) => finding));
+			const byPath = new Map([...unchecked, ...paths.map((file, index) => [key(file), results[index] ?? null])]);
+			const findings = Object.fromEntries(Object.entries(files).map(([tool, list]) => {
+				const found = list.map((file) => byPath.get(key(file))).filter(Boolean);
+				return [tool, found.find((finding) => finding.check !== "unchecked") ?? found[0]];
+			}).filter(([, finding]) => finding));
 			return Object.keys(findings).length > 0 ? findings : null;
 		},
 		/** The installed Gentle Shell for an update: real root, version and owner (pnpm, npm or null). */

@@ -1009,8 +1009,10 @@ test("verifyWindowsStorageMany walks every path in one Windows PowerShell launch
 	const adapter = (output: string) => (command: string, args: string[], env: Record<string, string>) => { calls.push({ command, args, env }); return output; };
 	const env = { SystemRoot: "C:\\Windows" };
 	const many = (output: string, list = paths) => windowsModule.verifyWindowsStorageMany(list, env, { processAdapter: adapter(output), platform: "win32" });
+	// A1: a path whose walk failed for another reason (READ_CONTROL denied, for example) could not be checked.
 	assert.deepEqual(many(`safe\r\nunsafe:parent-acl-mask|${encoded(weak)}\r\nunknown`),
-		[null, { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming", sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" }, null]);
+		[null, { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming", sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" },
+			{ check: "unchecked", at: "D:\\go\\bin\\go.exe" }]);
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0].command, join("C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
 	assert.deepEqual(calls[0].args.slice(0, 4), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
@@ -1973,7 +1975,7 @@ test("native Windows: one Windows PowerShell launch walks every reused tool path
 		assert.equal(launches.length, 1);
 		assert.equal(results[0], null);
 		assert.deepEqual([results[1]?.check, realpathSync.native(results[1]!.at!), results[1]?.sid, results[1]?.rights], ["parent-acl-mask", realpathSync.native(weak), "S-1-1-0", "0x001301BF"]);
-		assert.equal(results[2], null, "a path whose walk cannot finish is no notice");
+		assert.deepEqual(results[2], { check: "unchecked", at: join(f.root, "missing", "pi.cmd") }, "a path whose walk cannot finish could not be checked");
 		// The single-path walk agrees on both.
 		verifyWindowsStorage(join(safe, "node.exe"), process.env);
 		assert.throws(() => verifyWindowsStorage(join(weak, "go.exe"), process.env), (error: { check?: string }) => error.check === "parent-acl-mask");
@@ -1983,6 +1985,33 @@ test("native Windows: one Windows PowerShell launch walks every reused tool path
 		const folders = await createProbes({ platform: "win32", env, run: adapters.run, fs: adapters.fs }).folders();
 		assert.deepEqual(Object.keys(folders ?? {}), ["go"], JSON.stringify(folders));
 		assert.equal(folders.go.check, "parent-acl-mask");
+	} finally { f.cleanup(); }
+});
+
+// S6 notice, B2: a tool reached through a junction (pnpm's global node_modules link)
+// is walked where it really is; the junction itself is never a finding.
+test("native Windows: the reused-folder walk follows a junction to the real folder and reports only a weak real folder", { skip: nativeUnavailable }, async (t) => {
+	const f = await ownedNativeFixture();
+	try {
+		const real = join(f.root, "store", "go"); mkdirSync(real, { recursive: true });
+		writeFileSync(join(real, "go.exe"), "not executed fixture");
+		const link = join(f.root, "linked-go");
+		try { symlinkSync(real, link, "junction"); }
+		catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) { t.skip(`owned junction creation capability unavailable: ${code}`); return; }
+			throw error;
+		}
+		// Control: the unresolved path stops at the junction, as the single-path walk does.
+		assert.throws(() => verifyWindowsStorage(join(link, "go.exe"), process.env), (error: { check?: string }) => error.check === "parent-reparse");
+		const adapters = hostAdapters();
+		const env = withoutPnpmHome(nativePath([link, join(process.env.SystemRoot!, "System32")]), {});
+		const probe = () => createProbes({ platform: "win32", env, run: adapters.run, fs: adapters.fs }).folders();
+		assert.equal(await probe(), null, "the junction is not a finding");
+		await grantEveryone(f.root, join(f.root, "store"), modifyRights);
+		const weak = await probe();
+		assert.equal(weak?.go?.check, "ancestor-acl-mask", JSON.stringify(weak));
+		assert.equal(realpathSync.native(weak.go.at!), realpathSync.native(join(f.root, "store")));
 	} finally { f.cleanup(); }
 });
 

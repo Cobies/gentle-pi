@@ -663,6 +663,10 @@ test("Windows: the plan notes only the reused tools whose folders another accoun
 	const npmShell = planPreflight({ ...installed("win32"), node: { ...tool("24.18.0"), persistent: true, npm: true },
 		shell: { ...tool(requirements.shell), global: true, owner: "npm" }, folders: { shell: weakFolder, go: weakFolder } });
 	assert.deepEqual(npmShell.tools.folders?.reused.map((entry: { tool: string }) => entry.tool), ["shell"], "no build here, so Go is not reused");
+	// A path the walk could not check is noted as such; an unknown code never reaches the plan.
+	const unchecked = planPreflight({ ...reused, folders: { node: { check: "unchecked", at: "C:\\nodejs\\node.exe" }, pi: { check: "denied", at: "C:\\x" } } });
+	assert.deepEqual(unchecked.tools.folders, { status: "notice", reused: [{ tool: "node", check: "unchecked", at: "C:\\nodejs\\node.exe" }] });
+	assert.deepEqual(unchecked.blockers, []);
 	// Only known string fields reach the plan; POSIX ignores the record.
 	const odd = planPreflight({ ...reused, folders: { node: { ...weakFolder, sid: 7, extra: "x" }, other: weakFolder } });
 	assert.deepEqual(odd.tools.folders.reused, [{ tool: "node", check: weakFolder.check, at: weakFolder.at, account: weakFolder.account, rights: weakFolder.rights }]);

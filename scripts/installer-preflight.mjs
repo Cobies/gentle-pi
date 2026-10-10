@@ -271,7 +271,9 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 		const userNode = tools.node.status === "reusable" && tools.node.found === undefined && inventory.node?.persistent === true;
 		const used = { node: userNode, npm: userNode && inventory.node?.npm === true, go: tools.go.status === "reusable", pi: tools.pi.status === "reusable",
 			shell: inventory.shell?.owner === "npm" && ["reusable", "needs-update"].includes(tools.shell.status) };
-		const reused = Object.keys(used).filter((tool) => used[tool] && plainRecord(folders[tool]) && typeof folders[tool].check === "string")
+		// A walk rejection, or a path the walk could not check; nothing else.
+		const known = /^(?:(?:target|parent|ancestor)-(?:reparse|owner|acl-mask)|unchecked)$/;
+		const reused = Object.keys(used).filter((tool) => used[tool] && plainRecord(folders[tool]) && known.test(String(folders[tool].check)))
 			.map((tool) => ({ tool, ...Object.fromEntries(["check", "at", "sid", "account", "rights"]
 				.filter((key) => typeof folders[tool][key] === "string").map((key) => [key, folders[tool][key]])) }));
 		if (reused.length > 0) tools.folders = { status: "notice", reused };

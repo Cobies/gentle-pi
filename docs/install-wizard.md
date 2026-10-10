@@ -1371,22 +1371,35 @@ discloses the rest as a notice (below).
 
 Before consent the wizard walks every reused tool's command and what it runs:
 `node`, `npm`, `go`, `pi` and `gentle-shell` as the user's PATH resolves them,
-plus the Node and JS entry of a known shim. All of them go to one Windows
+plus the Node and JS entry of a known shim. Each file is walked where it really
+is (its realpath), and for every link on its path the real folder that holds
+the link is walked too, since whoever can change that folder can retarget the
+link. pnpm's own links, the global `global\v11\<hash>\node_modules\<pkg>`
+junction into the store and a `pnpm runtime` `node.exe`, are therefore never a
+finding, while a weak ACL on the folders they lead to, or on the folder holding
+them, still is. A file whose real location cannot be read is reported as
+"could not be checked". All of them go to one Windows
 PowerShell launch (`verifyWindowsStorageMany`): the paths travel as one
 environment value joined by `|`, which no Windows path holds, and the script
 prints one line per path, in order: `safe`, the same `unsafe:<role>-<check>|<detail>`
 as the single-path walk, or `unknown` when that path's walk fails for another
-reason. A count that does not match, any other line, or `unsafe:policy` rejects
+reason (an owner that denies READ_CONTROL, for example). `unknown` becomes
+`{ check: "unchecked", at }`: the notice says that path could not be checked.
+A count that does not match, any other line, or `unsafe:policy` rejects
 the whole result. A test keeps that walk identical to the single-path one.
 
 The plan records only the tools it reuses as they are: the user's Node.js and
 its npm, a Go that a build reuses, a Pi kept as it is, and a Gentle Shell
 that npm owns (kept or updated with npm). `tools.folders` is then
-`{ status: "notice", reused: [{ tool, check, at, sid?, account?, rights? }] }`,
-and the review screen names each tool, folder, account and rights. It never
+`{ status: "notice", reused: [{ tool, check, at, sid?, account?, rights? }] }`
+(per tool the first walk rejection, else the first `unchecked` path), and the
+review screen names each tool, folder, account and rights. It never
 blocks and changes no action: the user decided to accept this risk. A
 policy denial, a PowerShell failure or a walk that cannot finish means no
-notice, never a blocker.
+notice, never a blocker. The notice is left out of the plan fingerprint the
+install request re-checks, so a re-inventory whose walk timed out, or found a
+different notice, still installs the consented plan instead of answering
+`plan-changed` again and again.
 
 A pnpm whose storage fails the walk is never run anywhere. That includes the
 wizard probe's `--version` of the user's own pnpm next to the bootstrap's:
