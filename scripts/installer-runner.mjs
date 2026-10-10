@@ -6,7 +6,7 @@ import {
 	resolveGentleAiBinary,
 } from "../runtime/gentle-ai-binary.mjs";
 import { PI_INSTALL_VERSION, goAcquisition, persistencePins, pnpmGlobalBin, requirements } from "./installer-preflight.mjs";
-import { GENTLE_AI_REPOSITORY, SHELL_REPOSITORY, installOwner, mainVersion } from "./main-channel.mjs";
+import { GENTLE_AI_REPOSITORY, MainChannelError, SHELL_REPOSITORY, installOwner, mainVersion } from "./main-channel.mjs";
 import { windowsShim } from "./installer-windows.mjs";
 
 // Standard installation runner: one fixed, consented global pnpm installation
@@ -603,6 +603,9 @@ export async function packageNativeGentleAi({ packageRoot, platform, env, home }
 	return { ok: false, reason: "package-native-unverified" };
 }
 
+/** The failed steps whose sanitized detail line the outcome may carry. */
+const detailSteps = Object.freeze(["shell-setup", "persist-path", "acquire-go", "install-global", "install-shell-main", "build-gentle-ai-main", "update-shell"]);
+
 /** One displayable line from the bounded output of a failed `gentle-shell
  * setup` or `pnpm setup`: the last error line (`Error:` or a pnpm `ERR_` code),
  * else the last non-empty line.
@@ -633,9 +636,11 @@ export function setupErrorDetail(text, home, platform) {
  * runStandardInstall({ plan, consent }, adapters) -> { outcome, ... }
  * Outcomes: blocked (nothing installed), failed (stopped after `completed`),
  * terminal-action-required (installed; user PATH persisted, open a new
- * terminal) or ready. A failed `shell-setup` or `persist-path` may add `detail`,
- * one sanitized output line (setupErrorDetail), and a failed `acquire-go` the Go
- * folder in its way, with the home as ~; no other output is kept. When the plan persists the Node runtime, successful
+ * terminal) or ready. A failed `shell-setup`, `persist-path`, `install-global`,
+ * `install-shell-main`, `build-gentle-ai-main` or `update-shell` may add `detail`, one
+ * sanitized line (setupErrorDetail) of the failed command's output or of the main
+ * channel's error, and a failed `acquire-go` the Go folder in its way, with the home
+ * as ~; no other output is kept. When the plan persists the Node runtime, successful
  * outcomes also report npmPrefix: "configured" or "unchanged". Adapters: platform, nodePath, env (user env), home?,
  * run(command, argv, { env, deadlineMs, stderrTail? }) with shell:false semantics returning
  * { code, signal, timedOut, stdout, stderrTail? }, fs { isFile, realpath, readText },
@@ -667,8 +672,30 @@ export async function runStandardInstall(request, adapters) {
 	const child = childEnvironment(env, platform, globalBin);
 	const pnpm = await pnpmInvocation(env, platform, adapters.fs).catch(() => null);
 	if (!pnpm) return blocked("pnpm-unavailable");
-	const runPnpm = (args, deadlineMs, environment = child) => adapters.run(pnpm.command, [...pnpm.prefix, ...args], { env: environment, deadlineMs });
+	const runPnpm = (args, deadlineMs, environment = child, options = {}) => adapters.run(pnpm.command, [...pnpm.prefix, ...args], { env: environment, deadlineMs, ...options });
 	const home = adapters.home ?? (platform === "win32" ? env.USERPROFILE : env.HOME);
+	let setupDetail = null;
+	// pnpm prints its own errors, such as ERR_PNPM_UNKNOWN_SHELL or a failed postinstall, on stdout.
+	const outputDetail = (result) => setupErrorDetail(result?.stderrTail, home, platform) ?? setupErrorDetail(result?.stdout, home, platform);
+	// Only the main channel's own errors: their message, then the failed command's stderr tail.
+	const mainChannelDetail = (error) => (error instanceof MainChannelError
+		? setupErrorDetail([error.message, error.cause?.message].filter((text) => typeof text === "string").join("\n"), home, platform) : null);
+	// A pnpm global add whose failure keeps pnpm's last error line as the detail.
+	const addGlobal = async (args, environment) => {
+		const result = await runPnpm(["add", "-g", ...args], deadlines.install, environment, { stderrTail: 4096 });
+		if (succeeded(result)) return true;
+		setupDetail = outputDetail(result);
+		return false;
+	};
+	// A main-channel call whose MainChannelError becomes the detail; any other error stays hidden.
+	const withMainDetail = (step) => async () => {
+		try {
+			return await step();
+		} catch (error) {
+			setupDetail = mainChannelDetail(error);
+			return false;
+		}
+	};
 
 	const list = () => runPnpm(["list", "-g", "--depth", "0", "--json"], deadlines.probe);
 	const ids = request.plan.actions.map((action) => action.id);
@@ -767,7 +794,6 @@ export async function runStandardInstall(request, adapters) {
 
 	// Mutating and post-install steps: a false result or exception is a failure.
 	let packageRoot = null;
-	let setupDetail = null;
 	let persistentNode = null;
 	let npmPrefix = null;
 	const persistence = [
@@ -833,26 +859,27 @@ export async function runStandardInstall(request, adapters) {
 			return succeeded(result) && new RegExp(`^go version go${escapeRegExp(goAcquisition.version)} \\S+$`).test(String(result.stdout ?? "").trim());
 		}],
 	] : [];
-	const install = ["install-global", async () => succeeded(await runPnpm(["add", "-g", ...(shellOnly ? [] : [`${PI_PACKAGE}@${PI_INSTALL_VERSION}`]),
-		`${SHELL_PACKAGE}@${requirements.shell}`, `--allow-build=${SHELL_PACKAGE}`], deadlines.install, buildEnv()))];
+	const install = ["install-global", () => addGlobal([...(shellOnly ? [] : [`${PI_PACKAGE}@${PI_INSTALL_VERSION}`]),
+		`${SHELL_PACKAGE}@${requirements.shell}`, `--allow-build=${SHELL_PACKAGE}`], buildEnv())];
 	function mainSteps() {
 		const channel = adapters.mainChannel;
 		const ctx = { env, home };
-		const runIn = (command, argv, options = {}) => adapters.run(command, argv, { env: options.env ?? child, cwd: options.cwd, deadlineMs: options.deadlineMs ?? deadlines.install });
+		const runIn = (command, argv, options = {}) => adapters.run(command, argv, { env: options.env ?? child, cwd: options.cwd, deadlineMs: options.deadlineMs ?? deadlines.install,
+			...(options.stderrTail === undefined ? {} : { stderrTail: options.stderrTail }) });
 		let gentleAiCommit = null;
 		let shellCommit = null;
 		return [
-			["build-gentle-ai-main", async () => {
+			["build-gentle-ai-main", withMainDetail(async () => {
 				const goPath = pinnedGo ?? await lookPath("go", env, platform, adapters.fs);
 				if (!goPath || !channel) return false;
 				gentleAiCommit = await channel.resolveCommit(GENTLE_AI_REPOSITORY);
 				await channel.buildGentleAi({ commit: gentleAiCommit, goPath, platform, ctx, run: runIn });
 				return true;
-			}],
-			["install-shell-main", async () => {
+			})],
+			["install-shell-main", withMainDetail(async () => {
 				shellCommit = await channel.resolveCommit(SHELL_REPOSITORY);
-				const tgz = await channel.packShell({ commit: shellCommit, ctx, run: runIn, pnpm });
-				if (!succeeded(await runPnpm(["add", "-g", tgz, `--allow-build=${SHELL_PACKAGE}`], deadlines.install, buildEnv()))) return false;
+				const tgz = await channel.packShell({ commit: shellCommit, ctx, run: runIn, pnpm, platform });
+				if (!(await addGlobal([tgz, `--allow-build=${SHELL_PACKAGE}`], buildEnv()))) return false;
 				const result = await list();
 				if (!succeeded(result)) return false;
 				const root = await verifiedPackageRoot(String(result.stdout ?? ""), globalBin.pnpmHome, platform, adapters.fs,
@@ -860,7 +887,7 @@ export async function runStandardInstall(request, adapters) {
 				if (root === null) return false;
 				packageRoot = root;
 				return true;
-			}],
+			})],
 			["record-channel", async () => {
 				await channel.writeChannel(ctx, { channel: "main", shellCommit, gentleAiCommit });
 				return true;
@@ -903,8 +930,8 @@ export async function runStandardInstall(request, adapters) {
 			...goSteps,
 			...(ids.includes("install-pi") ? [["install-pi", async () => succeeded(await runPnpm(["add", "-g", `${PI_PACKAGE}@${PI_INSTALL_VERSION}`], deadlines.install))]] : []),
 			...piSteps,
-			["update-shell", async () => (await adapters.upgradeShell({ channel, packageRoot: installed.root, currentVersion: installed.version,
-				...(pinnedGo ? { goPath: pinnedGo } : {}) })) === true],
+			["update-shell", withMainDetail(async () => (await adapters.upgradeShell({ channel, packageRoot: installed.root, currentVersion: installed.version,
+				...(pinnedGo ? { goPath: pinnedGo } : {}) })) === true)],
 			["verify-updated-shell", async () => {
 				const after = await adapters.locateShell();
 				const version = String(after?.version ?? "");
@@ -937,15 +964,14 @@ export async function runStandardInstall(request, adapters) {
 		steps.push(["persist-path", async () => {
 			const result = await adapters.run(pnpm.command, [...pnpm.prefix, "setup"], { env: child, deadlineMs: deadlines.setup, stderrTail: 4096 });
 			if (succeeded(result)) return true;
-			// pnpm prints its own errors, such as ERR_PNPM_UNKNOWN_SHELL, on stdout.
-			setupDetail = setupErrorDetail(result?.stderrTail, home, platform) ?? setupErrorDetail(result?.stdout, home, platform);
+			setupDetail = outputDetail(result);
 			return false;
 		}]);
 	}
 	for (const [step, run] of steps) {
 		if (!(await Promise.resolve().then(run).catch(() => false))) {
 			log({ step, status: "failed" });
-			const detail = ["shell-setup", "persist-path", "acquire-go"].includes(step) && setupDetail ? { detail: setupDetail } : {};
+			const detail = detailSteps.includes(step) && setupDetail ? { detail: setupDetail } : {};
 			return { outcome: "failed", failedStep: step, completed, ...detail };
 		}
 		completed.push(step);
