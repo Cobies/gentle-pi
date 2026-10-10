@@ -66,6 +66,10 @@ const MAX_LIMIT = 20;
 const MAX_OUTPUT_CHARS = 100_000;
 const PROCESS_MAX_BUFFER = MAX_OUTPUT_CHARS * 2;
 const FALLBACK_INSTRUCTIONS = "Use read, grep, and find for this exploration.";
+// query and explore read an existing index; on a slow filesystem (for example
+// WSL /mnt mounts) they could otherwise block the turn indefinitely (#1901).
+// init is the legitimately slow first index, so only the user's signal bounds it.
+const CODEGRAPH_QUERY_TIMEOUT_MS = 180_000;
 const execFileAsync = promisify(execFile);
 
 function resolveWorkspaceCwd(cwd: string): string {
@@ -160,33 +164,19 @@ function truncateOutput(output: string): string {
 		: `${output.slice(0, MAX_OUTPUT_CHARS)}\n\n[CodeGraph output truncated]`;
 }
 
-function isTimeoutError(error: unknown): boolean {
-	return (
-		(typeof error === "object" &&
-			error !== null &&
-			(("name" in error && (error as { name?: unknown }).name === "TimeoutError") ||
-				("code" in error && (error as { code?: unknown }).code === "ABORT_ERR"))) ||
-		(error instanceof Error && /timed out|timeout/i.test(error.message))
-	);
-}
-
 function codeGraphFailureDetails(
 	error: unknown,
 	operation: CodeGraphOperation,
 	cwd: string,
 ): CodeGraphFallbackDetails {
-	const status = isTimeoutError(error)
-		? CODEGRAPH_STATUS.FAILED
-		: typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
+	const status =
+		typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
 			? CODEGRAPH_STATUS.UNAVAILABLE
 			: CODEGRAPH_STATUS.FAILED;
 	return { status, operation, cwd, fallback: FALLBACK_INSTRUCTIONS };
 }
 
-function codeGraphFailureMessage(status: CodeGraphStatus, error?: unknown): string {
-	if (isTimeoutError(error)) {
-		return `CodeGraph operation timed out (WSL / filesystem latency or oversized workspace). ${FALLBACK_INSTRUCTIONS}`;
-	}
+function codeGraphFailureMessage(status: CodeGraphStatus): string {
 	return status === CODEGRAPH_STATUS.UNAVAILABLE
 		? `CodeGraph is unavailable because the codegraph binary was not found. ${FALLBACK_INSTRUCTIONS}`
 		: `CodeGraph failed to run. ${FALLBACK_INSTRUCTIONS}`;
@@ -244,7 +234,7 @@ export function codeGraphNodeScript(cmdPath: string): string | undefined {
 	}
 }
 
-function* codeGraphNodeScriptsOnPath(): Iterable<string> {
+function* codeGraphNodeScriptsOnPath(): Generator<string, undefined, unknown> {
 	for (const cmdPath of codeGraphCmdPathsOnPath()) {
 		const script = codeGraphNodeScript(cmdPath);
 		if (script) yield script;
@@ -256,16 +246,10 @@ export function findCodeGraphNodeScriptOnPath(): string | undefined {
 	return codeGraphNodeScriptsOnPath().next().value;
 }
 
-const CODEGRAPH_TOOL_TIMEOUT_MS = 180_000;
-
 const runCodeGraphCommand: CodeGraphRunner = async (args, options) => {
-	const timeoutSignal = AbortSignal.timeout(CODEGRAPH_TOOL_TIMEOUT_MS);
-	const effectiveSignal = options.signal
-		? AbortSignal.any([options.signal, timeoutSignal])
-		: timeoutSignal;
 	const runOptions = {
 		cwd: options.cwd,
-		signal: effectiveSignal,
+		signal: options.signal,
 		maxBuffer: options.maxBuffer,
 		windowsHide: true,
 	};
@@ -297,7 +281,10 @@ const runCodeGraphCommand: CodeGraphRunner = async (args, options) => {
 	throw unavailableError;
 };
 
-export function createCodeGraphTool(runner: CodeGraphRunner = runCodeGraphCommand) {
+export function createCodeGraphTool(
+	runner: CodeGraphRunner = runCodeGraphCommand,
+	{ queryTimeoutMs = CODEGRAPH_QUERY_TIMEOUT_MS }: { queryTimeoutMs?: number } = {},
+) {
 	return {
 		name: "codegraph",
 		renderShell: "self" as const,
@@ -317,12 +304,14 @@ export function createCodeGraphTool(runner: CodeGraphRunner = runCodeGraphComman
 			signal: AbortSignal | undefined,
 			_onUpdate: undefined,
 			ctx: ExtensionContext,
-		) {
+		): Promise<{ content: { type: "text"; text: string }[]; details: { operation: CodeGraphOperation; cwd: string; args: string[] } | CodeGraphFallbackDetails }> {
 			const cwd = resolveWorkspaceCwd(ctx.cwd);
 			assertSafeIndexDirectory(cwd);
 			const args = commandArguments(parameters, cwd);
+			const timeout = parameters.operation === "init" ? undefined : AbortSignal.timeout(queryTimeoutMs);
+			const runSignal = timeout && signal ? AbortSignal.any([signal, timeout]) : (timeout ?? signal);
 			try {
-				const result = await runner(args, { cwd, signal, maxBuffer: PROCESS_MAX_BUFFER });
+				const result = await runner(args, { cwd, signal: runSignal, maxBuffer: PROCESS_MAX_BUFFER });
 				const output = truncateOutput([result.stdout, result.stderr].filter(Boolean).join("\n"));
 				return {
 					content: [{ type: "text" as const, text: output || "CodeGraph completed without output." }],
@@ -330,8 +319,12 @@ export function createCodeGraphTool(runner: CodeGraphRunner = runCodeGraphComman
 				};
 			} catch (error: unknown) {
 				const details = codeGraphFailureDetails(error, parameters.operation, cwd);
+				const timedOut = timeout?.aborted === true && signal?.aborted !== true;
+				const text = timedOut
+					? `CodeGraph timed out after ${queryTimeoutMs} ms (a slow filesystem such as a WSL /mnt mount, or a very large workspace). ${FALLBACK_INSTRUCTIONS}`
+					: codeGraphFailureMessage(details.status);
 				return {
-					content: [{ type: "text" as const, text: codeGraphFailureMessage(details.status, error) }],
+					content: [{ type: "text" as const, text }],
 					details,
 				};
 			}

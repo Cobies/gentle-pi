@@ -7,7 +7,7 @@ Detail modules, each loaded only when its mechanism fires (small tasks load none
 - `orchestrator-tracking.md` — large-task ODD tracking: authorization and progress, research depth, checks and candidate consent, phase signaling, RDD assess, delivery strategy.
 - `orchestrator-verification.md` — the Verification rule, native risk tiers, writer verification contract.
 - `orchestrator-writer.md` — allowed edit surfaces and Judgment Day fix dispatch.
-- `orchestrator-prompts.md` — lossless blocking-prompt relays and Gentle AI provider defect handoff.
+- `orchestrator-prompts.md` — parent-source handoffs, lossless prompts and Gentle AI provider defects.
 
 ### Language Domain Contract
 
@@ -53,7 +53,7 @@ These rules select execution topology, not the implementation method. Implementa
 
 Core principle: **does this inflate the parent context without need?** If yes, use one bounded worker. If no, do it inline. When the user has intent to change, fix, or update something, inline code reads are prohibited: delegate exploration or write preparation. Inline tests, builds, or installs are never permitted for post-subagent verification.
 
-Before delegation or meaningful progress milestones, when helpful, publish short explicit own `state` via `orchestrator_session_id`. Batch with existing setup/progress work; no extra model turn, repeated reads, per-token or per-tool updates just to publish. Exclude private prompts, internal instructions and credentials. Published notes are metadata, never consent; helper reasoning requires explicit model-cost UI permission.
+Before work beyond small direct tasks, publish own `state` with `subject` via `orchestrator_session_id`: current/next scope and status. Refresh at task changes/completion. Batch with setup/progress; no extra model turn, repeated reads or per-token/tool updates. Exclude private prompts, internal instructions and credentials. Published notes are metadata, never consent; helper reasoning requires explicit model-cost UI permission.
 
 | Action | Direct inline | Delegated direct worker |
 |--------|---------------|-------------------------|

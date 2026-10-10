@@ -57,6 +57,17 @@ const DETAIL_ROLE = "dim";
 const HIDDEN_ROLE = "dim";
 const passthroughTheme: CardTheme = { fg: (_color, text) => text };
 
+export const COMPLETION_HEADER = /^Subagent [^\n]+ \(task [^\n]*\) [^\n]+\.$/;
+
+export function stripCompletionHeader(text: string): string {
+	const split = text.indexOf("\n\n");
+	if (split < 0 || !COMPLETION_HEADER.test(text.slice(0, split))) return text;
+	const rest = text.slice(split + 2);
+	return rest.trim() === "" ? text : rest;
+}
+
+export const agentResultPreview = stripCompletionHeader;
+
 function safeKeyHint(id: string, label: string): string | undefined {
 	try {
 		return keyHint(id as never, label);
@@ -215,15 +226,16 @@ export class GentleAgentResultCard {
 
 		if (this.text.length > 0) {
 			const innerWidth = cardInnerWidth(width);
+			const effectiveText = !this.expanded ? stripCompletionHeader(this.text) : this.text;
 			if (this.expanded || this.isError) {
 				const role = this.isError ? "error" : "text";
-				for (const raw of this.text.split("\n")) {
+				for (const raw of effectiveText.split("\n")) {
 					for (const line of raw === "" ? [""] : wrapTextWithAnsi(raw, innerWidth)) {
 						lines.push(cardLine(this.theme.fg(role, line), this.tone, this.theme, width));
 					}
 				}
 			} else {
-				const firstLine = this.text.split("\n").find((l) => l.trim().length > 0) ?? "";
+				const firstLine = effectiveText.split("\n").find((l) => l.trim().length > 0) ?? "";
 				lines.push(cardLine(this.theme.fg(HIDDEN_ROLE, firstLine), this.tone, this.theme, width));
 			}
 		}
@@ -277,7 +289,10 @@ export function renderGentleAgentResult(
 	context?: GentleAgentRenderContext,
 ): GentleAgentResultCard {
 	const textItems = result.content.flatMap((content) => (content.type === "text" ? [sanitizeTerminalText(content.text)] : []));
-	const text = textItems.some((item) => item.length > 0) ? textItems.join("\n") : "";
+	let text = textItems.some((item) => item.length > 0) ? textItems.join("\n") : "";
+	if (options.expanded !== true && options.isPartial !== true) {
+		text = stripCompletionHeader(text);
+	}
 	const isError = options.isError === true || context?.isError === true;
 	const tone = isError ? CARD_TONE.ERROR : options.isPartial ? CARD_TONE.WARNING : CARD_TONE.SUCCESS;
 	const state = getGentleAgentRenderState(context?.state);

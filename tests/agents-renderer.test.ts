@@ -9,6 +9,8 @@ import {
 	agentOperationSubtitle,
 	formatLiveTaskActivity,
 	getGentleAgentRenderState,
+	stripCompletionHeader,
+	agentResultPreview,
 } from "../lib/agents-renderer.ts";
 import { CARD_TONE } from "../lib/shell-card.ts";
 
@@ -164,4 +166,47 @@ test("render state records outcomes and triggers invalidation on completion", (t
 	const agentState = getGentleAgentRenderState(state);
 	assert.equal(agentState?.finished, true);
 	assert.equal(agentState?.failed, false);
+});
+
+test("stripCompletionHeader strips leading completion header and leaves other text intact", () => {
+	assert.equal(
+		stripCompletionHeader('Subagent explore (task t-1, "map lib") finished.\n\nlib has three agent files.'),
+		"lib has three agent files.",
+	);
+	assert.equal(
+		stripCompletionHeader('Subagent explore (task t-1, "map lib") failed.\n\nError: something broke.'),
+		"Error: something broke.",
+	);
+	assert.equal(
+		stripCompletionHeader('Subagent explore (task t-1, "x") finished.\n\n'),
+		'Subagent explore (task t-1, "x") finished.\n\n',
+	);
+	assert.equal(
+		stripCompletionHeader("Plain answer without a header.\n\nMore details."),
+		"Plain answer without a header.\n\nMore details.",
+	);
+	assert.equal(stripCompletionHeader, agentResultPreview);
+});
+
+test("renderGentleAgentResult strips completion header when collapsed and preserves when expanded", () => {
+	const text = 'Subagent explore (task 1jk-1-go3r, "map lib modules") finished.\n\nlib has three agent files.';
+	const collapsed = renderGentleAgentResult(
+		{ content: [{ type: "text", text }], details: {} },
+		{ isPartial: false, expanded: false },
+		plainTheme,
+	);
+	const collapsedLines = collapsed.render(80).map((line) => line.trimEnd());
+	assert.deepEqual(collapsedLines, [
+		"│ lib has three agent files.                                                   │",
+		"╰──────────────────────────────────────────────────────────────────────────────╯",
+	]);
+
+	const expanded = renderGentleAgentResult(
+		{ content: [{ type: "text", text }], details: {} },
+		{ isPartial: false, expanded: true },
+		plainTheme,
+	);
+	const expandedText = expanded.render(80).join("\n");
+	assert.match(expandedText, /Subagent explore \(task 1jk-1-go3r, "map lib modules"\) finished\./);
+	assert.match(expandedText, /lib has three agent files\./);
 });

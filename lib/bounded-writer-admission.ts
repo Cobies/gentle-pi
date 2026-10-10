@@ -21,6 +21,203 @@ function isTaskScopedRepositoryRelativePath(value: string, backticked: boolean):
 	return !/[?*\[\]{}]/.test(path.split("/")[0]);
 }
 
+export function tryNormalizeInRepoAbsolutePath(candidate: string, targetRoot: string): string | undefined {
+	const normalizedCandidate = candidate.replace(/\\/g, "/");
+	const isWindowsDrive = /^[A-Za-z]:\//.test(normalizedCandidate);
+	const isPosixAbsolute = normalizedCandidate.startsWith("/");
+	if (!isWindowsDrive && !isPosixAbsolute) {
+		return undefined;
+	}
+
+	const roots = [targetRoot];
+	try {
+		const realRoot = realpathSync(targetRoot);
+		if (realRoot !== targetRoot) roots.push(realRoot);
+	} catch {
+		// Target root might not exist on disk in synthetic unit tests
+	}
+
+	for (const root of roots) {
+		const normRoot = root.replace(/\\/g, "/");
+		const rootDriveMatch = normRoot.match(/^([A-Za-z]:)(\/.*)?$/);
+		const candDriveMatch = normalizedCandidate.match(/^([A-Za-z]:)(\/.*)?$/);
+
+		let candPrefix = "";
+		let candPath = normalizedCandidate;
+		if (candDriveMatch) {
+			candPrefix = candDriveMatch[1]!.toLowerCase();
+			candPath = candDriveMatch[2] ?? "/";
+		} else if (isPosixAbsolute) {
+			candPrefix = "";
+			candPath = normalizedCandidate;
+		} else {
+			continue;
+		}
+
+		let rootPrefix = "";
+		let rootPath = normRoot;
+		if (rootDriveMatch) {
+			rootPrefix = rootDriveMatch[1]!.toLowerCase();
+			rootPath = rootDriveMatch[2] ?? "/";
+		} else if (normRoot.startsWith("/")) {
+			rootPrefix = "";
+			rootPath = normRoot;
+		} else {
+			const resolvedRoot = resolve(normRoot).replace(/\\/g, "/");
+			const resDrive = resolvedRoot.match(/^([A-Za-z]:)(\/.*)?$/);
+			if (resDrive) {
+				rootPrefix = resDrive[1]!.toLowerCase();
+				rootPath = resDrive[2] ?? "/";
+			} else {
+				rootPrefix = "";
+				rootPath = resolvedRoot;
+			}
+		}
+
+		if (candPrefix !== rootPrefix) continue;
+
+		const candSegments = candPath.split("/").filter((s) => s.length > 0 && s !== ".");
+		const collapsedCand: string[] = [];
+		for (const seg of candSegments) {
+			if (seg === "..") {
+				collapsedCand.pop();
+			} else {
+				collapsedCand.push(seg);
+			}
+		}
+		const collapsedCandPath = "/" + collapsedCand.join("/");
+
+		const rootSegments = rootPath.split("/").filter((s) => s.length > 0 && s !== ".");
+		if (rootSegments.length === 0) continue;
+
+		const collapsedRoot: string[] = [];
+		for (const seg of rootSegments) {
+			if (seg === "..") {
+				collapsedRoot.pop();
+			} else {
+				collapsedRoot.push(seg);
+			}
+		}
+		if (collapsedRoot.length === 0) continue;
+		const collapsedRootPath = "/" + collapsedRoot.join("/");
+
+		const prefixWithSlash = collapsedRootPath === "/" ? "/" : collapsedRootPath + "/";
+		const isMatch = rootDriveMatch
+			? collapsedCandPath.toLowerCase().startsWith(prefixWithSlash.toLowerCase())
+			: collapsedCandPath.startsWith(prefixWithSlash);
+
+		if (isMatch) {
+			const rel = collapsedCandPath.slice(prefixWithSlash.length);
+			if (rel.length > 0 && rel !== "." && !rel.startsWith("/")) {
+				try {
+					const realCandidate = realpathSync(candidate).replace(/\\/g, "/");
+					const realRoots = roots.map((r) => {
+						try { return realpathSync(r).replace(/\\/g, "/"); } catch { return r.replace(/\\/g, "/"); }
+					});
+					const escapes = !realRoots.some((r) => {
+						const rWithSlash = r.endsWith("/") ? r : r + "/";
+						return realCandidate.startsWith(rWithSlash) || realCandidate.toLowerCase().startsWith(rWithSlash.toLowerCase());
+					});
+					if (escapes) return undefined;
+				} catch {
+					// File does not exist yet (normal for planned edits)
+				}
+				return rel;
+			}
+		}
+	}
+
+	return undefined;
+}
+
+export function normalizeAllowedEditSurfacesInText(text: string, targetRoot: string): string {
+	let result = "";
+	let lastIndex = 0;
+
+	for (const match of text.matchAll(ALLOWED_EDIT_SURFACES_HEADING)) {
+		const matchIndex = match.index ?? 0;
+		result += text.slice(lastIndex, matchIndex + match[0].length);
+		const rest = text.slice(matchIndex + match[0].length);
+
+		const lineRegex = /([^\r\n]*)(\r?\n|$)/g;
+		let lineMatch: RegExpExecArray | null;
+		let sectionEndPos = 0;
+		let inSection = true;
+		const sectionParts: string[] = [];
+
+		while ((lineMatch = lineRegex.exec(rest)) !== null) {
+			if (lineMatch[0].length === 0) break;
+			const rawLine = lineMatch[1]!;
+			const lineEnding = lineMatch[2]!;
+
+			if (inSection && MARKDOWN_HEADING_LINE.test(rawLine)) {
+				inSection = false;
+				break;
+			}
+
+			if (inSection && rawLine.trim().length > 0) {
+				const indentMatch = rawLine.match(/^ {0,3}/);
+				const indent = indentMatch ? indentMatch[0] : "";
+				const afterIndent = rawLine.slice(indent.length);
+
+				const markerMatch = afterIndent.match(MARKDOWN_LIST_MARKER);
+				const marker = markerMatch ? markerMatch[0] : "";
+				const afterMarker = afterIndent.slice(marker.length);
+
+				const trimmedRight = afterMarker.replace(/ +$/g, "");
+				const trailingSpaces = afterMarker.slice(trimmedRight.length);
+				const backtickMatch = trimmedRight.match(/^`([^`]+)`$/);
+
+				if (backtickMatch) {
+					const normalized = tryNormalizeInRepoAbsolutePath(backtickMatch[1]!, targetRoot);
+					if (normalized !== undefined) {
+						sectionParts.push(`${indent}${marker}\`${normalized}\`${trailingSpaces}${lineEnding}`);
+						sectionEndPos += lineMatch[0].length;
+						continue;
+					}
+				} else if (!trimmedRight.includes("`")) {
+					const normalized = tryNormalizeInRepoAbsolutePath(trimmedRight, targetRoot);
+					if (normalized !== undefined) {
+						sectionParts.push(`${indent}${marker}${normalized}${trailingSpaces}${lineEnding}`);
+						sectionEndPos += lineMatch[0].length;
+						continue;
+					}
+				}
+				sectionParts.push(lineMatch[0]);
+			} else {
+				sectionParts.push(lineMatch[0]);
+			}
+			sectionEndPos += lineMatch[0].length;
+		}
+
+		result += sectionParts.join("");
+		lastIndex = matchIndex + match[0].length + sectionEndPos;
+	}
+
+	result += text.slice(lastIndex);
+	return result;
+}
+
+export function resolveTargetRepositoryRoot(input: Record<string, unknown>, fallbackRoot?: string): string {
+	if (typeof input.repository_root === "string" && input.repository_root.trim().length > 0) {
+		return input.repository_root.trim();
+	}
+	if (typeof input.workspace_root === "string" && input.workspace_root.trim().length > 0) {
+		return input.workspace_root.trim();
+	}
+	return fallbackRoot ?? process.cwd();
+}
+
+export function normalizeWriterEditSurfaces(input: Record<string, unknown>, defaultRoot?: string): void {
+	const targetRoot = resolveTargetRepositoryRoot(input, defaultRoot);
+	if (typeof input.task === "string") {
+		input.task = normalizeAllowedEditSurfacesInText(input.task, targetRoot);
+	}
+	if (typeof input.context === "string") {
+		input.context = normalizeAllowedEditSurfacesInText(input.context, targetRoot);
+	}
+}
+
 // This is the same canonical parser used by both the tool hook and executor.
 // Prose cannot close the section, and repeated sections must agree exactly.
 // A rejection carries the concrete problem so the caller repairs only the
@@ -70,10 +267,11 @@ export function allowedEditSurfaces(...values: unknown[]): string[] | undefined 
 	return "paths" in parsed ? parsed.paths : undefined;
 }
 
-export function rejectUnscopedBoundedWriterDispatch(input: unknown): { block: true; reason: string } | undefined {
+export function rejectUnscopedBoundedWriterDispatch(input: unknown, defaultRoot?: string): { block: true; reason: string } | undefined {
 	if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
 	const record = input as Record<string, unknown>;
 	if (typeof record.agent !== "string" || !WRITER_NAMES.includes(record.agent)) return undefined;
+	normalizeWriterEditSurfaces(record, defaultRoot);
 	const parsed = parseAllowedEditSurfaces([record.task, record.context]);
 	if ("paths" in parsed) return undefined;
 	return { block: true, reason: `${WRITER_EDIT_SURFACE_REJECTION} ${parsed.problem} Resend the same task text unchanged except for that section; never shorten or re-summarize it.` };

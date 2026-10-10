@@ -3,7 +3,7 @@ import { pruneContextMessages } from "../lib/context-pruning.ts";
 import { recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
-import { allowedEditSurfaces, allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, prepareBoundSessionRepository, rejectUnscopedBoundedWriterDispatch, safeBootstrapDirectory, sourcePathWithinProject } from "../lib/bounded-writer-admission.ts";
+import { allowedEditSurfaces, allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, normalizeAllowedEditSurfacesInText, normalizeWriterEditSurfaces, prepareBoundSessionRepository, rejectUnscopedBoundedWriterDispatch, resolveTargetRepositoryRoot, safeBootstrapDirectory, sourcePathWithinProject, tryNormalizeInRepoAbsolutePath } from "../lib/bounded-writer-admission.ts";
 import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProfiles, recordReviewMutation, type ReceiptSession } from "../lib/review-reminder-receipt.ts";
 import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
 import { StatusTimingDiagnostics } from "../lib/status-timing-diagnostics.ts";
@@ -774,8 +774,9 @@ function hasCanonicalJudgmentDayFixActivation(...values: unknown[]): boolean {
 const JUDGMENT_DAY_FIX_DISPATCH_REJECTION =
 	"Judgment Day fix dispatch requires exactly one `agent: \"jd-fix-agent\"`, one exact `## Judgment Day activation` section containing only `User explicitly requested Judgment Day.`, one non-empty unique canonical `## Exact authorized severe IDs` section, one exact `## Judgment Day correction batch` section with `Round: 1 of 2.` or `Round: 2 of 2.` and the matching canonical lowercase SHA-256 of one exact `## Exact frozen finding rows` section whose BLOCKER/CRITICAL open Judgment Day rows equal the authorized IDs in the same order, and the existing exact `## Allowed edit surfaces` guard. The parent must provide the canonical bounded dispatch; do not infer activation, authorization, or frozen findings.";
 
-function rejectInvalidJudgmentDayFixDispatch(input: unknown): { block: true; reason: string } | undefined {
+function rejectInvalidJudgmentDayFixDispatch(input: unknown, defaultRoot?: string): { block: true; reason: string } | undefined {
 	if (!isRecord(input) || !hasJudgmentDayFixAgentReference(input)) return undefined;
+	normalizeWriterEditSurfaces(input, defaultRoot);
 	if (
 		input.agent === JUDGMENT_DAY_FIX_AGENT_NAME &&
 		!("agents" in input) &&
@@ -2930,10 +2931,14 @@ export async function applySavedModelConfig(
 	if (result.status === "invalid") {
 		return { updated: 0, skipped: 0, invalidPath: result.path };
 	}
-	return applyConfig(
-		ctx.cwd,
-		result.status === "valid" ? result.config : {},
+	// Startup/reload has no deletion approval. Persisted inherit entries are
+	// not instructions to erase routing, even if an agent is no longer present.
+	// Explicit panel saves and confirmed profile replacement still apply clears.
+	const config = result.status === "valid" ? result.config : {};
+	const activationConfig = Object.fromEntries(
+		Object.entries(config).filter(([, entry]) => !isClearRoutingEntry(entry)),
 	);
+	return applyConfig(ctx.cwd, activationConfig);
 }
 
 function describeModelConfig(cwd: string, config: AgentModelConfig): string[] {
@@ -9507,6 +9512,10 @@ export const __testing = {
 	getPiModelOptions,
 	MODEL_CONTROL_OPTIONS,
 	switchLiveOrchestrator,
+	tryNormalizeInRepoAbsolutePath,
+	normalizeAllowedEditSurfacesInText,
+	normalizeWriterEditSurfaces,
+	resolveTargetRepositoryRoot,
 };
 
 export interface GentleAiRuntimeDependencies {
@@ -10257,9 +10266,9 @@ function createGentleAiExtensionForTesting(
 			}
 		}
 		if (event.toolName === "subagent_run") {
-			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input);
+			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input, ctx.cwd);
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
-			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input);
+			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input, ctx.cwd);
 			if (writerScopeDenied) return writerScopeDenied;
 			const writerConsentDenied = await confirmBoundedWriterDispatch(event.input, ctx);
 			if (writerConsentDenied) return writerConsentDenied;
@@ -10294,13 +10303,6 @@ function createGentleAiExtensionForTesting(
 		if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") {
 			const childDenied = blockChildDestructiveCommand(command);
 			if (childDenied) return childDenied;
-		}
-		const trimmedBashCommand = command.trim();
-		if (/^sleep(?:\s+\d+(?:\.\d+)?|\s*);?$/i.test(trimmedBashCommand)) {
-			return {
-				block: true,
-				reason: "Gentle AI safety policy: do not run sleep in bash to wait for background tasks. End your turn now; background subagent results are delivered automatically via session message when settled.",
-			};
 		}
 		return await confirmCommand(command, ctx, pi.events, herdrLifecycle, yoloActive);
 	});
