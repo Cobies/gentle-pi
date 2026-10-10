@@ -72,7 +72,8 @@ export const actionDescriptions = Object.freeze({
 	"acquire-go": "Download the installer's pinned Go from go.dev and verify it, only to build Gentle AI.",
 	"verify-go": "Check that the downloaded Go runs and reports the pinned version.",
 	"install-pi": "Install the Pi coding agent globally with pnpm.",
-	"install-shell": "Install Gentle Shell (gentle-pi) globally with pnpm.",
+	"install-shell": `Install Gentle Shell (gentle-pi) globally with pnpm. pnpm may put a newer Pi than ${PI_INSTALL_VERSION} next to it ` +
+		`(at least Pi ${requirements.pi}), and Gentle Shell runs that Pi.`,
 	"provision-native": "Provision the package-native Gentle AI binary with the existing installer.",
 	"setup-shell": "Run the normal `gentle-shell setup`.",
 	"verify-readiness": "Verify that the installed stack is ready.",
@@ -378,7 +379,8 @@ function planView(planId, { inventory, plan }) {
 	const changesProfile = ids.includes("setup-global-bin") || (privateHome !== null && inventory?.globalBin?.onPath !== true);
 	let tools = [];
 	const alongside = alongsideNotes(plan);
-	if (ids.includes("persist-node")) tools = ["node", "npm", "pnpm"];
+	// A persistent pnpm next to a bootstrap-only Node is kept (persist-npm), never replaced.
+	if (ids.includes("persist-node")) tools = ids.includes("persist-npm") ? ["node", "npm"] : ["node", "npm", "pnpm"];
 	else if (ids.includes("persist-package-managers")) tools = ["npm", "pnpm"];
 	else if (ids.includes("persist-npm")) tools = ["npm"];
 	else if (ids.includes("persist-pnpm")) tools = ["pnpm"];
@@ -431,6 +433,10 @@ function outcomeView(result) {
 		}
 	} else {
 		view.guidance = guidance.outcomes[result.outcome];
+		// The Pi Gentle Shell runs, when pnpm put one other than the installer's next to it.
+		if (typeof result.piVersion === "string" && STABLE.test(result.piVersion) && result.piVersion.replace(/^v/, "") !== PI_INSTALL_VERSION) {
+			view.guidance += ` Gentle Shell runs Pi ${result.piVersion.replace(/^v/, "")}, which pnpm installed next to it.`;
+		}
 		if (result.action === "open-new-terminal") view.action = "open-new-terminal";
 		if (["configured", "unchanged"].includes(result.npmPrefix)) view.npmPrefix = result.npmPrefix;
 	}

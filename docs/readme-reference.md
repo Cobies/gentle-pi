@@ -397,6 +397,11 @@ package.
   package manager that owns this installation (`pnpm add -g … --allow-build=gentle-pi`
   under PNPM_HOME, otherwise `npm install -g …`). Already current: it says so and
   changes nothing.
+- **Pi with pnpm**: pnpm 11 installs each global add as its own group, and it may
+  give `gentle-pi` a newer Pi as an adjacent peer than the one the installer
+  pins; Gentle Shell runs that adjacent Pi when it meets the minimum. Pi and
+  Gentle Shell stay in separate groups, so Pi's own `pi update` never removes
+  Gentle Shell.
 - **main**: builds Gentle AI from the latest `main` commit with Go and installs
   Gentle Shell packed from the latest `main` commit (`<version>-main.<sha12>`),
   rebuilding only what moved since the recorded commits. The Gentle AI build is
