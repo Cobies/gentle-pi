@@ -179,6 +179,14 @@ export function hostAdapters({ maxOutputBytes = 1024 * 1024, maxTextBytes = 1024
 			return readFile(path, "utf8");
 		},
 		writable: (path) => access(path, constants.W_OK).then(() => true, () => false),
+		// A symbolic link, or on Windows a junction (libuv's lstat reports both as links).
+		// A missing entry is no link; any other error throws.
+		isLink: async (path) => {
+			const result = await info(path, false);
+			if (!(result instanceof Error)) return result.isSymbolicLink();
+			if (["ENOENT", "ENOTDIR"].includes(result.code)) return false;
+			throw result;
+		},
 	};
 	return { run, fs };
 }
@@ -299,20 +307,27 @@ export function createProbes({ platform, env, run, fs, home, verifyGentleAi = pa
 		}
 		return null;
 	};
-	/** Where `file` really is (realpath) and, for every link on its path, the real
-	 * folder that holds that link: whoever can change that folder can retarget the
-	 * link. Null when the real location cannot be read.
+	/** Where `file` really is (realpath) and, for every link on its path (lstat:
+	 * a symbolic link or junction), the real folder that holds that link: whoever
+	 * can change that folder can retarget the link. A realpath that merely spells a
+	 * component differently, such as an 8.3 short name (RUNNER~1), is no link.
+	 * Null when the real location, or whether a component is a link, cannot be read.
 	 */
 	const canonicalFiles = async (file) => {
-		const chain = [file];
-		while (path.dirname(chain.at(-1)) !== chain.at(-1)) chain.push(path.dirname(chain.at(-1)));
-		const real = await Promise.all(chain.map((entry) => fs.realpath(entry).catch(() => null)));
-		if (real[0] === null) return null;
-		const result = [real[0]];
-		for (let index = 0; index < chain.length - 1; index += 1) {
-			const [own, parent] = [real[index], real[index + 1]];
-			if (own === null || parent === null) continue;
-			if (!samePath(own, path.join(parent, path.basename(chain[index])), platform)) result.push(parent);
+		const real = await fs.realpath(file).catch(() => null);
+		if (real === null) return null;
+		const result = [real];
+		for (let current = file; path.dirname(current) !== current; current = path.dirname(current)) {
+			let link;
+			try {
+				link = (await fs.isLink?.(current)) === true;
+			} catch {
+				return null;
+			}
+			if (!link) continue;
+			const holder = await fs.realpath(path.dirname(current)).catch(() => null);
+			if (holder === null) return null;
+			if (!result.some((entry) => samePath(entry, holder, platform))) result.push(holder);
 		}
 		return result;
 	};
@@ -339,9 +354,11 @@ export function createProbes({ platform, env, run, fs, home, verifyGentleAi = pa
 		 * storageMany launch where they really are (canonicalFiles): links such as
 		 * pnpm's global `node_modules\<pkg>` junction or a `pnpm runtime` node.exe are
 		 * followed, never reported, and the folder holding each link is walked too.
-		 * { node?, npm?, go?, pi?, shell? }: per tool the first concrete finding, else
-		 * the first path that could not be checked ({ check: "unchecked", at }); null
-		 * when nothing fails or the walk cannot finish.
+		 * A real location that is not on a local drive (a mapped network drive, or a
+		 * link to a UNC share) is never walked: it could not be checked, for its tool
+		 * only. { node?, npm?, go?, pi?, shell? }: per tool the first concrete finding,
+		 * else the first path that could not be checked ({ check: "unchecked", at });
+		 * null when nothing fails or the walk cannot finish.
 		 */
 		async folders() {
 			if (!storageMany) return null;
@@ -350,11 +367,12 @@ export function createProbes({ platform, env, run, fs, home, verifyGentleAi = pa
 			for (const [tool, command] of [["node", "node"], ["npm", "npm"], ["go", "go"], ["pi", "pi"], ["shell", "gentle-shell"]]) {
 				const found = await lookPath(command, user, platform, fs);
 				if (!found) continue;
-				const runs = await invocation(found).catch(() => null);
+				const runs = await Promise.resolve().then(() => invocation(found)).catch(() => null);
 				files[tool] = [];
 				for (const file of [found, ...(runs ? [runs.command, ...runs.prefix] : [])]) {
 					const canonical = await canonicalFiles(file);
 					if (canonical === null) unchecked.set(file.toLowerCase(), { check: "unchecked", at: file });
+					for (const real of canonical ?? []) if (!/^[A-Za-z]:\\/.test(real)) unchecked.set(real.toLowerCase(), { check: "unchecked", at: real });
 					files[tool].push(...(canonical ?? [file]));
 				}
 			}

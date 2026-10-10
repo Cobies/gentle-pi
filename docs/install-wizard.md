@@ -1372,9 +1372,16 @@ discloses the rest as a notice (below).
 Before consent the wizard walks every reused tool's command and what it runs:
 `node`, `npm`, `go`, `pi` and `gentle-shell` as the user's PATH resolves them,
 plus the Node and JS entry of a known shim. Each file is walked where it really
-is (its realpath), and for every link on its path the real folder that holds
-the link is walked too, since whoever can change that folder can retarget the
-link. pnpm's own links, the global `global\v11\<hash>\node_modules\<pkg>`
+is (its realpath), and for every link on its path (a symbolic link or a
+junction, as `lstat` reports it) the real folder that holds the link is walked
+too, since whoever can change that folder can retarget the link. A component
+whose realpath is merely spelled differently, such as an 8.3 short name
+(`C:\Users\RUNNER~1`), is not a link: walking `C:\Users` as a link holder would
+hold `C:\` to the strict parent mask, which Windows' default
+CreateDirectories (`0x4`) for Authenticated Users fails. A real location that
+is not on a local drive (a mapped network drive, or a link to a UNC share) is
+never sent to PowerShell: it is "could not be checked" for that tool only, and
+the rest is walked as usual. pnpm's own links, the global `global\v11\<hash>\node_modules\<pkg>`
 junction into the store and a `pnpm runtime` `node.exe`, are therefore never a
 finding, while a weak ACL on the folders they lead to, or on the folder holding
 them, still is. A file whose real location cannot be read is reported as

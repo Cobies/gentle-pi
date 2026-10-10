@@ -383,11 +383,16 @@ function sharedFoldersView(plan) {
 	const reused = Array.isArray(plan.tools?.folders?.reused) ? plan.tools.folders.reused.filter((entry) => Object.hasOwn(folderTools, entry?.tool)) : [];
 	if (reused.length === 0) return null;
 	const found = reused.map((entry) => `${folderTools[entry.tool]}: ${findingText(entry)}`).join("; ");
+	const unchecked = reused.some((entry) => entry.check === "unchecked");
+	const weak = reused.some((entry) => entry.check !== "unchecked");
+	const where = [weak ? "from folders another account can change" : null, unchecked ? "from folders whose permissions could not be checked" : null].filter(Boolean).join(", or ");
+	const remedies = [weak ? "remove that account's write access" : null,
+		unchecked ? "make sure your account can read the permissions of the paths that could not be checked, on a local drive" : null].filter(Boolean).join(", and ");
 	return {
 		tools: reused.map((entry) => entry.tool),
-		description: `These tools are reused as they are, from folders another account can change or whose permissions could not be checked. ${found}. ` +
+		description: `These tools are reused as they are, ${where}. ${found}. ` +
 			"The installer never creates or runs its own programs there, but whoever can change those folders can change what these tools run for you, including for Gentle Shell. " +
-			"This is an accepted risk and not a blocker. To remove it, remove that account's write access, then select Check again.",
+			`This is an accepted risk and not a blocker. To remove it, ${remedies}, then select Check again.`,
 	};
 }
 

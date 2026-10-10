@@ -7,6 +7,7 @@ import { gentleAiBinaryPath } from "../runtime/gentle-ai-binary.mjs";
 import { collectInventory, planPreflight, requirements } from "../scripts/installer-preflight.mjs";
 import { bootstrapRoots, createProbes, hostAdapters, userEnvironment } from "../scripts/installer-probes.mjs";
 import { PI_INSTALL_VERSION } from "../scripts/installer-runner.mjs";
+import { verifyWindowsStorageMany } from "../scripts/installer-windows.mjs";
 
 const HOME = "/home/u";
 const PNPM_HOME = "/home/u/.local/share/pnpm";
@@ -495,6 +496,7 @@ function pnpmLayout({ weak = [] as string[], unreadable = [] as string[] } = {})
 		storageMany: (list: string[]) => { launches.push(list); return list.map(walk); },
 		fs: { isFile: async (path: string) => [`${W_PNPM_BIN}\\pi.cmd`, `${W_PNPM_BIN}\\node.exe`, entry].includes(path),
 			isDirectory: async () => false, exists: async () => false, writable: async () => false,
+			isLink: async (path: string) => [lower(W_JUNCTION), lower(`${W_PNPM_BIN}\\node.exe`)].includes(lower(path)),
 			realpath: async (path: string) => {
 				if (unreadable.includes(path)) throw new Error("EACCES");
 				if (lower(path) === lower(`${W_PNPM_BIN}\\node.exe`)) return W_RUNTIME_NODE;
@@ -518,6 +520,60 @@ test("Windows: pnpm's own global and runtime links are walked where they lead, s
 	// A file whose real location cannot be read could not be checked.
 	const hidden = pnpmLayout({ unreadable: [`${W_JUNCTION}\\dist\\cli.js`] });
 	assert.deepEqual(await hidden.instance.folders(), { pi: { check: "unchecked", at: hidden.entry } });
+});
+
+// CI on Windows: the runner's %TEMP% is C:\Users\RUNNER~1\..., and realpath gives the
+// long name. An 8.3 alias is not a link: only lstat says what a link is, so no
+// folder is walked as a link holder because of it (C:\Users would put C:\ at depth 1).
+test("Windows: an 8.3 short-name alias is not a link, so no extra folder is walked", async () => {
+	const short = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\fixture";
+	const long = "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\fixture";
+	const goExe = `${short}\\linked-go\\go.exe`;
+	const realGo = `${long}\\store\\go\\go.exe`;
+	const launches: string[][] = [];
+	const lower = (path: string) => path.toLowerCase();
+	const layout = (links: string[]) => createProbes({ platform: "win32", env: { Path: `${short}\\linked-go`, PATHEXT: ".EXE" }, run: async () => ({ code: 1 }), storage: () => {},
+		storageMany: (list: string[]) => { launches.push(list); return list.map(() => null); },
+		fs: { isFile: async (path: string) => path === goExe, isDirectory: async () => false, exists: async () => false, writable: async () => false, readText: async () => "",
+			isLink: async (path: string) => links.map(lower).includes(lower(path)),
+			realpath: async (path: string) => {
+				const expanded = path.replace(/^C:\\Users\\RUNNER~1/i, "C:\\Users\\runneradmin");
+				return expanded.replace(/\\linked-go(?=\\|$)/i, "\\store\\go");
+			} } });
+	// The tests' layout: only `linked-go` is a junction; RUNNER~1 is a short name.
+	assert.equal(await layout([`${short}\\linked-go`]).folders(), null);
+	assert.deepEqual(launches.at(-1), [realGo, long], "the real file and the real folder holding the junction, never C:\\Users");
+	// Without any link, only the real file is walked.
+	await layout([]).folders();
+	assert.deepEqual(launches.at(-1), [realGo]);
+});
+
+// B3: a real location that is not on a local drive (a mapped network drive, or a
+// symlink to a UNC share) is never sent to PowerShell: that tool could not be
+// checked, and the rest of the batch is still walked in its one launch.
+test("Windows: a tool whose real location is a network share is unchecked, and other tools are still walked", async () => {
+	const node = "Z:\\node\\node.exe";
+	const piCmd = `${W_APPDATA_NPM}\\pi.cmd`;
+	const entry = `${W_NPM_ROOT}\\@earendil-works\\pi-coding-agent\\dist\\cli.js`;
+	const env = { SystemRoot: "C:\\Windows", Path: `Z:\\node;${W_APPDATA_NPM}`, PATHEXT: ".COM;.EXE;.BAT;.CMD" };
+	const launches: string[][] = [];
+	// The production parser, with PowerShell answering per path: the weak %APPDATA%\npm fails.
+	const processAdapter = (_command: string, _args: string[], childEnv: Record<string, string>) => {
+		const paths = childEnv.GENTLE_WINDOWS_CHECKS.split("|");
+		launches.push(paths);
+		return paths.map((path) => (path.startsWith(W_APPDATA_NPM) ? "unsafe:parent-acl-mask" : "safe")).join("\r\n");
+	};
+	const share = (path: string) => path.replace(/^Z:/i, "\\\\srv\\share");
+	const instance = createProbes({ platform: "win32", env, run: async () => ({ code: 1 }), storage: () => {},
+		storageMany: (files: string[]) => verifyWindowsStorageMany(files, env, { processAdapter, platform: "win32" }),
+		fs: { isFile: async (path: string) => [node, piCmd, entry].includes(path), isDirectory: async () => false, exists: async () => false, writable: async () => false,
+			realpath: async (path: string) => share(path),
+			readText: async (path: string) => (path === piCmd ? cmdShim("node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js") : Promise.reject(new Error("ENOENT"))) } });
+	assert.deepEqual(await instance.folders(), { node: { check: "unchecked", at: share(node) }, pi: { check: "parent-acl-mask" } },
+		"the share is unchecked for Node only; Pi's weak folder is still reported");
+	assert.equal(launches.length, 1, "one launch");
+	assert.deepEqual(launches[0], [piCmd, entry]);
+	assert.equal(launches[0].some((path) => !/^[A-Za-z]:\\/.test(path)), false, "no network path reaches PowerShell");
 });
 
 // A1: a path the walk could not check (an owner denying READ_CONTROL, for example)
@@ -886,6 +942,7 @@ test("host fs adapter is read-only and bounded", async () => {
 		assert.equal(await fs.exists(join(dir, "dangling")), true);
 		assert.equal(await fs.isDirectory(join(dir, "dangling")), false);
 		assert.equal(await fs.exists(join(dir, "nope")), false);
+		assert.deepEqual([await fs.isLink(join(dir, "dangling")), await fs.isLink(file), await fs.isLink(dir), await fs.isLink(join(dir, "nope"))], [true, false, false, false]);
 		assert.equal(await fs.readText(file), "hello");
 		await assert.rejects(fs.readText(join(dir, "large.txt")));
 		assert.equal(await fs.writable(dir), true);

@@ -1258,7 +1258,11 @@ test("/api/plan notes reused tools in folders another account can change, withou
 	// A1: a path the walk could not check says so, and still does not block.
 	const unchecked = await windowsView({ available: true, path: W_DEFAULT, source: "default" }, { ...reused, folders: { node: { check: "unchecked", at: "C:\\nodejs\\node.exe" } } });
 	assert.deepEqual(unchecked.blockers, []);
-	names(unchecked.sharedFolders.description, ["Node.js: the permissions of C:\\nodejs\\node.exe could not be checked", "could not be checked", "not a blocker"]);
+	names(unchecked.sharedFolders.description, ["Node.js: the permissions of C:\\nodejs\\node.exe could not be checked", "could not be checked", "not a blocker",
+		"make sure your account can read the permissions of the paths that could not be checked"]);
+	assert.doesNotMatch(unchecked.sharedFolders.description, /write access/, "nothing says an account can write there");
+	assert.match(view.sharedFolders.description, /remove that account's write access/);
+	assert.doesNotMatch(view.sharedFolders.description, /could not be checked/);
 	// Nothing to note: no record.
 	assert.equal((await windowsView({ available: true, path: W_DEFAULT, source: "default" }, reused)).sharedFolders, null);
 });
