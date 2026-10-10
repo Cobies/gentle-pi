@@ -89,6 +89,9 @@ const probeNames = ["node", "pnpm", "pi", "shell", "gentleAi", "go", "globalBin"
  * On Windows the wizard passes pnpmHome, its PNPM_HOME decision (windowsPnpmHome),
  * which the inventory keeps. A blocked decision runs no probe at all: the user's
  * tools would otherwise run with that PNPM_HOME's bin first on PATH.
+ * On Windows a `folders` probe runs last: { node?, npm?, go?, pi?, shell? }, what
+ * the walk found on the folders those tools run from (S6 notice). It is kept as
+ * `folders` only when it names something; a failed walk is simply no record.
  */
 export async function collectInventory({ platform, arch, probes = {}, pnpmHome }) {
 	const inventory = { platform, arch, ...(pnpmHome === undefined || pnpmHome === null ? {} : { pnpmHome }) };
@@ -100,6 +103,10 @@ export async function collectInventory({ platform, arch, probes = {}, pnpmHome }
 			// Do not retain probe errors: they can contain private paths or credentials.
 			inventory[name] = { available: null };
 		}
+	}
+	if (platform === "win32" && probes.folders) {
+		const folders = await Promise.resolve().then(() => probes.folders()).catch(() => null);
+		if (plainRecord(folders) && !("available" in folders) && Object.keys(folders).length > 0) inventory.folders = folders;
 	}
 	return inventory;
 }
@@ -255,6 +262,22 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 		const finding = Object.fromEntries(["check", "at", "sid", "account", "rights"]
 			.filter((key) => typeof home.rejected[key] === "string").map((key) => [key, home.rejected[key]]));
 		tools.pnpmHome = { status: "private", path: home.path, default: home.rejected.path, finding };
+	}
+	// Windows only (S6 notice, never a blocker): reused tools whose folders another
+	// account can change, from the inventory's one `folders` walk. Only tools this
+	// plan uses as they are: the user's Node and its npm, a Go a build reuses, a Pi
+	// kept as it is, and an npm-owned Gentle Shell that is kept or updated by npm.
+	const folders = platform === "win32" && plainRecord(inventory.folders) ? inventory.folders : null;
+	if (folders) {
+		const userNode = tools.node.status === "reusable" && tools.node.found === undefined && inventory.node?.persistent === true;
+		const used = { node: userNode, npm: userNode && inventory.node?.npm === true, go: tools.go.status === "reusable", pi: tools.pi.status === "reusable",
+			shell: inventory.shell?.owner === "npm" && ["reusable", "needs-update"].includes(tools.shell.status) };
+		// A walk rejection, or a path the walk could not check; nothing else.
+		const known = /^(?:(?:target|parent|ancestor)-(?:reparse|owner|acl-mask)|unchecked)$/;
+		const reused = Object.keys(used).filter((tool) => used[tool] && plainRecord(folders[tool]) && known.test(String(folders[tool].check)))
+			.map((tool) => ({ tool, ...Object.fromEntries(["check", "at", "sid", "account", "rights"]
+				.filter((key) => typeof folders[tool][key] === "string").map((key) => [key, folders[tool][key]])) }));
+		if (reused.length > 0) tools.folders = { status: "notice", reused };
 	}
 	const missingShell = tools.shell.status === "unavailable";
 	// Setup recovery: the setup probe proved the pinned stack this pnpm installed

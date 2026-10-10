@@ -7,6 +7,7 @@ import { gentleAiBinaryPath } from "../runtime/gentle-ai-binary.mjs";
 import { collectInventory, planPreflight, requirements } from "../scripts/installer-preflight.mjs";
 import { bootstrapRoots, createProbes, hostAdapters, userEnvironment } from "../scripts/installer-probes.mjs";
 import { PI_INSTALL_VERSION } from "../scripts/installer-runner.mjs";
+import { verifyWindowsStorageMany } from "../scripts/installer-windows.mjs";
 
 const HOME = "/home/u";
 const PNPM_HOME = "/home/u/.local/share/pnpm";
@@ -383,6 +384,216 @@ test("Windows: a user's pnpm in $PNPM_HOME\\bin is run through its shim for the 
 	assert.deepEqual(h.calls.find((call) => call.command === exe)?.cwd, "C:\\");
 });
 
+// S8: an npm-owned Gentle Shell on Windows is found through what its shim runs, so the
+// wizard can update it with npm (run through npm.cmd's own invocation, never the .cmd).
+test("Windows: a Gentle Shell installed by npm is followed through its shim and attributed to npm", async () => {
+	const shellCmd = `${W_APPDATA_NPM}\\gentle-shell.cmd`;
+	const shellRoot = `${W_NPM_ROOT}\\gentle-pi`;
+	const shellEntry = `${shellRoot}\\bin\\gentle-shell.mjs`;
+	const layout = (root = W_NPM_ROOT) => probes({ platform: "win32",
+		env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: `${W_TOOLS}\\node;${W_APPDATA_NPM};${W_NODE_DIR}`, PATHEXT: ".COM;.EXE;.BAT;.CMD",
+			GENTLE_BOOTSTRAP_TOOLS: W_TOOLS, GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+		files: [shellCmd, shellEntry, W_NODE, `${W_NODE_DIR}\\npm.cmd`, W_NPM_CLI], dirs: [W_NPM_ROOT, root],
+		texts: { [shellCmd]: cmdShim("node_modules\\gentle-pi\\bin\\gentle-shell.mjs"), [`${W_NODE_DIR}\\npm.cmd`]: nodeNpmCmd,
+			[`${shellRoot}\\package.json`]: JSON.stringify({ name: "gentle-pi", version: "0.9.0" }) },
+		results: { [`${W_TOOLS_NODE} ${W_TOOLS_ENTRY} ${LIST}`]: { code: 0, stdout: "[]" }, [`${W_NODE} ${W_NPM_CLI} root -g`]: { code: 0, stdout: `${root}\r\n` } } });
+	const npm = layout();
+	assert.deepEqual(await npm.probes.shell(), { available: true, version: "0.9.0", usable: true, global: true, owner: "npm" });
+	assert.deepEqual(await npm.probes.locateShell(), { root: shellRoot, version: "0.9.0", owner: "npm" });
+	assert.equal(npm.calls.some((call) => /\.cmd$/i.test(call.command)), false, "no shim is ever spawned");
+	// npm's global root elsewhere: not npm's, so it stays unknown and is never updated.
+	const elsewhere = layout("C:\\Other\\node_modules");
+	assert.deepEqual(await elsewhere.probes.shell(), { available: null, outsidePnpm: true });
+	assert.deepEqual(await elsewhere.probes.locateShell(), { root: shellRoot, version: "0.9.0", owner: null });
+});
+
+// S7: one that fails the walk (a reparse point, a folder another account can change)
+// never runs and is never replaced: the bootstrap's verified pnpm runs the installer.
+test("Windows: a user's pnpm in $PNPM_HOME\\bin that fails the walk is not run, not blocked and never replaced", async () => {
+	const bin = `${W_LOCAL}\\pnpm\\bin`;
+	const exe = `${W_LOCAL}\\pnpm\\global\\v11\\5f1a\\node_modules\\@pnpm\\exe\\pnpm.exe`;
+	const walked: string[] = [];
+	const h = probes({ platform: "win32", storage: (file) => {
+		walked.push(file);
+		if (file === exe) throw Object.assign(new Error("Windows ACL evidence rejected"), { check: "target-reparse" });
+	}, env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: `${bin};${W_NODE_DIR}`, GENTLE_BOOTSTRAP_TOOLS: W_TOOLS,
+		GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+	files: [`${bin}\\pnpm.cmd`, exe],
+	texts: { [`${bin}\\pnpm.cmd`]: "@SETLOCAL\r\n@\"%~dp0\\..\\global\\v11\\5f1a\\node_modules\\@pnpm\\exe\\pnpm.exe\"   %*\r\n" },
+	results: { [`${W_TOOLS_NODE} ${W_TOOLS_ENTRY} --version`]: { code: 0, stdout: "11.1.1\r\n" }, [`${exe} --version`]: { code: 0, stdout: "11.0.5\r\n" } } });
+	const pnpm = await h.probes.pnpm();
+	assert.deepEqual(pnpm, { available: true, version: "11.1.1", usable: true, compatible: true, persistent: true, inGlobalBin: true, untrusted: true });
+	assert.equal(h.calls.some((call) => call.command === exe), false, "the user's pnpm never runs");
+	assert.deepEqual(walked, [`${bin}\\pnpm.cmd`, exe]);
+	// The plan reuses the bootstrap's pnpm and persists nothing over the user's.
+	const plan = planPreflight({ platform: "win32", arch: "x64", node: { available: true, version: "24.18.0", usable: true, persistent: true, npm: true }, pnpm,
+		pi: { available: false }, shell: { available: false }, gentleAi: { available: false }, go: { available: true, version: "1.26.0", usable: true },
+		globalBin: { available: true, path: bin, writable: true, onPath: true }, setup: false });
+	assert.deepEqual(plan.blockers, []);
+	assert.equal(plan.tools.pnpm.status, "reusable");
+	assert.equal(plan.actions.some((action: { id: string }) => action.id.startsWith("persist-")), false);
+	// A shim no structure resolves there is still unknown, as before.
+	const unresolved = probes({ platform: "win32", env: { LOCALAPPDATA: W_LOCAL, Path: bin, GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY,
+		GENTLE_BOOTSTRAP_TOOLS: W_TOOLS }, files: [`${bin}\\pnpm.cmd`], texts: { [`${bin}\\pnpm.cmd`]: "@echo off\r\nvolta run %~n0 %*\r\n" },
+	results: { [`${W_TOOLS_NODE} ${W_TOOLS_ENTRY} --version`]: { code: 0, stdout: "11.1.1\r\n" } } });
+	assert.deepEqual(await unresolved.probes.pnpm(), { available: null, inGlobalBin: true });
+});
+
+// S6 notice: every reused tool's command, and what it runs, walked in one launch.
+test("Windows: the folders probe walks every tool found on the user's PATH in one launch and reports only what fails", async () => {
+	const goExe = "C:\\Program Files\\Go\\bin\\go.exe";
+	const shellCmd = `${W_APPDATA_NPM}\\gentle-shell.cmd`;
+	const shellEntry = `${W_NPM_ROOT}\\gentle-pi\\bin\\gentle-shell.mjs`;
+	const launches: string[][] = [];
+	const weak = { check: "parent-acl-mask", at: W_APPDATA_NPM, sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" };
+	const layout = (storageMany: (paths: string[]) => unknown) => createProbes({ platform: "win32", env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: `${W_TOOLS}\\node;${W_APPDATA_NPM};${W_NODE_DIR};C:\\Program Files\\Go\\bin`,
+			PATHEXT: ".COM;.EXE;.BAT;.CMD", GENTLE_BOOTSTRAP_TOOLS: W_TOOLS, GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+		run: async () => ({ code: 1, signal: null, timedOut: false, stdout: "" }), storage: () => {}, storageMany,
+		fs: { isFile: async (path: string) => [`${W_APPDATA_NPM}\\pi.cmd`, W_PI_ENTRY, W_NODE, `${W_NODE_DIR}\\npm.cmd`, W_NPM_CLI, goExe, shellCmd, shellEntry].includes(path),
+			isDirectory: async () => false, exists: async () => false, realpath: async (path: string) => path, writable: async () => false,
+			readText: async (path: string) => ({ [`${W_APPDATA_NPM}\\pi.cmd`]: cmdShim("node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js"),
+				[`${W_NODE_DIR}\\npm.cmd`]: nodeNpmCmd, [shellCmd]: cmdShim("node_modules\\gentle-pi\\bin\\gentle-shell.mjs") } as Record<string, string>)[path] ?? Promise.reject(new Error("ENOENT")) } });
+	const paths = [W_NODE, `${W_NODE_DIR}\\npm.cmd`, W_NPM_CLI, goExe, `${W_APPDATA_NPM}\\pi.cmd`, W_PI_ENTRY, shellCmd, shellEntry];
+	const probesWith = layout((list) => { launches.push(list); return list.map((path) => (path.startsWith(W_APPDATA_NPM) ? weak : null)); });
+	assert.deepEqual(await probesWith.folders(), { pi: weak, shell: weak });
+	assert.deepEqual(launches, [paths], "one launch, each path once, never a bootstrap tool");
+	// Nothing weak, a policy denial or a walk that cannot finish: no notice, never a blocker.
+	assert.equal(await layout((list) => list.map(() => null)).folders(), null);
+	assert.equal(await layout(() => { throw new Error("Windows ACL evidence rejected"); }).folders(), null);
+	// Nothing found: nothing walked.
+	const none: string[][] = [];
+	const empty = createProbes({ platform: "win32", env: { Path: "C:\\Windows", PATHEXT: ".EXE" }, run: async () => ({ code: 1 }), storageMany: (list: string[]) => { none.push(list); return []; },
+		fs: { isFile: async () => false, isDirectory: async () => false, exists: async () => false, realpath: async (path: string) => path, readText: async () => "", writable: async () => false } });
+	assert.equal(await empty.folders(), null);
+	assert.deepEqual(none, []);
+	// POSIX has no such walk.
+	assert.equal(await probes({ ...userNode }).probes.folders(), null);
+});
+
+// S6 notice, pnpm's own layout: a global package is reached through pnpm's link
+// global\v11\<hash>\node_modules\<pkg> (a junction into the store), and `pnpm runtime`
+// links node.exe. The walk sees each file where it really is, plus the folder that
+// holds each link, and never reports pnpm's link itself.
+const W_PNPM = `${W_LOCAL}\\pnpm`;
+const W_PNPM_BIN = `${W_PNPM}\\bin`;
+const W_SCOPE = `${W_PNPM}\\global\\v11\\5f1a\\node_modules\\@earendil-works`;
+const W_JUNCTION = `${W_SCOPE}\\pi-coding-agent`;
+const W_STORE = `${W_PNPM}\\store`;
+const W_STORE_PI = `${W_STORE}\\v11\\links\\@earendil-works\\pi-coding-agent\\1.0.0\\abc\\node_modules\\@earendil-works\\pi-coding-agent`;
+const W_RUNTIME_NODE = `${W_PNPM}\\nodejs\\24.21.0\\node.exe`;
+const pnpmJsShim = (target: string) => `@SETLOCAL\r\n@IF EXIST "%~dp0\\node.exe" (\r\n  "%~dp0\\node.exe"  "%~dp0\\${target}" %*\r\n) ELSE (\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n  node  "%~dp0\\${target}" %*\r\n)\r\n`;
+type Finding = { check: string; at?: string } | null;
+/** The walk as Windows runs it: a path through the junction stops at it; a weak folder rejects what is below it. */
+function pnpmLayout({ weak = [] as string[], unreadable = [] as string[] } = {}) {
+	const launches: string[][] = [];
+	const lower = (path: string) => path.toLowerCase();
+	const under = (path: string, root: string) => lower(path) === lower(root) || lower(path).startsWith(`${lower(root)}\\`);
+	const walk = (path: string): Finding => {
+		if (under(path, W_JUNCTION)) return { check: "ancestor-reparse", at: W_JUNCTION };
+		const folder = weak.find((root) => under(path, root));
+		return folder ? { check: "ancestor-acl-mask", at: folder } : null;
+	};
+	const entry = `${W_JUNCTION}\\dist\\cli.js`;
+	const instance = createProbes({ platform: "win32", env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: W_PNPM_BIN, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+		run: async () => ({ code: 1, signal: null, timedOut: false, stdout: "" }), storage: () => {},
+		storageMany: (list: string[]) => { launches.push(list); return list.map(walk); },
+		fs: { isFile: async (path: string) => [`${W_PNPM_BIN}\\pi.cmd`, `${W_PNPM_BIN}\\node.exe`, entry].includes(path),
+			isDirectory: async () => false, exists: async () => false, writable: async () => false,
+			isLink: async (path: string) => [lower(W_JUNCTION), lower(`${W_PNPM_BIN}\\node.exe`)].includes(lower(path)),
+			realpath: async (path: string) => {
+				if (unreadable.includes(path)) throw new Error("EACCES");
+				if (lower(path) === lower(`${W_PNPM_BIN}\\node.exe`)) return W_RUNTIME_NODE;
+				return under(path, W_JUNCTION) ? W_STORE_PI + path.slice(W_JUNCTION.length) : path;
+			},
+			readText: async (path: string) => (path === `${W_PNPM_BIN}\\pi.cmd` ? pnpmJsShim("..\\global\\v11\\5f1a\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js")
+				: Promise.reject(new Error("ENOENT"))) } });
+	return { instance, launches, entry };
+}
+test("Windows: pnpm's own global and runtime links are walked where they lead, so the installer's own Pi raises no notice", async () => {
+	const clean = pnpmLayout();
+	assert.equal(await clean.instance.folders(), null, "pnpm's junction is not a finding");
+	assert.deepEqual(clean.launches, [[W_RUNTIME_NODE, W_PNPM_BIN, `${W_PNPM_BIN}\\pi.cmd`, `${W_STORE_PI}\\dist\\cli.js`, W_SCOPE]],
+		"each file's real location and the folder holding each link, in one launch, never a path through the link");
+	// A weak ACL on the resolved folders or their ancestors is still reported.
+	assert.deepEqual(await pnpmLayout({ weak: [W_STORE] }).instance.folders(), { pi: { check: "ancestor-acl-mask", at: W_STORE } });
+	assert.deepEqual(await pnpmLayout({ weak: [`${W_PNPM}\\nodejs`] }).instance.folders(),
+		{ node: { check: "ancestor-acl-mask", at: `${W_PNPM}\\nodejs` }, pi: { check: "ancestor-acl-mask", at: `${W_PNPM}\\nodejs` } }, "Pi runs that node.exe too");
+	// So is a weak folder holding the link: another account could point it elsewhere.
+	assert.deepEqual(await pnpmLayout({ weak: [W_SCOPE] }).instance.folders(), { pi: { check: "ancestor-acl-mask", at: W_SCOPE } });
+	// A file whose real location cannot be read could not be checked.
+	const hidden = pnpmLayout({ unreadable: [`${W_JUNCTION}\\dist\\cli.js`] });
+	assert.deepEqual(await hidden.instance.folders(), { pi: { check: "unchecked", at: hidden.entry } });
+});
+
+// CI on Windows: the runner's %TEMP% is C:\Users\RUNNER~1\..., and realpath gives the
+// long name. An 8.3 alias is not a link: only lstat says what a link is, so no
+// folder is walked as a link holder because of it (C:\Users would put C:\ at depth 1).
+test("Windows: an 8.3 short-name alias is not a link, so no extra folder is walked", async () => {
+	const short = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\fixture";
+	const long = "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\fixture";
+	const goExe = `${short}\\linked-go\\go.exe`;
+	const realGo = `${long}\\store\\go\\go.exe`;
+	const launches: string[][] = [];
+	const lower = (path: string) => path.toLowerCase();
+	const layout = (links: string[]) => createProbes({ platform: "win32", env: { Path: `${short}\\linked-go`, PATHEXT: ".EXE" }, run: async () => ({ code: 1 }), storage: () => {},
+		storageMany: (list: string[]) => { launches.push(list); return list.map(() => null); },
+		fs: { isFile: async (path: string) => path === goExe, isDirectory: async () => false, exists: async () => false, writable: async () => false, readText: async () => "",
+			isLink: async (path: string) => links.map(lower).includes(lower(path)),
+			realpath: async (path: string) => {
+				const expanded = path.replace(/^C:\\Users\\RUNNER~1/i, "C:\\Users\\runneradmin");
+				return expanded.replace(/\\linked-go(?=\\|$)/i, "\\store\\go");
+			} } });
+	// The tests' layout: only `linked-go` is a junction; RUNNER~1 is a short name.
+	assert.equal(await layout([`${short}\\linked-go`]).folders(), null);
+	assert.deepEqual(launches.at(-1), [realGo, long], "the real file and the real folder holding the junction, never C:\\Users");
+	// Without any link, only the real file is walked.
+	await layout([]).folders();
+	assert.deepEqual(launches.at(-1), [realGo]);
+});
+
+// B3: a real location that is not on a local drive (a mapped network drive, or a
+// symlink to a UNC share) is never sent to PowerShell: that tool could not be
+// checked, and the rest of the batch is still walked in its one launch.
+test("Windows: a tool whose real location is a network share is unchecked, and other tools are still walked", async () => {
+	const node = "Z:\\node\\node.exe";
+	const piCmd = `${W_APPDATA_NPM}\\pi.cmd`;
+	const entry = `${W_NPM_ROOT}\\@earendil-works\\pi-coding-agent\\dist\\cli.js`;
+	const env = { SystemRoot: "C:\\Windows", Path: `Z:\\node;${W_APPDATA_NPM}`, PATHEXT: ".COM;.EXE;.BAT;.CMD" };
+	const launches: string[][] = [];
+	// The production parser, with PowerShell answering per path: the weak %APPDATA%\npm fails.
+	const processAdapter = (_command: string, _args: string[], childEnv: Record<string, string>) => {
+		const paths = childEnv.GENTLE_WINDOWS_CHECKS.split("|");
+		launches.push(paths);
+		return paths.map((path) => (path.startsWith(W_APPDATA_NPM) ? "unsafe:parent-acl-mask" : "safe")).join("\r\n");
+	};
+	const share = (path: string) => path.replace(/^Z:/i, "\\\\srv\\share");
+	const instance = createProbes({ platform: "win32", env, run: async () => ({ code: 1 }), storage: () => {},
+		storageMany: (files: string[]) => verifyWindowsStorageMany(files, env, { processAdapter, platform: "win32" }),
+		fs: { isFile: async (path: string) => [node, piCmd, entry].includes(path), isDirectory: async () => false, exists: async () => false, writable: async () => false,
+			realpath: async (path: string) => share(path),
+			readText: async (path: string) => (path === piCmd ? cmdShim("node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js") : Promise.reject(new Error("ENOENT"))) } });
+	assert.deepEqual(await instance.folders(), { node: { check: "unchecked", at: share(node) }, pi: { check: "parent-acl-mask" } },
+		"the share is unchecked for Node only; Pi's weak folder is still reported");
+	assert.equal(launches.length, 1, "one launch");
+	assert.deepEqual(launches[0], [piCmd, entry]);
+	assert.equal(launches[0].some((path) => !/^[A-Za-z]:\\/.test(path)), false, "no network path reaches PowerShell");
+});
+
+// A1: a path the walk could not check (an owner denying READ_CONTROL, for example)
+// is a notice of its own; a concrete finding for the same tool comes first.
+test("Windows: a tool path the walk could not check is reported as such, after any concrete finding", async () => {
+	const exe = "C:\\Go\\bin\\go.exe";
+	const cmd = `${W_APPDATA_NPM}\\pi.cmd`;
+	const layout = (results: Record<string, Finding>) => createProbes({ platform: "win32", env: { Path: `C:\\Go\\bin;${W_APPDATA_NPM};${W_NODE_DIR}`, PATHEXT: ".EXE;.CMD" },
+		run: async () => ({ code: 1 }), storage: () => {}, storageMany: (list: string[]) => list.map((path) => results[path] ?? null),
+		fs: { isFile: async (path: string) => [exe, cmd, W_NODE, W_PI_ENTRY].includes(path), isDirectory: async () => false, exists: async () => false,
+			realpath: async (path: string) => path, writable: async () => false,
+			readText: async (path: string) => (path === cmd ? cmdShim("node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js") : Promise.reject(new Error("ENOENT"))) } });
+	const weak = { check: "parent-acl-mask", at: W_NPM_ROOT };
+	assert.deepEqual(await layout({ [exe]: { check: "unchecked", at: exe }, [cmd]: { check: "unchecked", at: cmd }, [W_PI_ENTRY]: weak }).folders(),
+		{ go: { check: "unchecked", at: exe }, pi: weak });
+});
+
 test("Windows npm counts by behavior whatever installed it: Node.js, nvm-windows, fnm or a Volta npm.exe", async () => {
 	const layouts = {
 		node: { dir: W_NODE_DIR, npm: "npm.cmd" },
@@ -749,6 +960,7 @@ test("host fs adapter is read-only and bounded", async () => {
 		assert.equal(await fs.exists(join(dir, "dangling")), true);
 		assert.equal(await fs.isDirectory(join(dir, "dangling")), false);
 		assert.equal(await fs.exists(join(dir, "nope")), false);
+		assert.deepEqual([await fs.isLink(join(dir, "dangling")), await fs.isLink(file), await fs.isLink(dir), await fs.isLink(join(dir, "nope"))], [true, false, false, false]);
 		assert.equal(await fs.readText(file), "hello");
 		await assert.rejects(fs.readText(join(dir, "large.txt")));
 		assert.equal(await fs.writable(dir), true);

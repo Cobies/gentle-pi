@@ -364,6 +364,25 @@ test("planModel discloses the PATH change and runtime persistence before consent
 		[[false, true], [false, true]]);
 });
 
+// S6 notice: shown on the review screen before consent; it changes nothing else.
+test("the review screen shows the notice about reused tools in folders another account can change", async () => {
+	const weak = { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming", sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" };
+	const windows = { platform: "win32", node: { ...cleanInventory.node, persistent: true, npm: true }, pnpm: { ...cleanInventory.pnpm, persistent: true },
+		go: { available: true, version: "1.26.0", usable: true } };
+	const view = await serverPlanView({ ...windows, folders: { node: weak, npm: weak } });
+	const model = wizard.planModel(view);
+	assert.equal(model.kind, "install");
+	assert.equal(model.notice, view.sharedFolders.description);
+	assert.deepEqual(model.disclosures.map((item: { id: string }) => item.id), ["profile", "persistence"]);
+	const node = wizard.renderPlan(new FakeDocument(), model, { install() {}, reload() {}, close() {} });
+	assert.match(node.textContent, /Tools in folders other accounts can change/);
+	assert.ok(node.textContent.includes("S-1-5-21-1-2-3-1002 (PC\\other) can change C:\\Users\\m\\AppData\\Roaming"));
+	assert.ok(button(node, "Install Gentle Shell"), "still installable");
+	const plain = wizard.planModel(await serverPlanView(windows));
+	assert.equal(plain.notice, null);
+	assert.doesNotMatch(wizard.renderPlan(new FakeDocument(), plain, { install() {}, reload() {}, close() {} }).textContent, /other accounts can change/);
+});
+
 test("a recoverable stack is reviewed as completing setup, not as a reinstall", async () => {
 	const view = await serverPlanView({ pi: { available: true, version: "1.0.0", usable: true },
 		shell: { available: true, version: requirements.shell, usable: true, global: true },

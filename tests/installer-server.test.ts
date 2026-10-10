@@ -670,6 +670,41 @@ test("stale planId or a changed re-inventory returns 409 plan-changed without ru
 	}
 });
 
+// A2: the reused-folder notice is advisory. A re-inventory whose walk timed out (no
+// notice), or found another one, still installs the consented plan: no 409 loop.
+test("a re-inventory that differs only in the reused-folder notice still installs the consented plan", async () => {
+	const weak = { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming" };
+	const windows = { platform: "win32", node: { available: true, version: "24.18.0", usable: true, persistent: true, npm: true },
+		pnpm: { available: true, version: "11.1.1", usable: true, compatible: true, persistent: true }, go: { available: true, version: "1.26.0", usable: true } };
+	for (const later of [{}, { folders: { node: { check: "unchecked", at: "C:\\nodejs\\node.exe" } } }]) {
+		let current = collected({ ...windows, folders: { node: weak } });
+		const { host, port, login, runs } = await start({ collect: async () => current });
+		try {
+			const cookie = await login();
+			const { planId } = await plan(port, cookie);
+			current = collected({ ...windows, ...later });
+			const response = await post(port, "/api/install", cookie, { planId, consent: true });
+			assert.equal(response.status, 202, response.body);
+			assert.equal(runs.length, 1);
+			assert.deepEqual(runs[0].request.plan.tools.folders?.reused.map((entry: { tool: string }) => entry.tool), ["node"], "the consented plan runs");
+		} finally {
+			await host.close("test");
+		}
+	}
+	// Any other change still stops it.
+	let current = collected({ ...windows, folders: { node: weak } });
+	const { host, port, login, runs } = await start({ collect: async () => current });
+	try {
+		const cookie = await login();
+		const { planId } = await plan(port, cookie);
+		current = collected({ ...windows, folders: { node: weak }, globalBin: { available: true, path: BIN, writable: true, onPath: true } });
+		assert.equal((await post(port, "/api/install", cookie, { planId, consent: true })).status, 409);
+		assert.equal(runs.length, 0);
+	} finally {
+		await host.close("test");
+	}
+});
+
 test("install runs the server-stored plan once, single-flight, and reports progress with guidance", async () => {
 	const gate = deferred<void>();
 	const runInstall: RunInstall = async (_request, log) => {
@@ -1256,9 +1291,35 @@ test("/api/plan says before consent that a private PNPM_HOME replaces a default 
 	names(view.profileChange.description, [W_DEFAULT, weak.at, "S-1-5-21-1-2-3-1002 (PC\\other)", "0x001301BF", W_PRIVATE, "`pnpm setup`",
 		`PNPM_HOME=${W_PRIVATE}`, `${W_PRIVATE}\\bin`, "new terminals", "only you, SYSTEM and Administrators"]);
 	assert.equal(view.persistence.pnpmHome, W_PRIVATE);
+	// S13: the accepted residual risk of later pnpm commands, stated before consent.
+	names(view.profileChange.description, ["pnpm commands you run later", "configuration, cache and state", "%LOCALAPPDATA%", W_DEFAULT]);
 	// A passing default keeps the existing copy.
 	const plain = await windowsView({ available: true, path: W_DEFAULT, source: "default" });
-	assert.doesNotMatch(plain.profileChange.description, /private/);
+	assert.doesNotMatch(plain.profileChange.description, /private|%LOCALAPPDATA%/);
+});
+
+// S6 notice: reused tools in folders another account can change, before consent.
+test("/api/plan notes reused tools in folders another account can change, without blocking or changing the plan", async () => {
+	const roaming = { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming", sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" };
+	const reused = { node: { available: true, version: "24.18.0", usable: true, persistent: true, npm: true }, pi: { available: true, version: "1.2.0", usable: true, external: true },
+		pnpm: { available: true, version: "11.1.1", usable: true, compatible: true, persistent: true } };
+	const view = await windowsView({ available: true, path: W_DEFAULT, source: "default" }, { ...reused,
+		folders: { node: roaming, npm: roaming, pi: { check: "target-owner", at: "C:\\Users\\m\\AppData\\Roaming\\npm\\pi.cmd", sid: "S-1-5-21-9" } } });
+	assert.deepEqual(view.blockers, []);
+	assert.ok(view.actions.length > 0);
+	names(view.sharedFolders.description, ["Node.js", "npm", "Pi", "S-1-5-21-1-2-3-1002 (PC\\other) can change C:\\Users\\m\\AppData\\Roaming", "0x001301BF",
+		"C:\\Users\\m\\AppData\\Roaming\\npm\\pi.cmd is owned by S-1-5-21-9", "never creates or runs its own programs there", "accepted risk", "not a blocker"]);
+	assert.deepEqual(view.sharedFolders.tools, ["node", "npm", "pi"]);
+	// A1: a path the walk could not check says so, and still does not block.
+	const unchecked = await windowsView({ available: true, path: W_DEFAULT, source: "default" }, { ...reused, folders: { node: { check: "unchecked", at: "C:\\nodejs\\node.exe" } } });
+	assert.deepEqual(unchecked.blockers, []);
+	names(unchecked.sharedFolders.description, ["Node.js: the permissions of C:\\nodejs\\node.exe could not be checked", "could not be checked", "not a blocker",
+		"make sure your account can read the permissions of the paths that could not be checked"]);
+	assert.doesNotMatch(unchecked.sharedFolders.description, /write access/, "nothing says an account can write there");
+	assert.match(view.sharedFolders.description, /remove that account's write access/);
+	assert.doesNotMatch(view.sharedFolders.description, /could not be checked/);
+	// Nothing to note: no record.
+	assert.equal((await windowsView({ available: true, path: W_DEFAULT, source: "default" }, reused)).sharedFolders, null);
 });
 
 test("/api/plan names the folder, principal, rights and remedy when PNPM_HOME is not private", async () => {

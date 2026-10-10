@@ -196,8 +196,12 @@ function sameSecret(expected, actual) {
 	const [a, b] = [Buffer.from(expected), Buffer.from(String(actual))];
 	return a.length === b.length && timingSafeEqual(a, b);
 }
+/** What must not change between review and install. The reused-folder notice
+ * (tools.folders) is advisory and changes no action, so it is left out: a walk
+ * that times out on re-inventory must not turn into a plan-changed loop. */
 function fingerprint(collected) {
-	return createHash("sha256").update(JSON.stringify({ plan: collected.plan, binDir: collected.inventory?.globalBin?.path ?? null }))
+	const tools = Object.fromEntries(Object.entries(collected.plan?.tools ?? {}).filter(([name]) => name !== "folders"));
+	return createHash("sha256").update(JSON.stringify({ plan: { ...collected.plan, tools }, binDir: collected.inventory?.globalBin?.path ?? null }))
 		.digest("hex");
 }
 
@@ -254,6 +258,7 @@ function findingText(finding) {
 	const account = plainText(finding?.account);
 	const who = sid ? `${sid}${account ? ` (${account})` : ""}` : "another account";
 	const check = String(finding?.check ?? "");
+	if (check === "unchecked") return `the permissions of ${at} could not be checked`;
 	if (check.endsWith("-acl-mask")) return `${who} can change ${at} (allowed rights ${plainText(finding.rights) ?? "beyond read and execute"})`;
 	if (check.endsWith("-owner")) return `${at} is owned by ${who}, which this installer does not trust`;
 	if (check.endsWith("-reparse")) return `${at} is a link (reparse point) to another location`;
@@ -367,7 +372,29 @@ function privateHomeDescription(home) {
 	const fallback = plainText(home.default);
 	return `pnpm's default folder ${fallback} is not private: ${findingText(home.finding)}. So the installer uses a new private folder, ${path}, as PNPM_HOME, ` +
 		`which only you, SYSTEM and Administrators can change. \`pnpm setup\` will save PNPM_HOME=${path} in your user environment and add ${path}\\bin ` +
-		`to your user PATH, so new terminals use it. Nothing in ${fallback} is changed. Open a new terminal afterwards.`;
+		`to your user PATH, so new terminals use it. Nothing in ${fallback} is changed. Open a new terminal afterwards. ` +
+		// S13: pnpm reads its configuration folder only from XDG_CONFIG_HOME or %LOCALAPPDATA%\pnpm\config.
+		"Only the installer's own pnpm steps keep pnpm's configuration, cache and state inside that private folder: pnpm commands you run later keep " +
+		"pnpm's default configuration, cache and state under %LOCALAPPDATA%, which pnpm offers no safe persistent setting to move. This is an accepted risk.";
+}
+
+// S6 notice: reused tools whose folders another account can change (never a blocker).
+const folderTools = Object.freeze({ node: "Node.js", npm: "npm", go: "Go", pi: "Pi", shell: "Gentle Shell" });
+function sharedFoldersView(plan) {
+	const reused = Array.isArray(plan.tools?.folders?.reused) ? plan.tools.folders.reused.filter((entry) => Object.hasOwn(folderTools, entry?.tool)) : [];
+	if (reused.length === 0) return null;
+	const found = reused.map((entry) => `${folderTools[entry.tool]}: ${findingText(entry)}`).join("; ");
+	const unchecked = reused.some((entry) => entry.check === "unchecked");
+	const weak = reused.some((entry) => entry.check !== "unchecked");
+	const where = [weak ? "from folders another account can change" : null, unchecked ? "from folders whose permissions could not be checked" : null].filter(Boolean).join(", or ");
+	const remedies = [weak ? "remove that account's write access" : null,
+		unchecked ? "make sure your account can read the permissions of the paths that could not be checked, on a local drive" : null].filter(Boolean).join(", and ");
+	return {
+		tools: reused.map((entry) => entry.tool),
+		description: `These tools are reused as they are, ${where}. ${found}. ` +
+			"The installer never creates or runs its own programs there, but whoever can change those folders can change what these tools run for you, including for Gentle Shell. " +
+			`This is an accepted risk and not a blocker. To remove it, ${remedies}, then select Check again.`,
+	};
 }
 
 function planView(planId, { inventory, plan }) {
@@ -404,6 +431,7 @@ function planView(planId, { inventory, plan }) {
 				? `\`pnpm setup\` will add ${binDir ?? "the pnpm global bin directory"} to your PATH: it edits your shell profile on macOS and Linux, or your user PATH on Windows. Open a new terminal afterwards.`
 				: "Your PATH already contains the pnpm global bin directory; no shell profile or PATH change is planned.",
 		},
+		sharedFolders: sharedFoldersView(plan),
 		persistence: {
 			tools,
 			pnpmHome,

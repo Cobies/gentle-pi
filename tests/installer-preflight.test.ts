@@ -457,7 +457,9 @@ test("a bootstrap-only Node next to a persistent pnpm persists Node and npm only
 		pnpm: { ...tool("11.1.1"), compatible: true, ...pnpm }, globalBin: { available: true, path: "/disposable/bin", writable: true, onPath: true } });
 	const rest = ["install-pi", "install-shell", "setup-shell", "verify-readiness"];
 	// A compatible newer pnpm 11 already in $PNPM_HOME/bin (or persistent elsewhere) is kept as it is.
-	for (const pnpm of [{ version: "11.5.0", persistent: true, inGlobalBin: true }, { persistent: true }, {}]) {
+	// So is a Windows user pnpm in $PNPM_HOME\bin that failed the storage walk (S7): never replaced.
+	for (const pnpm of [{ version: "11.5.0", persistent: true, inGlobalBin: true }, { persistent: true }, {},
+		{ version: "11.9.0", persistent: true, inGlobalBin: true, untrusted: true }]) {
 		const plan = planPreflight(stack(pnpm));
 		assert.deepEqual(plan.actions.map((action: { id: string }) => action.id), ["persist-node", "persist-npm", "configure-npm-prefix", ...rest], JSON.stringify(pnpm));
 		assert.deepEqual(plan.actions[1], { id: "persist-npm", kind: "install-global", target: "npm", version: persistencePins.npm });
@@ -647,4 +649,56 @@ test("a blocked Windows PNPM_HOME decision runs no probe and plans only that blo
 	await collectInventory({ platform: "linux", arch: "x64", probes: { node: async () => { posixCalled.push("node"); return absent; } },
 		pnpmHome: { available: null, failed: true } });
 	assert.deepEqual(posixCalled, ["node"]);
+});
+
+// S6 notice: reused tools whose folders another account can change, from one walk.
+const weakFolder = { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming", sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" };
+const allFolders = { node: weakFolder, npm: weakFolder, go: { check: "target-owner", at: "C:\\Go\\bin\\go.exe", sid: "S-1-5-21-9" }, pi: weakFolder, shell: weakFolder };
+test("Windows: collectInventory records the folders walk after the tool probes, and never blocks on it", async () => {
+	const order: string[] = [];
+	const probes = { ...Object.fromEntries(["node", "pnpm", "pi", "shell", "gentleAi", "go", "globalBin", "setup"].map((name) => [name, async () => { order.push(name); return absent; }])),
+		folders: async () => { order.push("folders"); return { node: weakFolder }; } };
+	const inventory = await collectInventory({ platform: "win32", arch: "x64", probes });
+	assert.deepEqual(order, ["node", "pnpm", "pi", "shell", "gentleAi", "go", "globalBin", "setup", "folders"]);
+	assert.deepEqual(inventory.folders, { node: weakFolder });
+	for (const folders of [async () => null, async () => ({}), async () => ({ available: null }), async () => { throw new Error("walk failed"); }]) {
+		const quiet = await collectInventory({ platform: "win32", arch: "x64", probes: { ...probes, folders } });
+		assert.equal("folders" in quiet, false);
+	}
+	// POSIX and a blocked PNPM_HOME decision never walk.
+	order.length = 0;
+	assert.equal("folders" in await collectInventory({ platform: "linux", arch: "x64", probes }), false);
+	assert.equal(order.includes("folders"), false);
+	order.length = 0;
+	await collectInventory({ platform: "win32", arch: "x64", probes, pnpmHome: { available: null, failed: true } });
+	assert.deepEqual(order, []);
+});
+
+test("Windows: the plan notes only the reused tools whose folders another account can change, without blocking", () => {
+	const reused = { ...clean("win32"), node: { ...tool("24.18.0"), persistent: true, npm: true }, pnpm: { ...tool("11.1.1"), compatible: true, persistent: true },
+		pi: { ...tool("1.2.0"), external: true }, go: tool("1.26.0"), globalBin: { available: true, path: "C:\\Users\\m\\AppData\\Local\\pnpm\\bin", writable: true, onPath: true } };
+	const plan = planPreflight({ ...reused, folders: allFolders });
+	assert.deepEqual(plan.blockers, []);
+	assert.deepEqual(plan.actions, planPreflight(reused).actions, "a notice changes no action");
+	assert.deepEqual(plan.tools.folders, { status: "notice", reused: [{ tool: "node", ...weakFolder }, { tool: "npm", ...weakFolder }, { tool: "go", ...allFolders.go }, { tool: "pi", ...weakFolder }] },
+		"Gentle Shell is installed by pnpm here, so its folder is not reused");
+	assert.equal("folders" in planPreflight(reused).tools, false);
+	// Not reused: a Node left for the pinned one, a missing npm, Go not needed, a Pi installed alongside.
+	const replaced = planPreflight({ ...reused, node: { ...tool("24.21.0"), persistent: false, npm: false, found: "22.0.0" },
+		pi: { ...tool("0.80.0"), external: true }, folders: allFolders });
+	assert.deepEqual(replaced.tools.folders?.reused.map((entry: { tool: string }) => entry.tool), ["go"], "only Go, which the Windows build still reuses");
+	const missingNpm = planPreflight({ ...reused, node: { ...tool("24.18.0"), persistent: true, npm: false }, folders: { npm: weakFolder } });
+	assert.equal(missingNpm.tools.folders, undefined);
+	// An npm-owned Gentle Shell that is kept or updated with npm is reused.
+	const npmShell = planPreflight({ ...installed("win32"), node: { ...tool("24.18.0"), persistent: true, npm: true },
+		shell: { ...tool(requirements.shell), global: true, owner: "npm" }, folders: { shell: weakFolder, go: weakFolder } });
+	assert.deepEqual(npmShell.tools.folders?.reused.map((entry: { tool: string }) => entry.tool), ["shell"], "no build here, so Go is not reused");
+	// A path the walk could not check is noted as such; an unknown code never reaches the plan.
+	const unchecked = planPreflight({ ...reused, folders: { node: { check: "unchecked", at: "C:\\nodejs\\node.exe" }, pi: { check: "denied", at: "C:\\x" } } });
+	assert.deepEqual(unchecked.tools.folders, { status: "notice", reused: [{ tool: "node", check: "unchecked", at: "C:\\nodejs\\node.exe" }] });
+	assert.deepEqual(unchecked.blockers, []);
+	// Only known string fields reach the plan; POSIX ignores the record.
+	const odd = planPreflight({ ...reused, folders: { node: { ...weakFolder, sid: 7, extra: "x" }, other: weakFolder } });
+	assert.deepEqual(odd.tools.folders.reused, [{ tool: "node", check: weakFolder.check, at: weakFolder.at, account: weakFolder.account, rights: weakFolder.rights }]);
+	assert.equal(planPreflight({ ...reused, platform: "linux", folders: allFolders }).tools.folders, undefined);
 });

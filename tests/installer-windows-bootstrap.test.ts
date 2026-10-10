@@ -9,7 +9,7 @@ import test from "node:test";
 import { artifactFor, compatibleEngine, windowsBootstrapMessage } from "../scripts/installer-downloads.mjs";
 import { createProbes, hostAdapters } from "../scripts/installer-probes.mjs";
 import { planPreflight } from "../scripts/installer-preflight.mjs";
-import { lookPath, windowsInvocation } from "../scripts/installer-runner.mjs";
+import { lookPath, upgradeInvocation, windowsInvocation } from "../scripts/installer-runner.mjs";
 import { validateWindowsEntries, windowsShim, windowsNodeFloor, readWindowsPnpmArchive, ensureWindowsPnpm, windowsProcessCheck, windowsAclRuleUnsafe, verifyWindowsStorage,
 	bootstrapWindows, windowsBootstrapReason, windowsStorageEvidence } from "../scripts/installer-windows.mjs";
 import * as windowsModule from "../scripts/installer-windows.mjs";
@@ -137,6 +137,7 @@ function productionAclSources() {
 		batch.slice(batch.indexOf("rem Claim"), batch.indexOf("rem Select")),
 		batch.slice(batch.indexOf("rem Production direct"), batch.indexOf("$start = New-Object")),
 		readFileSync(new URL("../scripts/installer-windows.mjs", import.meta.url), "utf8").split("const aclCheck = String.raw`")[1].split("`;")[0],
+		readFileSync(new URL("../scripts/installer-windows.mjs", import.meta.url), "utf8").split("const aclCheckMany = String.raw`")[1]?.split("`;")[0] ?? "",
 	];
 }
 test("fixed ACL predicates allow sibling-only CreateDirectories on distant existing ancestors", () => {
@@ -412,25 +413,27 @@ const exeProcess = (exe: string, version: string, calls: string[][] = []) => (co
 	if (version === "fails") throw new Error("Windows prerequisite process failed");
 	return args[0] === "--version" ? version : "--global";
 };
-test("a standalone pnpm.exe (pnpm's installer, Volta, mise) is reused when compatible and left alongside the pinned pnpm otherwise", async () => {
+// @pnpm/exe installed by pnpm or npm ships a package.json beside its pnpm.exe.
+const exePackage = (directory: string, version: string, name = "@pnpm/exe") => writeFileSync(join(directory, "package.json"), JSON.stringify({ name, version, bin: { pnpm: "pnpm.exe" } }));
+test("a pnpm.exe beside its pnpm package.json is reused when compatible and left alongside the pinned pnpm otherwise", async () => {
 	for (const version of ["11.1.1", "11.28.5"]) {
 		const f = fixture();
 		try {
 			const home = join(f.root, "pnpm"); mkdirSync(home);
-			const exe = join(home, "pnpm.exe"); writeFileSync(exe, "MZ fixture");
+			const exe = join(home, "pnpm.exe"); writeFileSync(exe, "MZ fixture"); exePackage(home, version);
 			const calls: string[][] = []; const checked: string[] = [];
 			const result = await ensureWindowsPnpm({ tools: f.root, env: { Path: home, PATHEXT: ".EXE;.CMD" }, adapters: {
 				storage: (path: string) => { checked.push(path); }, download: () => { throw new Error("must not download"); }, process: exeProcess(exe, version, calls) } });
 			assert.deepEqual(result, { acquired: false, env: { Path: home, PATHEXT: ".EXE;.CMD" }, command: exe, prefix: [] }, version);
 			assert.deepEqual(calls, [["--version"], ["help", "add"], ["help", "bin"]]);
-			assert.deepEqual(checked, [exe, exe], "the found command and the exe it runs pass the storage check");
+			assert.deepEqual(checked, [exe, exe, join(home, "package.json")], "the found command, the exe it runs and its package.json pass the storage check");
 		} finally { f.cleanup(); }
 	}
 	for (const version of ["10.34.6", "11.0.0", "12.10.1"]) {
 		const f = fixture();
 		try {
 			const home = join(f.root, "pnpm"); mkdirSync(home);
-			const exe = join(home, "pnpm.exe"); writeFileSync(exe, "MZ fixture");
+			const exe = join(home, "pnpm.exe"); writeFileSync(exe, "MZ fixture"); exePackage(home, version, "pnpm");
 			const tools = join(f.root, "tools"); mkdirSync(tools);
 			const calls: string[][] = [];
 			const result = await ensureWindowsPnpm({ tools, env: { Path: home, PATHEXT: ".EXE;.CMD" }, adapters: { storage: () => {},
@@ -444,9 +447,52 @@ test("a standalone pnpm.exe (pnpm's installer, Volta, mise) is reused when compa
 	for (const [version, message] of [["11.0.0-rc.1", "Windows pnpm version rejected"], ["", "Windows pnpm version rejected"], ["fails", "Windows prerequisite process failed"]]) {
 		const f = fixture();
 		try {
-			const exe = join(f.root, "pnpm.exe"); writeFileSync(exe, "MZ fixture");
+			const exe = join(f.root, "pnpm.exe"); writeFileSync(exe, "MZ fixture"); exePackage(f.root, "11.1.1");
 			await assert.rejects(ensureWindowsPnpm({ tools: f.root, env: { Path: f.root, PATHEXT: ".EXE;.CMD" }, adapters: { storage: () => {},
 				download: () => { throw new Error("must not download"); }, process: exeProcess(exe, version) } }), (error: Error) => error.message === message, version);
+		} finally { f.cleanup(); }
+	}
+});
+
+// S12: a standalone pnpm.exe (pnpm's installer, a Volta or mise shim) has no
+// package.json naming pnpm beside it: nothing proves what it is, so it never runs.
+test("a pnpm.exe without a pnpm package.json beside it is never run: the verified pnpm is acquired", async () => {
+	for (const metadata of [null, "other"]) {
+		const f = fixture();
+		try {
+			const home = join(f.root, "pnpm"); mkdirSync(home);
+			const exe = join(home, "pnpm.exe"); writeFileSync(exe, "MZ fixture");
+			if (metadata === "other") exePackage(home, "11.1.1", "volta");
+			const tools = join(f.root, "tools"); mkdirSync(tools);
+			const calls: string[][] = [];
+			const result = await ensureWindowsPnpm({ tools, env: { Path: home, PATHEXT: ".EXE;.CMD" }, adapters: { storage: () => {},
+				download: async () => pnpmTar(), digest, process: exeProcess(exe, "11.1.1", calls) } });
+			assert.deepEqual([result.acquired, result.command, result.prefix], [true, process.execPath, [join(tools, "pnpm/package/bin/pnpm.mjs")]], String(metadata));
+			assert.deepEqual(calls, [], "the user's pnpm.exe never runs, not even for its version");
+			assert.equal(readFileSync(exe, "utf8"), "MZ fixture");
+		} finally { f.cleanup(); }
+	}
+});
+
+// S11: CMD runs an extensionless shim target through PATHEXT, in PATHEXT order.
+test("an extensionless native shim target is reused only when the first PATHEXT match is an .exe", async () => {
+	const target = "node_modules\\@pnpm\\exe\\pnpm";
+	for (const [extensions, PATHEXT, outcome] of [[[".exe", ".cmd"], ".COM;.EXE;.BAT;.CMD", "reused"], [[".com", ".exe"], ".COM;.EXE;.BAT;.CMD", "rejected"],
+		[[".cmd", ".exe"], ".CMD;.EXE", "rejected"], [[], ".COM;.EXE;.BAT;.CMD", "rejected"]] as const) {
+		const f = fixture();
+		try {
+			const npm = join(f.root, "npm"); const packageDir = join(npm, "node_modules", "@pnpm", "exe"); mkdirSync(packageDir, { recursive: true });
+			writeFileSync(join(npm, "pnpm.cmd"), nativeWrapper(target)); writeFileSync(join(packageDir, "pnpm"), "MZ fixture");
+			for (const extension of extensions) writeFileSync(join(packageDir, `pnpm${extension}`), "MZ fixture");
+			exePackage(packageDir, "11.1.1");
+			const ran: string[] = [];
+			const run = ensureWindowsPnpm({ tools: f.root, env: { Path: npm, PATHEXT }, adapters: { storage: () => {}, download: () => { throw new Error("must not download"); },
+				process: (command: string, args: string[]) => { ran.push(command); return exeProcess(join(packageDir, "pnpm.exe"), "11.1.1")(command, args); } } });
+			if (outcome === "reused") assert.equal((await run).command, join(packageDir, "pnpm.exe"));
+			else {
+				await assert.rejects(run, (error: Error) => error.message === "Unsafe pnpm wrapper target", `${extensions} ${PATHEXT}`);
+				assert.deepEqual(ran, []);
+			}
 		} finally { f.cleanup(); }
 	}
 });
@@ -499,9 +545,40 @@ test("pnpm's own global bins are followed to the pnpm they run: pnpm setup, self
 	} finally { f.cleanup(); }
 });
 
-test("a pnpm.cmd that no structure resolves (mise, Volta, Corepack, Node.js's npm.cmd) is never run or replaced", async () => {
-	const corepack = wrapper("node_modules\\corepack\\dist\\pnpm.js");
-	for (const text of [...unresolvable, corepack, nodeNpmCmd(true)]) {
+// S9: Corepack's pnpm.cmd (npm's or pnpm's cmd-shim of Corepack's pnpm.js) and
+// mise's file-mode shim are not pnpm: they count as no pnpm at all, never run.
+const corepackShims = [wrapper("node_modules\\corepack\\dist\\pnpm.js"), pnpmScript("node_modules\\corepack\\dist\\pnpm.js")];
+const miseFileShims = [unresolvable[0], "@echo off\nsetlocal\nmise x -- pnpm %*\n", "@echo off\r\nsetlocal\r\nmise x -- pnpm %*\r\n"];
+test("Corepack's pnpm.cmd and mise's file shim count as missing pnpm: never run or replaced, the verified pnpm is acquired", async () => {
+	for (const text of [...corepackShims, ...miseFileShims]) {
+		const f = fixture();
+		try {
+			const commands = join(f.root, "commands"); mkdirSync(join(commands, "node_modules", "corepack", "dist"), { recursive: true });
+			writeFileSync(join(commands, "pnpm.cmd"), text); writeFileSync(join(commands, "node.exe"), "not executed fixture");
+			writeFileSync(join(commands, "node_modules", "corepack", "dist", "pnpm.js"), "corepack fixture");
+			const tools = join(f.root, "tools"); mkdirSync(tools);
+			const ran: string[] = []; const steps: string[] = [];
+			const result = await ensureWindowsPnpm({ tools, env: { Path: commands, PATHEXT: ".EXE;.CMD" }, onStep: (step: string) => steps.push(step), adapters: { storage: () => {},
+				download: async () => pnpmTar(), digest, process: (command: string, args: string[]) => { ran.push(command); return cliProcess(command, args); } } });
+			assert.deepEqual([result.acquired, result.command, result.prefix], [true, process.execPath, [join(tools, "pnpm/package/bin/pnpm.mjs")]], text);
+			assert.equal(ran.includes(join(commands, "node.exe")), false, "nothing from Corepack or mise runs");
+			assert.deepEqual(steps.slice(0, 3), ["pnpm-discovery", "wrapper-storage", "wrapper"]);
+			assert.equal(readFileSync(join(commands, "pnpm.cmd"), "utf8"), text);
+		} finally { f.cleanup(); }
+	}
+	// Policy is unchanged: a failed walk of Corepack's shim still stops with its role code.
+	const f = fixture();
+	try {
+		writeFileSync(join(f.root, "pnpm.cmd"), corepackShims[0]);
+		await assert.rejects(ensureWindowsPnpm({ tools: f.root, env: { Path: f.root, PATHEXT: ".EXE;.CMD" }, adapters: {
+			storage: () => { throw Object.assign(new Error("Windows ACL evidence rejected"), { check: "policy" }); }, download: () => { throw new Error("must not download"); } } }),
+		(error: { check?: string }) => error.check === "policy");
+	} finally { f.cleanup(); }
+});
+
+test("a pnpm.cmd that no structure resolves (Volta, an unknown mise shim, Node.js's npm.cmd) is never run or replaced", async () => {
+	const unknownMise = "@echo off\r\nsetlocal\r\nmise x -- npm %*\r\n";
+	for (const text of [...unresolvable.slice(1), unknownMise, wrapper("node_modules\\corepack\\dist\\other.js"), nodeNpmCmd(true)]) {
 		const f = fixture();
 		try {
 			writeFileSync(join(f.root, "pnpm.cmd"), text);
@@ -920,6 +997,56 @@ test("storage ACL evidence carries the failing folder, principal and rights; mal
 	assert.ok(check.includes("$detail = $path + '|' + $rule.IdentityReference.Value + '|' + (& $account $rule.IdentityReference) + '|0x' + ([int]$rule.FileSystemRights).ToString('X8'); throw ($role + '-acl-mask')"));
 	assert.ok(check.includes("$detail = $path + '|' + $owner.Value + '|' + (& $account $owner) + '|'; throw ($role + '-owner')"));
 	assert.ok(check.includes("$detail = $path + '|||'; throw ($role + '-reparse')"));
+});
+
+// S6 notice: every reused tool path in one Windows PowerShell launch.
+const manyCheck = () => readFileSync(new URL("../scripts/installer-windows.mjs", import.meta.url), "utf8").split("const aclCheckMany = String.raw`")[1].split("`;")[0];
+const walkLoop = (source: string) => source.slice(source.indexOf("$depth = 0;"), source.indexOf("'safe'")).replace(/\s+/g, " ");
+test("verifyWindowsStorageMany walks every path in one Windows PowerShell launch and reads one result line per path", () => {
+	const paths = ["C:\\Program Files\\nodejs\\node.exe", "C:\\Users\\m\\AppData\\Roaming\\npm\\pi.cmd", "D:\\go\\bin\\go.exe"];
+	const weak = "C:\\Users\\m\\AppData\\Roaming|S-1-5-21-1-2-3-1002|PC\\other|0x001301BF";
+	const calls: { command: string; args: string[]; env: Record<string, string> }[] = [];
+	const adapter = (output: string) => (command: string, args: string[], env: Record<string, string>) => { calls.push({ command, args, env }); return output; };
+	const env = { SystemRoot: "C:\\Windows" };
+	const many = (output: string, list = paths) => windowsModule.verifyWindowsStorageMany(list, env, { processAdapter: adapter(output), platform: "win32" });
+	// A1: a path whose walk failed for another reason (READ_CONTROL denied, for example) could not be checked.
+	assert.deepEqual(many(`safe\r\nunsafe:parent-acl-mask|${encoded(weak)}\r\nunknown`),
+		[null, { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming", sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" },
+			{ check: "unchecked", at: "D:\\go\\bin\\go.exe" }]);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].command, join("C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
+	assert.deepEqual(calls[0].args.slice(0, 4), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
+	assert.equal(calls[0].args[4], manyCheck());
+	assert.deepEqual(calls[0].env, { ...env, GENTLE_WINDOWS_CHECKS: paths.join("|") }, "paths travel only as environment data, joined by a character no Windows path holds");
+	// A reparse point and an owner are findings too; nothing to walk launches nothing.
+	assert.deepEqual(many(`unsafe:target-reparse|${encoded("C:\\link|||")}\nunsafe:ancestor-owner|${encoded("C:\\Users|S-1-5-21-9||")}\nsafe`),
+		[{ check: "target-reparse", at: "C:\\link" }, { check: "ancestor-owner", at: "C:\\Users", sid: "S-1-5-21-9" }, null]);
+	const launches = calls.length;
+	assert.deepEqual(many("safe", []), []);
+	assert.equal(calls.length, launches);
+	// Policy, a count that does not match, or any other line rejects the whole result.
+	for (const output of ["unsafe:policy", "safe\nsafe", "safe\nsafe\nsafe\nsafe", "safe\nSAFE\nsafe", "safe\nunsafe:policy\nsafe", `safe\nunsafe:parent-acl-mask|${encoded("relative|||")}\nsafe`,
+		"safe\nunsafe:C:\\Users\\x\nsafe", ""]) {
+		assert.throws(() => many(output), (error: Error) => error.message === "Windows ACL evidence rejected", JSON.stringify(output));
+	}
+	// Only local drive paths, never one holding the delimiter, and only on Windows.
+	const before = calls.length;
+	for (const bad of ["\\\\server\\share\\node.exe", "\\\\?\\C:\\node.exe", "\\node.exe", "relative\\node.exe", "C:\\a|b\\node.exe", "C:\\a\nb"]) {
+		assert.throws(() => many("safe", [bad]), /Unsafe Windows storage path/, bad);
+	}
+	assert.equal(calls.length, before, "a rejected path launches nothing");
+	assert.throws(() => windowsModule.verifyWindowsStorageMany(paths, env, { processAdapter: adapter("safe") }), process.platform === "win32" ? /Windows ACL evidence rejected/ : /Native Windows storage verification unavailable/);
+});
+test("the one-launch walk applies the single-path walk, per path, with its own fixed result lines", () => {
+	const many = manyCheck();
+	const single = productionAclSources()[2];
+	assert.equal(walkLoop(many), walkLoop(single), "the same walk, statement for statement");
+	assert.ok(walkLoop(many).length > 500);
+	assert.match(many, /if \(\$ExecutionContext\.SessionState\.LanguageMode -ne 'FullLanguage'\) \{ 'unsafe:policy'; exit 0 \};/);
+	assert.match(many, /foreach \(\$start in \$env:GENTLE_WINDOWS_CHECKS\.Split\('\|'\)\) \{/);
+	assert.match(many, /\$detail = '';\s+try \{\s+\$path = \[IO\.Path\]::GetFullPath\(\$start\);/);
+	assert.ok(many.includes("} else { 'unknown' } }"), "an unexpected error on one path is that path's `unknown` line, never a stop");
+	assert.doesNotMatch(many, /Invoke-Expression|\biex\b|ScriptBlock\]::Create|EncodedCommand/);
 });
 
 // S6 decision fixtures: an in-memory folder tree and an injected walk verdict per
@@ -1826,6 +1953,79 @@ test("native Windows: Node.js's npm.cmd and an npm cmd-shim pnpm.cmd run without
 		const reused = await ensureWindowsPnpm({ tools, env, adapters: { storage: () => {} } });
 		assert.deepEqual([reused.acquired, reused.command.toLowerCase(), reused.prefix], [false, join(dirname(process.execPath), "node.exe").toLowerCase(), [join(packageDir, "bin", "pnpm.mjs")]]);
 	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// S8: `gentle-shell upgrade` (and the wizard's update) on a real Windows host.
+test("native Windows: the upgrade's invocation runs the real npm without cmd.exe, exactly as CMD runs it", { skip: nativeUnavailable }, async () => {
+	const adapters = hostAdapters();
+	const invoke = upgradeInvocation({ platform: "win32", env: process.env, ...adapters });
+	const npm = await invoke!("npm");
+	assert.ok(npm && /\.exe$/i.test(npm.command), JSON.stringify(npm));
+	const direct = await adapters.run(npm.command, [...npm.prefix, "--version"], { env: process.env, cwd: parse(npm.command).root, deadlineMs: 60000 });
+	const shell = viaCmd((await lookPath("npm", process.env, "win32", adapters.fs))!, process.env);
+	assert.deepEqual([direct.code, shell.status], [0, 0], shell.stderr);
+	assert.equal(direct.stdout.trim(), shell.stdout.trim());
+	// A pnpm.cmd from Corepack, or none at all, is never run: no invocation.
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "gentle-upgrade-run-")));
+	try {
+		mkdirSync(join(root, "node_modules", "corepack", "dist"), { recursive: true });
+		writeFileSync(join(root, "pnpm.cmd"), corepackShims[0]); writeFileSync(join(root, "node_modules", "corepack", "dist", "pnpm.js"), "process.exit(9)\n");
+		const env = nativePath([root, dirname(process.execPath), join(process.env.SystemRoot!, "System32")]);
+		assert.equal(await upgradeInvocation({ platform: "win32", env, ...adapters })!("pnpm"), null);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// S6 notice on a real Windows host: one Windows PowerShell launch, real ACLs.
+test("native Windows: one Windows PowerShell launch walks every reused tool path and names each folder another account can change", { skip: nativeUnavailable }, async () => {
+	const f = await ownedNativeFixture();
+	try {
+		const safe = join(f.root, "safe"); const weak = join(f.root, "weak"); mkdirSync(safe); mkdirSync(weak);
+		writeFileSync(join(safe, "node.exe"), "not executed fixture"); writeFileSync(join(weak, "go.exe"), "not executed fixture");
+		await grantEveryone(f.root, weak, modifyRights);
+		const launches: string[] = [];
+		const processAdapter = (command: string, args: string[], env: NodeJS.ProcessEnv) => { launches.push(command); return windowsProcessCheck(command, args, env); };
+		const results = windowsModule.verifyWindowsStorageMany([join(safe, "node.exe"), join(weak, "go.exe"), join(f.root, "missing", "pi.cmd")], process.env, { processAdapter });
+		assert.equal(launches.length, 1);
+		assert.equal(results[0], null);
+		assert.deepEqual([results[1]?.check, realpathSync.native(results[1]!.at!), results[1]?.sid, results[1]?.rights], ["parent-acl-mask", realpathSync.native(weak), "S-1-1-0", "0x001301BF"]);
+		assert.deepEqual(results[2], { check: "unchecked", at: join(f.root, "missing", "pi.cmd") }, "a path whose walk cannot finish could not be checked");
+		// The single-path walk agrees on both.
+		verifyWindowsStorage(join(safe, "node.exe"), process.env);
+		assert.throws(() => verifyWindowsStorage(join(weak, "go.exe"), process.env), (error: { check?: string }) => error.check === "parent-acl-mask");
+		// The wizard's probe reaches the same finding for the Go on the user's PATH.
+		const adapters = hostAdapters();
+		const env = withoutPnpmHome(nativePath([safe, weak, join(process.env.SystemRoot!, "System32")]), {});
+		const folders = await createProbes({ platform: "win32", env, run: adapters.run, fs: adapters.fs }).folders();
+		assert.deepEqual(Object.keys(folders ?? {}), ["go"], JSON.stringify(folders));
+		assert.equal(folders.go.check, "parent-acl-mask");
+	} finally { f.cleanup(); }
+});
+
+// S6 notice, B2: a tool reached through a junction (pnpm's global node_modules link)
+// is walked where it really is; the junction itself is never a finding.
+test("native Windows: the reused-folder walk follows a junction to the real folder and reports only a weak real folder", { skip: nativeUnavailable }, async (t) => {
+	const f = await ownedNativeFixture();
+	try {
+		const real = join(f.root, "store", "go"); mkdirSync(real, { recursive: true });
+		writeFileSync(join(real, "go.exe"), "not executed fixture");
+		const link = join(f.root, "linked-go");
+		try { symlinkSync(real, link, "junction"); }
+		catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) { t.skip(`owned junction creation capability unavailable: ${code}`); return; }
+			throw error;
+		}
+		// Control: the unresolved path stops at the junction, as the single-path walk does.
+		assert.throws(() => verifyWindowsStorage(join(link, "go.exe"), process.env), (error: { check?: string }) => error.check === "parent-reparse");
+		const adapters = hostAdapters();
+		const env = withoutPnpmHome(nativePath([link, join(process.env.SystemRoot!, "System32")]), {});
+		const probe = () => createProbes({ platform: "win32", env, run: adapters.run, fs: adapters.fs }).folders();
+		assert.equal(await probe(), null, "the junction is not a finding");
+		await grantEveryone(f.root, join(f.root, "store"), modifyRights);
+		const weak = await probe();
+		assert.equal(weak?.go?.check, "ancestor-acl-mask", JSON.stringify(weak));
+		assert.equal(realpathSync.native(weak.go.at!), realpathSync.native(join(f.root, "store")));
+	} finally { f.cleanup(); }
 });
 
 test("native Windows: the production probe leaves an older stable user Node for the pinned one and still refuses unknown or acquired versions", { skip: nativeUnavailable }, async () => {
