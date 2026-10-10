@@ -1206,6 +1206,40 @@ async function handleUpgradeCommand(commandArgs) {
 	}
 }
 
+// `gentle-shell self-uninstall`: like upgrade, runs before any Pi runtime check,
+// so it also works when pi is missing.
+async function handleSelfUninstallCommand(commandArgs) {
+	const { runSelfUninstall } = await import("../runtime/gentle-shell-uninstall.mjs");
+	const { ownerManager } = await import("../scripts/main-channel.mjs");
+	const { hostAdapters } = await import("../scripts/installer-probes.mjs");
+	const { createInterface } = await import("node:readline/promises");
+	const fs = await import("node:fs/promises");
+	const { run } = hostAdapters();
+	const which = async (name) => findOnPath(name) ?? null;
+	const ctx = { env: process.env, home: homedir() };
+	const runCommand = (command, argv, options = {}) =>
+		run(command, argv, { env: options.env ?? process.env, cwd: options.cwd, deadlineMs: options.deadlineMs ?? 20 * 60_000 });
+	process.exitCode = await runSelfUninstall({
+		args: commandArgs,
+		env: process.env,
+		homedir: homedir(),
+		platform: process.platform,
+		interactive: process.stdin.isTTY === true,
+		resolveOwner: () => ownerManager({ ctx, platform: process.platform, packageRoot, fs, which, run: runCommand, command: "uninstall" }),
+		run: (command, argv) => runCommand(command, argv),
+		ask: async (question) => {
+			const prompt = createInterface({ input: process.stdin, output: process.stdout });
+			try {
+				return await prompt.question(question);
+			} finally {
+				prompt.close();
+			}
+		},
+		out: (line) => process.stdout.write(`${line}\n`),
+		err: (line) => process.stderr.write(`${line}\n`),
+	});
+}
+
 async function main() {
 	const args = parseLauncherArgs(process.argv.slice(2));
 	if (args.error !== undefined) fail(`${args.error}\nRun 'gentle-shell --help' for usage.`, 2);
@@ -1219,6 +1253,10 @@ async function main() {
 	}
 	if (args.command === "upgrade") {
 		await handleUpgradeCommand(args.commandArgs);
+		return;
+	}
+	if (args.command === "self-uninstall") {
+		await handleSelfUninstallCommand(args.commandArgs);
 		return;
 	}
 

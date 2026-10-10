@@ -289,8 +289,13 @@ async function npmGlobalRoot(npm, run, fs) {
 	return isAbsolute(reported) ? fs.realpath(reported).catch(() => null) : null;
 }
 
-/** The package manager that owns this installation, or a typed refusal. */
-async function ownerManager({ ctx, platform, packageRoot, fs, which, run }) {
+const OWNER_ADVICE = Object.freeze({ upgrade: "update it the way you installed it", uninstall: "remove it the way you installed it" });
+
+/**
+ * The package manager that owns this installation, or a typed refusal whose code
+ * names the `command` that asked (`upgrade` or `uninstall`).
+ */
+export async function ownerManager({ ctx, platform, packageRoot, fs, which, run, command: purpose = "upgrade" }) {
 	const bin = pnpmGlobalBin({ platform, env: { HOME: ctx.home, ...ctx.env } });
 	const npm = await which("npm");
 	const [pnpmHome, root, npmRoot] = await Promise.all([
@@ -300,10 +305,10 @@ async function ownerManager({ ctx, platform, packageRoot, fs, which, run }) {
 	]);
 	const name = installOwner({ packageRoot: root, pnpmHome, npmRoot, platform });
 	if (!name) {
-		throw new MainChannelError("upgrade-owner-unknown", `neither pnpm nor npm owns ${root ?? packageRoot} (a linked source checkout, for example); update it the way you installed it`);
+		throw new MainChannelError(`${purpose}-owner-unknown`, `neither pnpm nor npm owns ${root ?? packageRoot} (a linked source checkout, for example); ${OWNER_ADVICE[purpose]}`);
 	}
 	const command = name === "npm" ? npm : await which("pnpm");
-	if (!command) throw new MainChannelError("upgrade-manager-missing", `${name}, which owns this Gentle Shell installation, is not on PATH`);
+	if (!command) throw new MainChannelError(`${purpose}-manager-missing`, `${name}, which owns this Gentle Shell installation, is not on PATH`);
 	return { name, command };
 }
 

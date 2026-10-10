@@ -4,7 +4,7 @@ import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CHANNEL_SCHEMA, MainChannelError, readChannel, runUpgrade, writeChannel } from "../scripts/main-channel.mjs";
+import { CHANNEL_SCHEMA, MainChannelError, ownerManager, readChannel, runUpgrade, writeChannel } from "../scripts/main-channel.mjs";
 
 const AI_SHA = "1f9d5e6423e37f7d2316859045f379ba9b5d8c3a";
 const SHELL_SHA = "6e7e3a18f794223396527a54c7c36d19c7d236c6";
@@ -64,7 +64,8 @@ function world({ owner = "pnpm", latest = "4.1.0", commits = { ai: AI_SHA, shell
 		adapters: { fetch, run, fs: fsPromises, which }, out: (line: string) => lines.push(line) });
 	const installs = () => calls.filter((call) => ["add", "install"].includes(call.argv[0]) && !call.argv[1]?.includes("cmd/gentle-ai@"))
 		.map((call) => `${call.command} ${call.argv.join(" ")}`);
-	return { root, home, ctx, calls, lines, fetches, upgrade, installs, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+	const manager = (command?: string) => ownerManager({ ctx, platform: "darwin", packageRoot, fs: fsPromises, which, run, ...(command === undefined ? {} : { command }) });
+	return { root, home, ctx, calls, lines, fetches, upgrade, installs, manager, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("a release install that is already the latest release changes nothing", async () => {
@@ -95,6 +96,39 @@ test("a Gentle Shell that neither pnpm nor npm owns, such as an npm-linked check
 		await assert.rejects(w.upgrade([]), (error: MainChannelError) => error.code === "upgrade-owner-unknown");
 		assert.deepEqual(w.installs(), []);
 	} finally { w.cleanup(); }
+});
+
+test("self-uninstall resolves the owning package manager with its own refusals", async () => {
+	for (const [owner, expected] of [["pnpm", { name: "pnpm", command: "/usr/bin/pnpm" }], ["npm", { name: "npm", command: "/usr/bin/npm" }]] as const) {
+		const w = world({ owner });
+		try {
+			assert.deepEqual(await w.manager("uninstall"), expected);
+		} finally { w.cleanup(); }
+	}
+	const linked = world({ owner: "linked" });
+	try {
+		await assert.rejects(linked.manager("uninstall"), (error: MainChannelError) =>
+			error.code === "uninstall-owner-unknown" && /remove it the way you installed it/.test(error.message));
+	} finally { linked.cleanup(); }
+	const missing = world({ tools: ["npm"] });
+	try {
+		await assert.rejects(missing.manager("uninstall"), (error: MainChannelError) => error.code === "uninstall-manager-missing");
+	} finally { missing.cleanup(); }
+});
+
+test("upgrade keeps its owner refusals unchanged", async () => {
+	const linked = world({ owner: "linked" });
+	try {
+		await assert.rejects(linked.manager(), (error: MainChannelError) =>
+			error.code === "upgrade-owner-unknown" && /update it the way you installed it/.test(error.message));
+	} finally { linked.cleanup(); }
+	const missing = world({ tools: ["npm"] });
+	try {
+		await assert.rejects(missing.manager(), (error: MainChannelError) =>
+			error.code === "upgrade-manager-missing" && /which owns this Gentle Shell installation, is not on PATH/.test(error.message));
+		await assert.rejects(missing.upgrade([]), (error: MainChannelError) => error.code === "upgrade-manager-missing");
+		assert.deepEqual(missing.installs(), []);
+	} finally { missing.cleanup(); }
 });
 
 test("an unreachable registry fails without installing anything", async () => {

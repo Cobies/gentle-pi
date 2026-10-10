@@ -346,6 +346,16 @@ gentle-shell upgrade --channel release
 
 `gentle-shell upgrade` uses the package manager that owns your installation. On the main channel it rebuilds Gentle AI and Gentle Shell from the latest `main` commits (only what changed) and needs pnpm and Go (a Go older than the minimum is replaced, for the build only, by the pinned Go the installer left in its own folder); switching back to release restores the pinned Gentle AI binary. `gentle-shell update` is a different command: it is Pi's own package update. More: **[upgrade reference](docs/readme-reference.md#upgrade-subcommand-and-channels)**.
 
+### Remove it
+
+```bash
+# Show what would be removed, then remove it after confirming
+gentle-shell self-uninstall --dry-run
+gentle-shell self-uninstall
+```
+
+`gentle-shell self-uninstall` removes Gentle Shell's own data, its isolated home and the `gentle-pi` package. It keeps the shared Gentle AI configuration in `~/.pi/gentle-ai` unless you accept or pass `--include-shared`, and never touches your Pi home or custom `--home` homes. `gentle-shell uninstall` is Pi's own alias for `remove`. More: **[Removing Gentle Shell](docs/gentle-shell-uninstall.md)**.
+
 ### Background jobs
 
 Use `/gentle:jobs` to inspect this session's background commands and monitors. Running jobs appear first; each group is ordered newest first. Arrow keys select a job, `Tab` opens details on narrow terminals, `s` stops a running job, and `q` closes the modal.
@@ -398,6 +408,7 @@ Start with the product-facing destination, then move into the operational refere
 | [Telemetry](docs/telemetry.md) | Approved fields and source limitations. |
 | [Delegated verification](docs/delegated-verification.md) | Practical verification guidance. |
 | [Skill style guide](docs/skill-style-guide.md) | The package skill contract. |
+| [Removing Gentle Shell](docs/gentle-shell-uninstall.md) | What `gentle-shell self-uninstall` removes, keeps and never touches. |
 | [Installation wizard (preview)](docs/install-wizard.md) | How the browser installer checks your computer, what it installs on the release and main channels, its security model, and what is still being verified. |
 
 <p align="right"><a href="#top">Back to top ↑</a></p>
