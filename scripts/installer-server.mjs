@@ -141,6 +141,8 @@ export const guidance = Object.freeze({
 		ready: "Gentle Shell is installed. Run `gentle-shell` in a terminal.",
 		"terminal-action-required": "Gentle Shell is installed. Open a new terminal so it picks up the updated PATH, then run `gentle-shell`.",
 	}),
+	// A failed install, main-channel or update step whose detail shows GitHub's anonymous API limit.
+	githubRateLimit: "GitHub's limit for anonymous API requests was reached on this network, so the installation could not finish. Wait up to an hour, then run the installer again.",
 	// A failed shell-setup whose detail shows GitHub's anonymous API limit.
 	setupRateLimit: "`gentle-shell setup` could not finish because GitHub's limit for anonymous API requests was reached on this network. Wait up to an hour, then run the installer again.",
 	// A failed acquire-go whose detail names a Go folder the installer did not publish.
@@ -161,9 +163,13 @@ function setupDetail(value) {
 const rateLimited = (detail) => /rate limit/i.test(detail) || (/GitHub API/i.test(detail) && /\b403\b/.test(detail));
 const unknownShell = (detail) => /ERR_PNPM_(?:UNKNOWN|UNSUPPORTED)_SHELL/.test(detail);
 const goConflict = (detail) => detail.startsWith("Conflicting Go destination: ");
+// The main channel's typed error when GitHub refused the latest main commit with HTTP 403.
+const githubLimited = (detail) => rateLimited(detail) || (/\bmain-commit-unavailable\b/.test(detail) && /\bHTTP 403\b/.test(detail));
 // Fixed steps whose sanitized last error line may reach the browser.
-const detailSteps = Object.freeze({ "shell-setup": rateLimited, "persist-path": unknownShell, "acquire-go": goConflict });
-const detailGuidance = Object.freeze({ "shell-setup": "setupRateLimit", "persist-path": "persistPathShell", "acquire-go": "goDestinationConflict" });
+const detailSteps = Object.freeze({ "shell-setup": rateLimited, "persist-path": unknownShell, "acquire-go": goConflict,
+	"install-global": githubLimited, "install-shell-main": githubLimited, "build-gentle-ai-main": githubLimited, "update-shell": githubLimited });
+const detailGuidance = Object.freeze({ "shell-setup": "setupRateLimit", "persist-path": "persistPathShell", "acquire-go": "goDestinationConflict",
+	"install-global": "githubRateLimit", "install-shell-main": "githubRateLimit", "build-gentle-ai-main": "githubRateLimit", "update-shell": "githubRateLimit" });
 
 const ID = /^[a-z][a-z0-9-]{0,63}$/;
 function identifier(value, fallback = "unknown") {

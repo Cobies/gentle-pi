@@ -759,7 +759,7 @@ test("a failed setup passes only its bounded detail through, with rate-limit gui
 		}
 	}
 	// A detail on any other step never reaches the browser.
-	const { host, port, login } = await start({ runInstall: async () => ({ outcome: "failed", failedStep: "install-global", completed: [], detail: rateLimited }) });
+	const { host, port, login } = await start({ runInstall: async () => ({ outcome: "failed", failedStep: "record-channel", completed: [], detail: rateLimited }) });
 	try {
 		const cookie = await login();
 		const { planId } = await plan(port, cookie);
@@ -767,7 +767,7 @@ test("a failed setup passes only its bounded detail through, with rate-limit gui
 		await waitFor(() => host.outcome() !== null);
 		const progress = JSON.parse((await send(port, { path: "/api/progress", headers: { cookie, ...API } })).body);
 		assert.equal("detail" in progress.outcome, false);
-		assert.equal(progress.outcome.guidance, guidance.failed["install-global"]);
+		assert.equal(progress.outcome.guidance, guidance.failed["record-channel"]);
 	} finally {
 		await host.close("test");
 	}
@@ -807,6 +807,35 @@ test("a failed setup passes only its bounded detail through, with rate-limit gui
 			await run.host.close("test");
 		}
 	}
+	// The install, main-channel and update steps pass their detail through; GitHub's anonymous
+	// API limit (a main commit GitHub refused with HTTP 403) gets the rate-limit guidance.
+	const mainLimited = "main-commit-unavailable: GitHub did not return the latest main commit of Gentleman-Programming/gentle-shell (HTTP 403)";
+	for (const [step, detail, expected] of [
+		["install-global", ".../gentle-pi postinstall:   root cause Error: go: open ~/x: The directory name is invalid.", guidance.failed["install-global"]],
+		["install-global", rateLimited, guidance.githubRateLimit],
+		["install-shell-main", mainLimited, guidance.githubRateLimit],
+		["install-shell-main", "main-commit-unavailable: GitHub did not return the latest main commit of Gentleman-Programming/gentle-shell (HTTP 500)", guidance.failed["install-shell-main"]],
+		["build-gentle-ai-main", "main-commit-unavailable: GitHub did not return the latest main commit of Gentleman-Programming/gentle-ai (HTTP 403)", guidance.githubRateLimit],
+		["build-gentle-ai-main", "golang.org/x/sys/cpu: fork/exec ~/asm.exe: The directory name is invalid.", guidance.failed["build-gentle-ai-main"]],
+		["update-shell", mainLimited, guidance.githubRateLimit],
+		["update-shell", "tar: Error is not recoverable: exiting now", guidance.failed["update-shell"]],
+	]) {
+		const run = await start({ runInstall: async () => ({ outcome: "failed", failedStep: step, completed: [], detail }) });
+		try {
+			const cookie = await run.login();
+			const { planId } = await plan(run.port, cookie);
+			await post(run.port, "/api/install", cookie, { planId, consent: true });
+			await waitFor(() => run.host.outcome() !== null);
+			const progress = JSON.parse((await send(run.port, { path: "/api/progress", headers: { cookie, ...API } })).body);
+			assert.equal(progress.outcome.detail, detail, step);
+			assert.equal(progress.outcome.guidance, expected, `${step}: ${detail}`);
+		} finally {
+			await run.host.close("test");
+		}
+	}
+	assert.match(guidance.githubRateLimit, /GitHub/);
+	assert.match(guidance.githubRateLimit, /hour/);
+	assert.doesNotMatch(guidance.githubRateLimit, /gentle-shell setup|token|credential|password|log in|sign in/i);
 	assert.match(guidance.goDestinationConflict, /earlier/);
 	assert.match(guidance.goDestinationConflict, /Remove that folder/);
 	assert.doesNotMatch(guidance.goDestinationConflict, /network/);

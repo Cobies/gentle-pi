@@ -135,6 +135,14 @@ jobs:
         with:
           node-version: "24"
 
+      # The native Windows source-build test needs a local Go at the repository minimum.
+      - name: Setup Go (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: "1.25.14"
+          cache: false
+
       - name: Run installer suites
         run: node --experimental-strip-types --test --test-reporter=tap tests/install-wizard.test.ts tests/installer-server.test.ts tests/verify-package-files.test.ts tests/installer-probes.test.ts tests/installer-runner.test.ts tests/installer-preflight.test.ts tests/installer-posix-bootstrap.test.ts tests/installer-windows-bootstrap.test.ts
 

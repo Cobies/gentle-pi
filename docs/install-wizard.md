@@ -223,7 +223,8 @@ Adapters:
   is discarded because it can hold private paths, unless the caller passes
   `stderrTail: <bytes>` (a positive integer, clamped to 4 KiB): then stderr is
   piped and only its last bytes are kept and returned as `stderrTail`, also on a
-  deadline. Only the runner's `shell-setup` and `persist-path` steps ask for it. A spawn failure returns
+  deadline. Only the runner's `shell-setup`, `persist-path` and `pnpm add -g` steps
+  ask for it, and the main channel's `go install` and source extraction. A spawn failure returns
   `code: null`. The deadline signals the direct child only, not descendants;
   it then destroys the child's pipes and settles as timed out (`code: null`,
   `signal: "SIGKILL"`) without waiting for `close`, which a descendant holding
@@ -396,8 +397,17 @@ Mutating and verification steps, returning `failed` with `failedStep` and the
    pnpm `ERR_` code), else the last non-empty line, without terminal escapes,
    control or bidi characters, with the user's home replaced by `~` and at most
    300 characters (`setupErrorDetail`). The raw output is not kept; only this
-   step, `persist-path` and `acquire-go` (the Go folder in its way) have a
-   detail.
+   step, `persist-path`, `acquire-go` (the Go folder in its way), `install-global`,
+   the main steps `build-gentle-ai-main` and `install-shell-main`, and the update's
+   `update-shell` have a detail. A failed `pnpm add -g` (`install-global`, or the
+   main package's) takes it from the same 4-KiB stderr tail or, when that has no
+   line, from stdout, where pnpm reports a failed postinstall; the postinstall
+   prints its error's whole `cause` chain and ends with the root cause's last
+   output line as `root cause Error: …`, so that line is the one selected. A main
+   step or the update takes it only from a `MainChannelError`: its message, then
+   the failed `go install` or extraction's stderr tail kept as its cause (for
+   example `main-commit-unavailable: … (HTTP 403)` when GitHub refuses the latest
+   commit). Any other error's text is never kept.
 6. `persist-path`, only when `$PNPM_HOME/bin` was not on the user's own PATH:
    `pnpm setup`, then the outcome is `terminal-action-required` with
    `action: "open-new-terminal"`. A child environment never proves that a fresh
@@ -601,7 +611,10 @@ publishes main builds, so main is built on this computer
      `gentle-pi.dev-binary/v1` override, which never falls back to the pinned
      binary silently.
   2. `install-shell-main`: downloads the latest `main` commit's source tarball,
-     sets its version to `<version>-main.<sha12>`, removes `prepack` and `prepare`
+     extracts it (on Windows with `%SystemRoot%\System32\tar.exe` by absolute
+     path, never a `tar` from PATH: Git for Windows' MSYS tar in `usr\bin` reads
+     a `D:\…` archive path as a remote host and fails with `Cannot connect to D:
+     resolve failed`), sets its version to `<version>-main.<sha12>`, removes `prepack` and `prepare`
      (which would run the full test suite), packs it with `pnpm pack` into
      `<config home>/main/packages/`, runs `pnpm add -g <tgz> --allow-build=gentle-pi`
      and requires `pnpm list -g` to report that exact version under PNPM_HOME.
@@ -814,13 +827,17 @@ simply unknown paths.
 `guidance` (exported) holds fixed English text for every runner blocked
 reason, every failed step, every preflight blocker code and both successful
 outcomes, plus a generic fallback; a runner exception becomes a `failed`
-outcome with the fallback. A failed `shell-setup`, `persist-path` or `acquire-go` outcome also passes the
+outcome with the fallback. A failed `shell-setup`, `persist-path`, `acquire-go`, `install-global`,
+`install-shell-main`, `build-gentle-ai-main` or `update-shell` outcome also passes the
 runner's `detail` through, bounded again (string only, control and bidi
 characters removed, at most 300 characters); the host drops it for any other
 step. When that detail names GitHub's rate limit (`rate limit`, or `GitHub API`
 together with `403`), the guidance becomes `guidance.setupRateLimit`: GitHub's
 anonymous API limit was reached on this network, wait up to an hour and run the
-installer again. No token or credential is ever requested. For `persist-path`,
+installer again. For `install-global`, `install-shell-main`, `build-gentle-ai-main`
+and `update-shell`, the same match, or `main-commit-unavailable` together with
+`HTTP 403`, selects `guidance.githubRateLimit`, the same advice without naming
+`gentle-shell setup`. No token or credential is ever requested. For `persist-path`,
 a detail with `ERR_PNPM_UNKNOWN_SHELL` or `ERR_PNPM_UNSUPPORTED_SHELL` selects
 `guidance.persistPathShell`: open a regular terminal and run the installer
 again, or add `$PNPM_HOME/bin` to PATH manually. For `acquire-go`, a detail
@@ -845,7 +862,7 @@ HTML).
 | Check | Shown while `GET /api/progress?after=0` and `GET /api/plan` run. A running installation resumes the Install screen; a finished one shows its outcome instead of a new plan. |
 | Review | Each fixed action with its description, the `profileChange` and `persistence` disclosures (state as text: "Will change", "No change"), one consent checkbox and **Install Gentle Shell** (for a setup recovery, "Finish setting up Gentle Shell" and **Complete setup**). Without the checkbox no request is sent; the error is announced and focus moves to the checkbox. Preflight blockers replace the plan with their guidance, **Check again** and **Close installer**. |
 | Install | Expected runner steps (`expectedSteps`) with a text status (Done, In progress, Pending, Failed, Blocked, Not run), a `<progress>` bar and a terminal-style log of `{ seq, step, status, reason }` entries. |
-| Done | `ready`: run `gentle-shell`. `terminal-action-required`: open a new terminal, then run `gentle-shell`. `blocked`/`failed`: the host's guidance, the reason or failed step, the steps that finished and the log. A failed `shell-setup`, `persist-path` or `acquire-go` with a detail also shows it under **Last error from gentle-shell setup**, **Last error from pnpm setup** or **Last error from the Go download** as one plain text node (backticks stay literal). Every outcome offers **Close installer** (`POST /api/shutdown`). |
+| Done | `ready`: run `gentle-shell`. `terminal-action-required`: open a new terminal, then run `gentle-shell`. `blocked`/`failed`: the host's guidance, the reason or failed step, the steps that finished and the log. A failed step with a detail also shows it under **Last error from** its label: `gentle-shell setup`, `pnpm setup`, `the Go download`, `pnpm add -g` (`install-global`), `the Gentle Shell main install`, `the Gentle AI main build` or `the Gentle Shell update`, as one plain text node (backticks stay literal). Every outcome offers **Close installer** (`POST /api/shutdown`). |
 
 Behavior worth knowing:
 
@@ -1124,6 +1141,20 @@ runner blocks on Windows unless preflight reports a reusable Go ≥1.25.10 or th
 plan acquires the [pinned Go](#pinned-go) after consent, because gentle-pi's
 postinstall may build Gentle AI from source; it never treats an explicit
 override as native-package evidence.
+
+That Go SumDB source build runs Go in a fresh private directory created with
+`mkdtemp` under the system temp directory (`%TEMP%\gai-XXXXXX`: GOBIN, GOPATH,
+GOMODCACHE, GOCACHE, TEMP/TMP and the commands' working directory), never inside
+the installed package, and always removes it. The binary is then copied into the
+package's staging directory, checked there (build metadata, exact version,
+SHA-256 manifest) and published as before. Run 38063142924 (LongPathsEnabled=0)
+reproduced why: from the 179-character pnpm 11 store path of a main package, the
+build inside the package failed with `asm.exe: fork/exec …: The directory name is
+invalid.`, because the working directories Go gives `asm.exe` inside GOMODCACHE
+exceed MAX_PATH, which CreateProcess rejects; the same build succeeded from a
+4-character and a 161-character root. When the build fails, the postinstall prints
+the whole `cause` chain with each code and the last 4000 characters of the failed
+command's stderr and stdout.
 
 ### Policy, bounds and evidence limits
 

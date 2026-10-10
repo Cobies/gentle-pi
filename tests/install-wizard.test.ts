@@ -655,11 +655,21 @@ test("a failed setup shows its last error as labelled plain text", () => {
 	assert.ok(persistSection, "pnpm setup detail section");
 	assert.equal(all(persistSection, "code")[0].textContent, pnpmDetail);
 	assert.doesNotMatch(persistNode.textContent, /Last error from gentle-shell setup/);
+	// The install, main-channel and update steps label their detail with what failed.
+	for (const [step, label] of [["install-global", "pnpm add -g"], ["install-shell-main", "the Gentle Shell main install"],
+		["build-gentle-ai-main", "the Gentle AI main build"], ["update-shell", "the Gentle Shell update"]]) {
+		const failed = wizard.outcomeModel({ outcome: "failed", failedStep: step, completed: [], guidance: "g", detail: hostile });
+		assert.deepEqual([failed.detail, failed.detailCommand], [hostile, label], step);
+		const rendered = wizard.renderOutcome(document, failed, { close() {} });
+		const labelled = all(rendered, "section").find((element) => element.textContent.startsWith(`Last error from ${label}`));
+		assert.ok(labelled, `${step} detail section`);
+		assert.equal(all(labelled, "code")[0].textContent, hostile);
+	}
 	// The detail is shown only for a failed setup step with a string value, bounded to 300 characters.
 	const long = wizard.outcomeModel({ outcome: "failed", failedStep: "shell-setup", completed: [], guidance: "g", detail: "y".repeat(400) });
 	assert.equal(long.detail.length, 300);
 	for (const outcome of [
-		{ outcome: "failed", failedStep: "install-global", completed: [], guidance: "g", detail: hostile },
+		{ outcome: "failed", failedStep: "record-channel", completed: [], guidance: "g", detail: hostile },
 		{ outcome: "failed", failedStep: "shell-setup", completed: [], guidance: "g", detail: 42 },
 		{ outcome: "failed", failedStep: "shell-setup", completed: [], guidance: "g", detail: "" },
 		{ outcome: "ready", completed: [], guidance: "g", detail: hostile },

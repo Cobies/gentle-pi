@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { gentleAiBinaryPath } from "../runtime/gentle-ai-binary.mjs";
+import { MainChannelError } from "../scripts/main-channel.mjs";
 import { goAcquisition, persistencePins, planPreflight, requirements } from "../scripts/installer-preflight.mjs";
 import {
 	PI_INSTALL_VERSION,
@@ -705,8 +706,9 @@ test("a failed gentle-shell setup reports its last error line as a sanitized det
 	assert.equal(result.outcome, "failed");
 	assert.equal(result.failedStep, "shell-setup");
 	assert.equal(result.detail, "Error: execute install pipeline: download engram binary: fetch latest engram version: GitHub API returned HTTP 403 (~/.gentle-shell/agent)");
-	// Only the setup child gets its stderr tail captured; every other command keeps stderr discarded.
-	assert.deepEqual(h.calls.filter((call) => call.stderrTail !== undefined).map((call) => [call.args, call.stderrTail]), [[[SHELL_ENTRY, "setup"], 4096]]);
+	// The setup child gets its stderr tail captured, as pnpm's global add does (detail below).
+	assert.deepEqual(h.calls.filter((call) => call.stderrTail !== undefined).map((call) => [call.args.at(-1), call.stderrTail]),
+		[["--allow-build=gentle-pi", 4096], ["setup", 4096]]);
 	for (const setup of [{ code: 2 }, { code: 2, stderrTail: " \n\t\n" }]) {
 		const silent = await runStandardInstall({ plan: plan(), consent: true }, harness({ results: { "gentle-shell setup": setup } }).adapters);
 		assert.equal(silent.failedStep, "shell-setup");
@@ -715,10 +717,33 @@ test("a failed gentle-shell setup reports its last error line as a sanitized det
 	const succeeded = await runStandardInstall({ plan: plan(), consent: true }, harness({ results: { "gentle-shell setup": { code: 0, stderrTail: "Error: ignored" } } }).adapters);
 	assert.equal(succeeded.outcome, "ready");
 	assert.equal("detail" in succeeded, false);
-	// Only shell-setup carries a detail, never an earlier failed step.
-	const early = await runStandardInstall({ plan: plan(), consent: true }, harness({ results: { add: { code: 1, stderrTail: "Error: x" } } }).adapters);
-	assert.equal(early.failedStep, "install-global");
+	// A step without a detail rule never carries one.
+	const early = await runStandardInstall({ plan: plan(), consent: true }, harness({ results: { "bin -g": { code: 0, stdout: "/elsewhere\n" }, add: { code: 1, stderrTail: "Error: x" } } }).adapters);
+	assert.equal(early.reason, "global-bin-mismatch");
 	assert.equal("detail" in early, false);
+});
+
+test("a gentle-shell setup detail is unchanged next to the pnpm install's own detail rule", async () => {
+	const stderrTail = `Error: GitHub API returned HTTP 403 (${HOME}/.gentle-shell/agent)\n`;
+	const h = harness({ results: { add: { code: 0, stdout: "Error: an earlier warning\n", stderrTail: "Error: ignored\n" }, "gentle-shell setup": { code: 1, stderrTail } } });
+	const result = await runStandardInstall({ plan: plan(), consent: true }, h.adapters);
+	assert.deepEqual([result.outcome, result.failedStep, result.detail], ["failed", "shell-setup", "Error: GitHub API returned HTTP 403 (~/.gentle-shell/agent)"]);
+});
+
+// Observed shape: pnpm reports a failed postinstall on stdout, its own summary last.
+const PNPM_ADD_POSTINSTALL = `Progress: resolved 120, reused 119, downloaded 1, added 2\n.../gentle-pi postinstall: gentle-pi could not install its package-local Gentle AI v4.0.0 binary: Gentle AI Go SumDB source installation failed.\n.../gentle-pi postinstall:   caused by Error: Command failed: ${HOME}/go/bin/go install (code 1)\n.../gentle-pi postinstall:   root cause Error: go: open ${HOME}/x: The directory name is invalid.\n ELIFECYCLE  Command failed with exit code 1.\n`;
+
+test("a failed pnpm install of Pi and Gentle Shell reports pnpm's last error line, from stderr else stdout", async () => {
+	const h = harness({ results: { add: { code: 1, stdout: PNPM_ADD_POSTINSTALL, stderrTail: "" } } });
+	const result = await runStandardInstall({ plan: plan(), consent: true }, h.adapters);
+	assert.equal(result.failedStep, "install-global");
+	assert.equal(result.detail, ".../gentle-pi postinstall:   root cause Error: go: open ~/x: The directory name is invalid.");
+	assert.deepEqual(h.calls.filter((call) => call.stderrTail !== undefined).map((call) => [call.args.slice(1).join(" "), call.stderrTail]), [[INSTALL, 4096]]);
+	const stderr = await runStandardInstall({ plan: plan(), consent: true }, harness({ results: { add: { code: 1, stdout: PNPM_ADD_POSTINSTALL,
+		stderrTail: `[ERR_PNPM_FETCH_404] GET https://registry.npmjs.org/gentle-pi: Not Found\n` } } }).adapters);
+	assert.equal(stderr.detail, "[ERR_PNPM_FETCH_404] GET https://registry.npmjs.org/gentle-pi: Not Found");
+	const silent = await runStandardInstall({ plan: plan(), consent: true }, harness({ results: { add: { code: 1 } } }).adapters);
+	assert.deepEqual([silent.failedStep, "detail" in silent], ["install-global", false]);
 });
 
 // Observed with pnpm 11.1.1 and no SHELL: the error goes to stdout after the global CLI install output.
@@ -730,8 +755,9 @@ test("a failed pnpm setup reports its error line from stderr, else from stdout",
 	const result = await runStandardInstall({ plan: plan(), consent: true }, h.adapters);
 	assert.equal(result.failedStep, "persist-path");
 	assert.equal(result.detail, "[ERR_PNPM_UNKNOWN_SHELL] Could not infer shell type.");
-	// Both fixed setup commands, and only they, request the same bounded stderr tail.
-	assert.deepEqual(h.calls.filter((call) => call.stderrTail !== undefined).map((call) => [call.args.at(-1), call.stderrTail]), [["setup", 4096], ["setup", 4096]]);
+	// Both fixed setup commands request the same bounded stderr tail, as pnpm's global add does.
+	assert.deepEqual(h.calls.filter((call) => call.stderrTail !== undefined).map((call) => [call.args.at(-1), call.stderrTail]),
+		[["--allow-build=gentle-pi", 4096], ["setup", 4096], ["setup", 4096]]);
 	const stderr = await runStandardInstall({ plan: plan(), consent: true }, harness({ env: noPath,
 		results: { "pnpm setup": { code: 1, stdout: PNPM_SETUP_NO_SHELL, stderrTail: "Error: EACCES: permission denied, open '/home/u/.bashrc'\n" } } }).adapters);
 	assert.equal(stderr.detail, "Error: EACCES: permission denied, open '~/.bashrc'");
@@ -1330,8 +1356,8 @@ function mainChannel() {
 				calls.push(["buildGentleAi", { commit: request.commit, goPath: request.goPath, platform: request.platform, ctx: request.ctx }]);
 				return { binaryPath: "/main/gentle-ai", version: "4.0.1-0.20261008202137-1f9d5e6423e3" };
 			},
-			packShell: async (request: { commit: string; ctx: object }) => {
-				calls.push(["packShell", { commit: request.commit, ctx: request.ctx }]);
+			packShell: async (request: { commit: string; ctx: object; platform: string }) => {
+				calls.push(["packShell", { commit: request.commit, ctx: request.ctx, platform: request.platform }]);
 				return MAIN_TGZ;
 			},
 			writeChannel: async (ctx: object, state: object) => {
@@ -1361,7 +1387,7 @@ test("the main plan builds Gentle AI and installs the main Shell after the verif
 		["resolveCommit", { repository: "Gentleman-Programming/gentle-ai" }],
 		["buildGentleAi", { commit: AI_SHA, goPath: "/usr/bin/go", platform: "linux", ctx }],
 		["resolveCommit", { repository: "Gentleman-Programming/gentle-shell" }],
-		["packShell", { commit: SHELL_SHA, ctx }],
+		["packShell", { commit: SHELL_SHA, ctx, platform: "linux" }],
 		["writeChannel", { ctx, state: { channel: "main", shellCommit: SHELL_SHA, gentleAiCommit: AI_SHA } }],
 	]);
 	assert.deepEqual(h.calls.at(-1)?.args, [`${MAIN_ROOT}/bin/gentle-shell.mjs`, "setup"]);
@@ -1426,6 +1452,34 @@ test("a Go destination left by an earlier run fails acquire-go with the folder t
 	assert.equal(result.outcome, "failed");
 	assert.equal(result.failedStep, "acquire-go");
 	assert.equal(result.detail, `Conflicting Go destination: ~/.pi/gentle-ai/tools/go/${goAcquisition.version}`);
+});
+
+test("a failed main step reports the main channel's error and its cause, the home as ~, never another error's text", async () => {
+	const build = mainHarness();
+	build.adapters.mainChannel.buildGentleAi = async () => {
+		throw new MainChannelError("main-gentle-ai-build-failed", "go install github.com/gentleman-programming/gentle-ai/v4/cmd/gentle-ai@x failed",
+			new Error(`go: downloading golang.org/x/sys\ngolang.org/x/sys/cpu: fork/exec ${HOME}/.pi/asm: The directory name is invalid.`));
+	};
+	const built = await runStandardInstall({ plan: mainPlan(), consent: true }, build.adapters);
+	assert.deepEqual([built.failedStep, built.detail], ["build-gentle-ai-main", "golang.org/x/sys/cpu: fork/exec ~/.pi/asm: The directory name is invalid."]);
+	const limited = mainHarness();
+	limited.adapters.mainChannel.resolveCommit = async (repository: string) => {
+		if (repository.endsWith("/gentle-ai")) return AI_SHA;
+		throw new MainChannelError("main-commit-unavailable", `GitHub did not return the latest main commit of ${repository} (HTTP 403)`);
+	};
+	const resolved = await runStandardInstall({ plan: mainPlan(), consent: true }, limited.adapters);
+	assert.deepEqual([resolved.failedStep, resolved.detail],
+		["install-shell-main", "main-commit-unavailable: GitHub did not return the latest main commit of Gentleman-Programming/gentle-shell (HTTP 403)"]);
+	// The main package's own pnpm add reports pnpm's line, as install-global does.
+	const add = mainHarness(undefined, { results: { [LIST]: [emptyList, { code: 0, stdout: listing() }], add: [{ code: 0 }, { code: 1, stdout: PNPM_ADD_POSTINSTALL }] } });
+	const added = await runStandardInstall({ plan: mainPlan(), consent: true }, add.adapters);
+	assert.deepEqual([added.failedStep, added.detail], ["install-shell-main", ".../gentle-pi postinstall:   root cause Error: go: open ~/x: The directory name is invalid."]);
+	assert.equal(add.calls.filter((call) => call.stderrTail === 4096 && call.args.includes(MAIN_TGZ)).length, 1);
+	// Any other error keeps its text out of the result.
+	const plain = mainHarness();
+	plain.adapters.mainChannel.buildGentleAi = async () => { throw new Error(`EACCES ${HOME}/.pi`); };
+	const hidden = await runStandardInstall({ plan: mainPlan(), consent: true }, plain.adapters);
+	assert.deepEqual([hidden.failedStep, "detail" in hidden], ["build-gentle-ai-main", false]);
 });
 
 test("a channel that cannot be recorded fails the record step after the main Shell is installed", async () => {
@@ -1567,6 +1621,17 @@ test("an update stops before changing anything when the installed Gentle Shell o
 	const result = await runStandardInstall({ plan, consent: true }, h.adapters);
 	assert.deepEqual([result.outcome, result.failedStep], ["failed", "update-shell"]);
 	assert.equal(JSON.stringify(result).includes("EACCES"), false);
+});
+
+test("a failed Gentle Shell update reports the upgrade's main-channel error, the home as ~", async () => {
+	const plan = existingPlan({ shell: { available: true, version: "3.9.0", usable: true, global: true, owner: "npm" },
+		gentleAi: { available: null }, setup: { available: null } });
+	const h = updateHarness({ upgrade: async () => {
+		throw new MainChannelError("main-shell-pack-failed", "the Gentle Shell source archive could not be extracted",
+			new Error(`tar (child): Cannot connect to D: resolve failed\ntar: Error is not recoverable: exiting now (${HOME}/.pi)`));
+	} });
+	const result = await runStandardInstall({ plan, consent: true }, h.adapters);
+	assert.deepEqual([result.failedStep, result.detail], ["update-shell", "tar: Error is not recoverable: exiting now (~/.pi)"]);
 });
 
 // --- An older Pi: updated with the package manager that owns it, before any Gentle Shell step ------

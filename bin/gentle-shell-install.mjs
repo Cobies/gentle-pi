@@ -167,7 +167,9 @@ async function main() {
 						fetch: globalThis.fetch,
 						fs: fsPromises,
 						which: (name) => lookPath(name, upgradeEnv, platform, fs),
-						run: (command, argv, options = {}) => run(command, argv, { env: options.env ?? upgradeEnv, cwd: options.cwd, deadlineMs: options.deadlineMs ?? 20 * 60_000 }),
+						// stderrTail: a failed main build or extraction keeps its bounded stderr as the error's cause.
+						run: (command, argv, options = {}) => run(command, argv, { env: options.env ?? upgradeEnv, cwd: options.cwd, deadlineMs: options.deadlineMs ?? 20 * 60_000,
+							...(options.stderrTail === undefined ? {} : { stderrTail: options.stderrTail }) }),
 					},
 					out: () => {},
 				})) === 0;

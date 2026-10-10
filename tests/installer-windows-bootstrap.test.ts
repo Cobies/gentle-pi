@@ -1610,3 +1610,66 @@ test("native Windows: the production probe never runs a user Node behind a junct
 		assert.equal(existsSync(record), true);
 	} finally { f.cleanup(); }
 });
+
+// Run 38061123855: with Git for Windows' usr\bin first on PATH, a bare `tar` is MSYS tar,
+// which reads `D:\...` as a remote host ("Cannot connect to D: resolve failed").
+test("native Windows: the main channel extracts its source with System32's tar.exe even with Git's usr\\bin first on PATH", { skip: nativeUnavailable }, async () => {
+	const gitUsrBin = "C:\\Program Files\\Git\\usr\\bin";
+	assert.ok(existsSync(join(gitUsrBin, "tar.exe")), "the runner image ships Git for Windows' MSYS tar");
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "gentle-main-tar-")));
+	try {
+		const commit = "6e7e3a18f794223396527a54c7c36d19c7d236c6";
+		const stage = join(root, "stage"); mkdirSync(join(stage, `gentle-shell-${commit}`), { recursive: true });
+		writeFileSync(join(stage, `gentle-shell-${commit}`, "package.json"), JSON.stringify({ name: "gentle-pi", version: "4.0.0" }));
+		const archive = join(root, "source.tgz");
+		const created = spawnSync(join(process.env.SystemRoot!, "System32", "tar.exe"), ["-czf", archive, "-C", stage, `gentle-shell-${commit}`], { encoding: "utf8", windowsHide: true });
+		assert.equal(created.status, 0, created.stderr);
+		const env = nativePath([gitUsrBin, dirname(process.execPath), join(process.env.SystemRoot!, "System32"), process.env.SystemRoot!]);
+		const host = hostAdapters();
+		assert.equal((await lookPath("tar", env, "win32", host.fs))?.toLowerCase(), join(gitUsrBin, "tar.exe").toLowerCase(), "a bare tar resolves to MSYS tar");
+		const extracted: string[] = [];
+		const run = async (command: string, argv: string[], options: { cwd?: string; deadlineMs: number }) => {
+			if (argv[0] !== "pack") {
+				extracted.push(command);
+				return host.run(command, argv, { env, cwd: options.cwd, deadlineMs: options.deadlineMs, stderrTail: 4096 });
+			}
+			// pnpm pack is not under test: the extracted, rewritten manifest is enough.
+			const manifest = JSON.parse(readFileSync(join(options.cwd!, "package.json"), "utf8"));
+			writeFileSync(join(argv[argv.indexOf("--pack-destination") + 1], `gentle-pi-${manifest.version}.tgz`), "tgz");
+			return { code: 0, stdout: "" };
+		};
+		const bytes = readFileSync(archive);
+		const fetch = async () => ({ ok: true, status: 200, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
+		const { packMainShell } = await import("../scripts/main-channel.mjs");
+		const tgz = await packMainShell({ commit, ctx: { env: { GENTLE_PI_CONFIG_HOME: join(root, "config") }, home: root }, fetch, run,
+			pnpm: { command: "pnpm", prefix: [] }, fs: await import("node:fs/promises"), platform: "win32" });
+		assert.equal(tgz, join(root, "config", "main", "packages", "gentle-pi-4.0.0-main.6e7e3a18f794.tgz"));
+		assert.deepEqual(extracted, [join(process.env.SystemRoot!, "System32", "tar.exe")]);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// Run 38063142924: from a 179-character package root (a pnpm 11 store path) Go's asm.exe failed
+// with "The directory name is invalid." while building inside the package. The real source
+// build (network: proxy.golang.org and sum.golang.org) from a root deeper than 200 characters.
+test("native Windows: the Gentle AI source build succeeds from a package root deeper than 200 characters", { skip: nativeUnavailable }, async (t) => {
+	const installer = await import("../scripts/gentle-ai-installer.mjs");
+	const where = spawnSync(join(process.env.SystemRoot!, "System32", "where.exe"), ["go.exe"], { encoding: "utf8", windowsHide: true });
+	const go = where.status === 0 ? where.stdout.split(/\r?\n/)[0].trim() : "";
+	const version = go ? /go version (go\d+\.\d+\.\d+) /.exec(spawnSync(go, ["version"], { encoding: "utf8", windowsHide: true }).stdout ?? "")?.[1] : undefined;
+	if (!version || !installer.isGentleAiWindowsGoVersionSupported(version)) {
+		t.skip(`Go ${installer.GENTLE_AI_WINDOWS_MINIMUM_GO_VERSION} or newer is not on PATH (found ${version ?? "none"})`);
+		return;
+	}
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "gentle-deep-root-")));
+	try {
+		let packageRoot = root;
+		while (packageRoot.length <= 200) packageRoot = join(packageRoot, "nested-package-store-segment");
+		mkdirSync(packageRoot, { recursive: true });
+		const temporaryDirectory = join(root, "t"); mkdirSync(temporaryDirectory);
+		const result = await installer.installGentleAi({ packageRoot, platform: "win32", arch: process.arch, temporaryDirectory });
+		assert.equal(result.installed, true);
+		assert.equal(result.binaryPath, join(packageRoot, ".gentle-ai", `v${installer.INSTALLER_VERSION}`, "gentle-ai.exe"));
+		assert.ok(existsSync(result.binaryPath));
+		assert.deepEqual(readdirSync(temporaryDirectory), [], "the short build directory is removed");
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
