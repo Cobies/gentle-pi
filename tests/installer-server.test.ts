@@ -256,6 +256,23 @@ test("/api/plan is built server-side and explains profile and runtime persistenc
 	}
 });
 
+test("/api/plan lists only Node.js and npm for persistence when a newer pnpm 11 is already in $PNPM_HOME/bin", async () => {
+	const { host, port, login, runs } = await start({ collect: async () => collected({
+		pnpm: { available: true, version: "11.5.0", usable: true, compatible: true, persistent: true, inGlobalBin: true },
+	}) });
+	try {
+		const view = await plan(port, await login());
+		assert.deepEqual(view.blockers, []);
+		assert.deepEqual(view.actions.map((action: { id: string }) => action.id).filter((id: string) => /^(persist-|configure-npm)/.test(id)),
+			["persist-node", "persist-npm", "configure-npm-prefix"]);
+		assert.deepEqual(view.persistence.tools, ["node", "npm"]);
+		assert.ok(view.persistence.description.startsWith("node, npm will be installed under $PNPM_HOME"), view.persistence.description);
+		assert.deepEqual(runs, []);
+	} finally {
+		await host.close("test");
+	}
+});
+
 test("/api/plan reports blockers with guidance and no profile change when already on PATH", async () => {
 	const { host, port, login } = await start({ collect: async () => collected({
 		node: { available: true, version: "24.18.0", usable: true, persistent: true, npm: true },
@@ -425,6 +442,44 @@ test("/api/plan explains a Pi whose version cannot be read", async () => {
 			"Pi is already installed, but `pi --version` did not report a version this installer can check. Make sure `pi --version` works in a terminal, then select Check again.");
 	} finally {
 		await host.close("test");
+	}
+});
+
+test("/api/plan says that pnpm may put a newer Pi next to Gentle Shell, at least the minimum", async () => {
+	// A newer Pi installed with pnpm never blocks: it is kept as it is.
+	const { host, port, login } = await start({ collect: async () => collected({ pi: { available: true, version: "1.1.0", usable: true } }) });
+	try {
+		const view = await plan(port, await login());
+		assert.deepEqual(view.blockers, []);
+		assert.equal(view.actions.find((action: { id: string }) => action.id === "install-shell").description,
+			`Install Gentle Shell (gentle-pi) globally with pnpm. pnpm may put a newer Pi than ${PI_INSTALL_VERSION} next to it ` +
+			`(at least Pi ${requirements.pi}), and Gentle Shell runs that Pi.`);
+	} finally {
+		await host.close("test");
+	}
+});
+
+test("the outcome says which Pi Gentle Shell runs only when it is not the installer's Pi", async () => {
+	const cases: [object, string][] = [
+		[{ outcome: "ready", completed: [], piVersion: "1.1.0" }, `${guidance.outcomes.ready} Gentle Shell runs Pi 1.1.0, which pnpm installed next to it.`],
+		[{ outcome: "terminal-action-required", action: "open-new-terminal", completed: [], piVersion: "1.1.0" },
+			`${guidance.outcomes["terminal-action-required"]} Gentle Shell runs Pi 1.1.0, which pnpm installed next to it.`],
+		[{ outcome: "ready", completed: [] }, guidance.outcomes.ready],
+		[{ outcome: "ready", completed: [], piVersion: PI_INSTALL_VERSION }, guidance.outcomes.ready],
+		[{ outcome: "ready", completed: [], piVersion: "1.1.0 <script>" }, guidance.outcomes.ready],
+	];
+	for (const [result, expected] of cases) {
+		const { host, port, login } = await start({ runInstall: async () => result as never });
+		try {
+			const cookie = await login();
+			const { planId } = await plan(port, cookie);
+			assert.equal((await post(port, "/api/install", cookie, { planId, consent: true })).status, 202);
+			await waitFor(() => host.outcome() !== null);
+			assert.equal(host.outcome()?.guidance, expected, JSON.stringify(result));
+			assert.equal("piVersion" in (host.outcome() ?? {}), false);
+		} finally {
+			await host.close("test");
+		}
 	}
 });
 
@@ -609,6 +664,41 @@ test("stale planId or a changed re-inventory returns 409 plan-changed without ru
 		const changed = await post(port, "/api/install", cookie, { planId: second.planId, consent: true });
 		assert.equal(changed.status, 409);
 		assert.equal(JSON.parse(changed.body).error, "plan-changed");
+		assert.equal(runs.length, 0);
+	} finally {
+		await host.close("test");
+	}
+});
+
+// A2: the reused-folder notice is advisory. A re-inventory whose walk timed out (no
+// notice), or found another one, still installs the consented plan: no 409 loop.
+test("a re-inventory that differs only in the reused-folder notice still installs the consented plan", async () => {
+	const weak = { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming" };
+	const windows = { platform: "win32", node: { available: true, version: "24.18.0", usable: true, persistent: true, npm: true },
+		pnpm: { available: true, version: "11.1.1", usable: true, compatible: true, persistent: true }, go: { available: true, version: "1.26.0", usable: true } };
+	for (const later of [{}, { folders: { node: { check: "unchecked", at: "C:\\nodejs\\node.exe" } } }]) {
+		let current = collected({ ...windows, folders: { node: weak } });
+		const { host, port, login, runs } = await start({ collect: async () => current });
+		try {
+			const cookie = await login();
+			const { planId } = await plan(port, cookie);
+			current = collected({ ...windows, ...later });
+			const response = await post(port, "/api/install", cookie, { planId, consent: true });
+			assert.equal(response.status, 202, response.body);
+			assert.equal(runs.length, 1);
+			assert.deepEqual(runs[0].request.plan.tools.folders?.reused.map((entry: { tool: string }) => entry.tool), ["node"], "the consented plan runs");
+		} finally {
+			await host.close("test");
+		}
+	}
+	// Any other change still stops it.
+	let current = collected({ ...windows, folders: { node: weak } });
+	const { host, port, login, runs } = await start({ collect: async () => current });
+	try {
+		const cookie = await login();
+		const { planId } = await plan(port, cookie);
+		current = collected({ ...windows, folders: { node: weak }, globalBin: { available: true, path: BIN, writable: true, onPath: true } });
+		assert.equal((await post(port, "/api/install", cookie, { planId, consent: true })).status, 409);
 		assert.equal(runs.length, 0);
 	} finally {
 		await host.close("test");
@@ -1201,9 +1291,35 @@ test("/api/plan says before consent that a private PNPM_HOME replaces a default 
 	names(view.profileChange.description, [W_DEFAULT, weak.at, "S-1-5-21-1-2-3-1002 (PC\\other)", "0x001301BF", W_PRIVATE, "`pnpm setup`",
 		`PNPM_HOME=${W_PRIVATE}`, `${W_PRIVATE}\\bin`, "new terminals", "only you, SYSTEM and Administrators"]);
 	assert.equal(view.persistence.pnpmHome, W_PRIVATE);
+	// S13: the accepted residual risk of later pnpm commands, stated before consent.
+	names(view.profileChange.description, ["pnpm commands you run later", "configuration, cache and state", "%LOCALAPPDATA%", W_DEFAULT]);
 	// A passing default keeps the existing copy.
 	const plain = await windowsView({ available: true, path: W_DEFAULT, source: "default" });
-	assert.doesNotMatch(plain.profileChange.description, /private/);
+	assert.doesNotMatch(plain.profileChange.description, /private|%LOCALAPPDATA%/);
+});
+
+// S6 notice: reused tools in folders another account can change, before consent.
+test("/api/plan notes reused tools in folders another account can change, without blocking or changing the plan", async () => {
+	const roaming = { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming", sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" };
+	const reused = { node: { available: true, version: "24.18.0", usable: true, persistent: true, npm: true }, pi: { available: true, version: "1.2.0", usable: true, external: true },
+		pnpm: { available: true, version: "11.1.1", usable: true, compatible: true, persistent: true } };
+	const view = await windowsView({ available: true, path: W_DEFAULT, source: "default" }, { ...reused,
+		folders: { node: roaming, npm: roaming, pi: { check: "target-owner", at: "C:\\Users\\m\\AppData\\Roaming\\npm\\pi.cmd", sid: "S-1-5-21-9" } } });
+	assert.deepEqual(view.blockers, []);
+	assert.ok(view.actions.length > 0);
+	names(view.sharedFolders.description, ["Node.js", "npm", "Pi", "S-1-5-21-1-2-3-1002 (PC\\other) can change C:\\Users\\m\\AppData\\Roaming", "0x001301BF",
+		"C:\\Users\\m\\AppData\\Roaming\\npm\\pi.cmd is owned by S-1-5-21-9", "never creates or runs its own programs there", "accepted risk", "not a blocker"]);
+	assert.deepEqual(view.sharedFolders.tools, ["node", "npm", "pi"]);
+	// A1: a path the walk could not check says so, and still does not block.
+	const unchecked = await windowsView({ available: true, path: W_DEFAULT, source: "default" }, { ...reused, folders: { node: { check: "unchecked", at: "C:\\nodejs\\node.exe" } } });
+	assert.deepEqual(unchecked.blockers, []);
+	names(unchecked.sharedFolders.description, ["Node.js: the permissions of C:\\nodejs\\node.exe could not be checked", "could not be checked", "not a blocker",
+		"make sure your account can read the permissions of the paths that could not be checked"]);
+	assert.doesNotMatch(unchecked.sharedFolders.description, /write access/, "nothing says an account can write there");
+	assert.match(view.sharedFolders.description, /remove that account's write access/);
+	assert.doesNotMatch(view.sharedFolders.description, /could not be checked/);
+	// Nothing to note: no record.
+	assert.equal((await windowsView({ available: true, path: W_DEFAULT, source: "default" }, reused)).sharedFolders, null);
 });
 
 test("/api/plan names the folder, principal, rights and remedy when PNPM_HOME is not private", async () => {

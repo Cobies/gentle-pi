@@ -50,6 +50,10 @@ export function parseSelfUninstallArgs(args                   )                 
 	return options;
 }
 
+/** How the owning package manager runs: `command` with `prefix` before its own
+ * arguments (on Windows, node.exe and the manager's JS entry, never a .cmd). */
+
+
 
 
 
@@ -240,12 +244,16 @@ async function planSelfUninstall(input                    , configHome        , 
 
 	// Every place a removal starts from is checked at its real path, so a symbolic
 	// link (or a symlinked ancestor) never leads it somewhere protected.
+	// Inside a Gentle Shell session PI_CODING_AGENT_DIR is the isolated home itself
+	// and the user's Pi home travels in GENTLE_SHELL_USER_PI_HOME (see userPiHome).
+	const sessionAgentDir = (name        , value        ) => name === "PI_CODING_AGENT_DIR" && Boolean(env.GENTLE_SHELL_USER_PI_HOME)
+		&& comparable(canonical(value), platform) === comparable(isolatedReal, platform);
 	const guards          = [
 		{ path: homedir, label: "your home directory", inside: false },
 		{ path: join(homedir, ".pi", "agent"), label: "Pi's default home", inside: true },
 		...["PI_CODING_AGENT_DIR", "GENTLE_SHELL_USER_PI_HOME"].flatMap((name) => {
 			const value = env[name];
-			return value ? [{ path: value, label: "your Pi home", inside: true }] : [];
+			return value && !sessionAgentDir(name, value) ? [{ path: value, label: "your Pi home", inside: true }] : [];
 		}),
 		{ path: gentleAiState, label: "Gentle AI's state", inside: true },
 	];
@@ -402,16 +410,31 @@ function removeIfEmpty(directory        ) {
 	if (inspect(directory, "dir") === "ok" && readdirSync(directory).length === 0) rmdirSync(directory);
 }
 
+/** Ctrl-C at a question: the whole uninstall stops. */
+export class PromptInterrupted extends Error {
+	constructor() {
+		super("interrupted");
+		this.name = "PromptInterrupted";
+	}
+}
+
 /**
  * Asks one question on `input` and returns the typed line. End of input (Ctrl-D,
- * a closed stdin) or Ctrl-C answers "", which every question reads as No.
+ * a closed stdin) answers "", which every question reads as No; Ctrl-C rejects
+ * with PromptInterrupted. `terminal` follows readline (default: output.isTTY).
  */
-export function askLine(question        , streams                                                                 )                  {
+export function askLine(question        , streams                                                                                     )                  {
 	const input = streams.input                                                                            ;
 	if (input.readableEnded === true || input.destroyed === true) return Promise.resolve("");
-	return new Promise((resolveAnswer) => {
+	return new Promise((resolveAnswer, reject) => {
 		let settled = false;
-		const prompt = createInterface({ input: streams.input, output: streams.output });
+		const prompt = createInterface({ input: streams.input, output: streams.output, terminal: streams.terminal });
+		prompt.once("SIGINT", () => {
+			if (settled) return;
+			settled = true;
+			prompt.close();
+			reject(new PromptInterrupted());
+		});
 		prompt.once("close", () => {
 			if (settled) return;
 			settled = true;
@@ -470,12 +493,18 @@ export async function runSelfUninstall(input                    )               
 			err("gentle-shell self-uninstall: no terminal to confirm in; pass --yes to remove the above, or --dry-run to only show it.");
 			return 2;
 		}
-		if (!isYes(await input.ask("Remove Gentle Shell as listed above? [y/N] "))) {
-			out("Cancelled; nothing was removed.");
+		try {
+			if (!isYes(await input.ask("Remove Gentle Shell as listed above? [y/N] "))) {
+				out("Cancelled; nothing was removed.");
+				return 1;
+			}
+			if (plan.shared.length > 0 && !includeShared) {
+				includeShared = isYes(await input.ask(`Also remove the shared Gentle AI configuration in ${plan.configHome} listed above? [y/N] `));
+			}
+		} catch (error) {
+			if (!(error instanceof PromptInterrupted)) throw error;
+			err("gentle-shell self-uninstall: Interrupted; nothing was removed.");
 			return 1;
-		}
-		if (plan.shared.length > 0 && !includeShared) {
-			includeShared = isYes(await input.ask(`Also remove the shared Gentle AI configuration in ${plan.configHome} listed above? [y/N] `));
 		}
 	}
 
@@ -492,7 +521,7 @@ export async function runSelfUninstall(input                    )               
 	const command = `${plan.owner.name} ${removeArgv(plan.owner).join(" ")}`;
 	let removed = false;
 	try {
-		removed = succeeded(await input.run(plan.owner.command, removeArgv(plan.owner)));
+		removed = succeeded(await input.run(plan.owner.command, [...plan.owner.prefix, ...removeArgv(plan.owner)]));
 	} catch {
 		removed = false;
 	}

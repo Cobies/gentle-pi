@@ -161,7 +161,10 @@ A clean target receives these intents in dependency order:
 3. Persist only what is missing. A bootstrap-only reusable Node gets the full
    group, always together: `persist-node` (`persist-runtime`, version
    24.21.0), `persist-package-managers` (`install-global`) and
-   `configure-npm-prefix` (`configure`). A persistent Node is never replaced:
+   `configure-npm-prefix` (`configure`). When pnpm is already persistent
+   (`inventory.pnpm.persistent !== false`, such as a newer pnpm 11 in
+   `$PNPM_HOME/bin`), `persist-npm` replaces `persist-package-managers`, so
+   that pnpm is never replaced or downgraded. A persistent Node is never replaced:
    it gets at most one intent, `persist-npm` (npm 11.19.0) when no usable
    npm resolves (on POSIX a working npm from any version manager is usable), `persist-pnpm` (pnpm 11.1.1) when pnpm is bootstrap-only, or
    `persist-package-managers` when both are missing.
@@ -245,10 +248,11 @@ the listing; truncated, nonzero, signalled or timed-out output is unknown.
 | Probe | Evidence |
 | --- | --- |
 | `node` | The first `node` on the user's real PATH (Go `exec.LookPath` order, PATHEXT on Windows), else the bootstrap one. `persistent` says which. `npm` is the runner's usable-npm proof in the user's real PATH with `$PNPM_HOME/bin` first, so a bootstrap npm never counts. A Windows `.cmd`/`.bat` cannot run with `shell:false`: a Node that resolves to one is unknown, and npm is run through what its shim runs ([Windows command shims](#windows-command-shims)). |
-| `pnpm` | The runner's invocation (bootstrap handoff, or a POSIX `pnpm` on PATH). `compatible` requires a successful run (pnpm checks its Node engine at startup) at the pinned major and at least the pin, because the runner's argv is verified for pnpm 11 only. `persistent` is whether any `pnpm` resolves on the real PATH. |
-| `pi`, `shell` | pnpm-global entries from the listing. A package that is not pnpm-global but whose command (`pi`, `gentle-shell`) resolves on the real PATH is unknown, never absent, so another installation is not duplicated. On Windows a `pi.cmd` is run, and its package found, through what the shim runs; an unknown shim is never run. Shell is `usable` only when `$PNPM_HOME/bin/gentle-shell` (`.cmd` on Windows) exists. |
+| `pnpm` | The runner's invocation (bootstrap handoff, or a POSIX `pnpm` on PATH). `compatible` requires a successful run (pnpm checks its Node engine at startup) at the pinned major and at least the pin, because the runner's argv is verified for pnpm 11 only. `persistent` is whether any `pnpm` resolves on the real PATH. A Windows user pnpm in `$PNPM_HOME\bin` whose shim or target fails the storage walk is never run: the bootstrap's pnpm is reported in its place with `inGlobalBin: true`, `untrusted: true` and `persistent: true`, so it does not block and nothing is persisted over it. |
+| `pi`, `shell` | pnpm-global entries from the listing. A package that is not pnpm-global but whose command (`pi`, `gentle-shell`) resolves on the real PATH is unknown, never absent, so another installation is not duplicated. On Windows a `pi.cmd` or `gentle-shell.cmd` is run, and its package found, through what the shim runs; an unknown shim is never run. Shell is `usable` only when `$PNPM_HOME/bin/gentle-shell` (`.cmd` on Windows) exists. |
 | `gentleAi` | Absent without gentle-pi or without its package-native binary. Otherwise compatible only for this package version, a listed path that resolves inside PNPM_HOME and `verifyGentleAi` (default `packageNativeGentleAi`) success; anything else is unknown. |
 | `go` | `go version` from the real PATH; `go1.22` normalizes to `1.22.0`; devel and release-candidate builds are unknown. |
+| `folders` | Windows only, after the other probes: the commands `node`, `npm`, `go`, `pi` and `gentle-shell` resolve to on the real PATH, and what each one runs, walked in one Windows PowerShell launch (`verifyWindowsStorageMany`). Returns `{ node?, npm?, go?, pi?, shell? }` with the first failing path's finding per tool, or `null`. A walk that cannot finish is `null`, never a blocker ([reused tool folders](#reused-tool-folders)). |
 | `globalBin` | `pnpmGlobalBin` over the real PATH; `writable` is write access on the nearest existing ancestor of `$PNPM_HOME/bin` (itself included). A non-directory ancestor is not writable. |
 | `setup` | `false` when gentle-pi is absent. `{ available: true, recoverable: true }` for the pinned stack this pnpm installed (see [Setup recovery](#setup-recovery)), using the runner's `recoverableStackRoot`. Unknown otherwise, because an existing Shell's setup readiness has no read-only evidence. |
 
@@ -299,6 +303,7 @@ No-process gates, all returning `blocked`:
    plan must contain `install-pi`, `install-shell`, `setup-shell` and
    `verify-readiness`, plus optional `setup-global-bin` and at most one exact
    persistence variant: `persist-node` + `persist-package-managers` +
+   `configure-npm-prefix`, `persist-node` + `persist-npm` +
    `configure-npm-prefix`, or `persist-package-managers` alone, or
    `persist-npm` alone, or `persist-pnpm` alone. The
    [setup recovery](#setup-recovery) plan is exactly `setup-shell` and
@@ -381,14 +386,22 @@ Mutating and verification steps, returning `failed` with `failedStep` and the
 
 1. `install-global`: exactly one
    `pnpm add -g @earendil-works/pi-coding-agent@1.0.0 gentle-pi@<package version> --allow-build=gentle-pi`.
-   Pi is gentle-pi's optional peer, so both resolve in one command. pnpm 11
+   pnpm 11 installs each argument as its own global group, so gentle-pi gets
+   its optional peer Pi beside it, possibly newer than 1.0.0
+   ([The Pi that Gentle Shell runs](#the-pi-that-gentle-shell-runs)). pnpm 11
    silently skips global postinstall scripts by default; the package-scoped
    approval runs only gentle-pi's postinstall, which provisions Gentle AI. No
    blanket build approval is ever passed.
 2. `verify-global-list`: `pnpm list -g --depth 0 --json` must report exactly the
    two pinned versions in the single listed project that owns gentle-pi
    (other projects, such as the persisted npm and pnpm, are ignored), and
-   gentle-pi's absolute `path` must resolve inside PNPM_HOME.
+   gentle-pi's absolute `path` must resolve inside PNPM_HOME. The Pi the
+   launcher runs from that real path, as Node resolves it (gentle-pi's own
+   `node_modules` first, then beside gentle-pi), must be a
+   `@earendil-works/pi-coding-agent` package at a stable version at least the
+   minimum (0.99.1); a missing, unreadable, prerelease or older one fails. When
+   it is not 1.0.0, the outcome reports it as `piVersion` and the wizard says
+   which Pi Gentle Shell runs.
 3. `verify-shell-bin`: `$PNPM_HOME/bin/gentle-shell` (`gentle-shell.cmd` on
    Windows) exists.
 4. `verify-gentle-ai`: package-native integrity of the installed package. A
@@ -446,8 +459,9 @@ installation instead of blocking as an existing stack.
 Detection is the setup probe, with the same rule the runner applies
 (`recoverableStackRoot`): the global listing names Pi and gentle-pi exactly
 once each, both in the single project that owns gentle-pi, Pi at exactly
-1.0.0 and gentle-pi at exactly this package's version, and gentle-pi's path
-resolves (realpath) inside PNPM_HOME. Preflight also requires Pi, Shell and
+1.0.0 and gentle-pi at exactly this package's version, gentle-pi's path
+resolves (realpath) inside PNPM_HOME, and the Pi beside gentle-pi is at least
+the minimum. Preflight also requires Pi, Shell and
 Gentle AI to be `reusable`. Anything else (another version, a second listing,
 a path outside PNPM_HOME, Pi missing) keeps the setup probe unknown, so a
 foreign or other-version stack stays blocked exactly as before.
@@ -481,7 +495,9 @@ For a bootstrap-only Node, the full group runs these fixed steps:
    PNPM_HOME and links `node` into `$PNPM_HOME/bin`.
 2. `persist-package-managers`: `pnpm add -g npm@11.19.0 pnpm@11.1.1`, which
    adds the `npm`, `npx` and `pnpm` shims to `$PNPM_HOME/bin`. No build
-   approval of any kind is passed.
+   approval of any kind is passed. When pnpm is already persistent (a newer
+   pnpm 11 in `$PNPM_HOME/bin`, for example), the plan has `persist-npm`
+   instead: `pnpm add -g npm@11.19.0` only, so that pnpm is never downgraded.
 3. `verify-persistent-runtime`: in the child environment both `node` and `npm`
    must resolve (`exec.LookPath` order) from `$PNPM_HOME/bin`, the node must be
    spawnable (`.exe`/`.com` on Windows) and print `v24.21.0`.
@@ -530,7 +546,7 @@ Pi but never reinstalls or downgrades it, and nothing changes before consent.
 
 | Found | Plan |
 | --- | --- |
-| A compatible Pi (pnpm-global, or any `pi` on PATH whose `pi --version` reports a stable version ≥ the minimum) and no Gentle Shell | Install only Gentle Shell: `pnpm add -g gentle-pi@<version> --allow-build=gentle-pi`, after checking that pnpm lists no gentle-pi (`check-existing-shell`). Pi is left as it is. |
+| A compatible Pi (pnpm-global, or any `pi` on PATH whose `pi --version` reports a stable version ≥ the minimum) and no Gentle Shell | Install only Gentle Shell: `pnpm add -g gentle-pi@<version> --allow-build=gentle-pi`, after checking that pnpm lists no gentle-pi (`check-existing-shell`). Pi is left as it is, also when it is newer than 1.0.0. |
 | A Gentle Shell that pnpm or npm owns | `update-shell-release` when it is older, unusable or a main build; `update-shell-main` on the main channel (needs Go). Then `setup-shell`. A missing Pi is installed first (`install-pi`). |
 | A current Gentle Shell that npm owns, on release | Nothing to do. |
 | A Pi older than the minimum that pnpm or npm owns | `update-pi` to `PI_INSTALL_VERSION` with that package manager (`pnpm add -g @earendil-works/pi-coding-agent@<version>` or `npm install -g …`), before any Gentle Shell step: ahead of `install-shell` or `update-shell-*`, or alone when Gentle Shell is current. The plan names the found and target versions and the manager. |
@@ -544,12 +560,20 @@ Pi but never reinstalls or downgrades it, and nothing changes before consent.
 
 Ownership comes from real paths ([`installOwner`](../scripts/main-channel.mjs)):
 pnpm when the package lives under PNPM_HOME, npm only when it is
-`<npm root -g>/gentle-pi` itself (POSIX; a Windows npm-owned Gentle Shell is
-not detected yet: `gentle-shell upgrade` still runs npm by path). The update runs
+`<npm root -g>/gentle-pi` itself. On Windows the probe follows
+`gentle-shell.cmd` to the package it runs, and npm and pnpm never run as a
+`.cmd`: `runUpgrade` takes an `invocation(name)` adapter
+(`upgradeInvocation`) that runs npm through what `npm.cmd` runs
+(`npmInvocation`) and pnpm from the bootstrap handoff in the wizard, or through
+`windowsInvocation` of the first `pnpm` on PATH in `gentle-shell upgrade`. A
+manager that resolves only to a `.cmd` or `.bat` counts as missing. On macOS
+and Linux nothing changes: the command on PATH runs as it is. The update runs
 the same code as `gentle-shell upgrade --channel <channel>`
 (`check-installed-shell`, `update-shell`), then `verify-updated-shell` requires
 the same owner and a stable version not older than before (release) or a
-`-main.<sha12>` version (main); release also re-runs `verify-gentle-ai`. An
+`-main.<sha12>` version (main), and for pnpm a Pi beside the updated
+gentle-pi at least the minimum (its version is reported when it is not 1.0.0);
+release also re-runs `verify-gentle-ai`. An
 update never runs `pnpm setup`: the existing installation already has its PATH.
 
 An older Pi uses the same ownership rule with its own package name
@@ -589,10 +613,50 @@ adds. Alone, `install-pi` is checked like a shell-only installation:
 `check-existing-pi` requires pnpm to list no Pi, `pnpm add -g` adds it, and
 `verify-installed-pi` requires one pnpm-global Pi at `PI_INSTALL_VERSION` or
 newer. The `pi` probe reads pnpm's global list before PATH, so the next run
-reuses the pnpm-global Pi and no longer looks at the other one. pnpm 11 also
-installs gentle-pi's optional Pi peer next to gentle-pi, and Gentle Shell
-prefers that adjacent Pi over any `pi` on PATH; a terminal's `pi` command may
-still run the older one when it comes first on PATH.
+reuses the pnpm-global Pi and no longer looks at the other one. Gentle Shell
+prefers the Pi beside gentle-pi over any `pi` on PATH
+([The Pi that Gentle Shell runs](#the-pi-that-gentle-shell-runs)); a
+terminal's `pi` command may still run the older one when it comes first on PATH.
+
+### The Pi that Gentle Shell runs
+
+The launcher runs the Pi that Node resolves from gentle-pi (gentle-pi's own
+`node_modules`, then beside it), and only without one the first `pi` on PATH.
+pnpm 11 installs every `pnpm add -g` argument in its own isolated global
+directory (group) and auto-installs gentle-pi's optional peer Pi in gentle-pi's
+group at the latest version: verified with pnpm 11.1.1 in an isolated
+PNPM_HOME, `pnpm add -g @earendil-works/pi-coding-agent@1.0.0 gentle-pi@4.0.0`
+lists Pi 1.0.0 while the Pi beside gentle-pi is 1.1.0. So Gentle Shell may run a
+Pi newer than `PI_INSTALL_VERSION`, always at least the minimum: the runner
+verifies that Pi (`verify-global-list`, the setup recovery, a pnpm
+`verify-updated-shell`) and, when it is not 1.0.0, the outcome says which Pi
+Gentle Shell runs. `--config.auto-install-peers=false` would leave gentle-pi
+with no Pi beside it, so the launcher would run any `pi` on PATH, and
+`--config.overrides` is ignored for global installs.
+
+Pi and gentle-pi stay separate pnpm groups on every path (the clean install,
+the main package and `gentle-shell upgrade`). A single comma-separated group
+(`pnpm add -g <pi>,gentle-pi@<version>`) would pin the Pi beside gentle-pi, but
+pnpm replaces every existing group that shares a package with a new one: Pi's
+own `pi update` (`pnpm install -g @earendil-works/pi-coding-agent@<latest>`)
+then deleted the whole group, gentle-pi and its `gentle-shell` command
+included, and the group also replaced unrelated packages sharing the user's Pi
+group. User decision (2026-10-10): "Quitar el agrupamiento (recomendado)".
+Pinning the Pi gentle-pi runs at the package level (an exact gentle-pi
+dependency instead of the host peer) needs its own design.
+
+### Documented decisions
+
+- `check-npm` failing after `persist-npm` (a reported case) no longer occurs in
+  that setup: on POSIX a working user npm (mise, Volta, asdf and others) is
+  accepted, so `persist-npm` is not planned for it. The failure itself cannot
+  be root-caused without the reporter's `PNPM_HOME`, `pnpm store path` and
+  `readlink -f $PNPM_HOME/bin/npm`, so nothing else changes until that evidence
+  exists.
+- A pnpm 12 in `$PNPM_HOME/bin` keeps blocking before consent (it is never
+  replaced or downgraded): the runner's argv is verified for pnpm 11, and an
+  update would run that pnpm 12 with it. This changes only after pnpm 12 is
+  proven empirically.
 
 ### Main channel
 
@@ -624,7 +688,8 @@ publishes main builds, so main is built on this computer
      resolve failed`), sets its version to `<version>-main.<sha12>`, removes `prepack` and `prepare`
      (which would run the full test suite), packs it with `pnpm pack` into
      `<config home>/main/packages/`, runs `pnpm add -g <tgz> --allow-build=gentle-pi`
-     and requires `pnpm list -g` to report that exact version under PNPM_HOME.
+     and requires `pnpm list -g` to report that exact version under PNPM_HOME,
+     with a Pi at least the minimum beside it.
      Installing `github:` or codeload URLs directly is not used: pnpm runs
      `prepack` for both.
   3. `record-channel`: writes `{"schema":"gentle-shell.channel/v1","channel":"main",
@@ -826,7 +891,7 @@ simply unknown paths.
 | --- | --- |
 | `GET /session?code=` | Consumes the one-time code, sets the cookie and returns 200 `text/html` that refreshes to `/`; 401 for a missing, wrong, used or expired code. |
 | `GET /`, `/wizard.js`, `/wizard.css` | `index.html`, `wizard.js`, `wizard.css` from `assetsDir`; 404 when absent. |
-| `GET /api/plan` | Runs `collectPlan(channel)` server-side for `?channel=release` (also the default without a query) or `?channel=main`, stores the plan under a new opaque `planId` and returns a view model: `actions` (`id` plus a fixed English description), `blockers` (`code`, `tool` — a preflight tool key such as `node` or `gentleAi`, otherwise `unknown` — and guidance), `profileChange` (whether `pnpm setup` edits the shell profile or Windows user PATH, and the bin directory), `persistence` (which of node, npm and pnpm go under `$PNPM_HOME`), `ready` and `channel`. 409 while installing. Any other query is 400. |
+| `GET /api/plan` | Runs `collectPlan(channel)` server-side for `?channel=release` (also the default without a query) or `?channel=main`, stores the plan under a new opaque `planId` and returns a view model: `actions` (`id` plus a fixed English description), `blockers` (`code`, `tool` — a preflight tool key such as `node` or `gentleAi`, otherwise `unknown` — and guidance), `profileChange` (whether `pnpm setup` edits the shell profile or Windows user PATH, and the bin directory), `persistence` (which of node, npm and pnpm go under `$PNPM_HOME`), `sharedFolders` (Windows: `{ tools, description }` for reused tools whose folders another account can change, or `null`), `ready` and `channel`. 409 while installing. Any other query is 400. |
 | `POST /api/install` | Body exactly `{ "planId": string, "consent": true }` (400 otherwise, including extra keys or a plan). 409 `install-running` while an installation runs; 409 `already-completed` once an installation has a final outcome (one installation per wizard run; the outcome is never replaced); 409 `plan-changed` for a stale `planId` or when a fresh re-inventory differs from the stored plan. Otherwise 202, and the runner receives the server-stored plan with `consent: true`. |
 | `GET /api/progress?after=<seq>` | Entries `{ seq, step, status, reason }` after `seq` from a ring buffer of the last 200; values outside `[a-z][a-z0-9-]*` become `unknown`, and no other runner field is kept. Also `running` and the final `outcome` with fixed guidance. |
 | `POST /api/shutdown` | Body empty or `{}`. Closes the host (409 while installing). |
@@ -867,7 +932,7 @@ HTML).
 | Screen | What the user sees |
 | --- | --- |
 | Check | Shown while `GET /api/progress?after=0` and `GET /api/plan` run. A running installation resumes the Install screen; a finished one shows its outcome instead of a new plan. |
-| Review | Each fixed action with its description, the `profileChange` and `persistence` disclosures (state as text: "Will change", "No change"), one consent checkbox and **Install Gentle Shell** (for a setup recovery, "Finish setting up Gentle Shell" and **Complete setup**). Without the checkbox no request is sent; the error is announced and focus moves to the checkbox. Preflight blockers replace the plan with their guidance, **Check again** and **Close installer**. |
+| Review | Each fixed action with its description, the `profileChange` and `persistence` disclosures (state as text: "Will change", "No change"), on Windows a **Tools in folders other accounts can change** notice when the plan records one ([reused tool folders](#reused-tool-folders)), one consent checkbox and **Install Gentle Shell** (for a setup recovery, "Finish setting up Gentle Shell" and **Complete setup**). Without the checkbox no request is sent; the error is announced and focus moves to the checkbox. Preflight blockers replace the plan with their guidance, **Check again** and **Close installer**. |
 | Install | Expected runner steps (`expectedSteps`) with a text status (Done, In progress, Pending, Failed, Blocked, Not run), a `<progress>` bar and a terminal-style log of `{ seq, step, status, reason }` entries. |
 | Done | `ready`: run `gentle-shell`. `terminal-action-required`: open a new terminal, then run `gentle-shell`. `blocked`/`failed`: the host's guidance, the reason or failed step, the steps that finished and the log. A failed step with a detail also shows it under **Last error from** its label: `gentle-shell setup`, `pnpm setup`, `the Go download`, `pnpm add -g` (`install-global`), `the Gentle Shell main install`, `the Gentle AI main build` or `the Gentle Shell update`, as one plain text node (backticks stay literal). Every outcome offers **Close installer** (`POST /api/shutdown`). |
 
@@ -968,7 +1033,9 @@ With that entry available, the fixed sequence is:
    command is a regular cmd-shim file (as pnpm writes in `$PNPM_HOME` or
    `$PNPM_HOME/bin` when it installs or updates itself), the search starts from
    its `# cmd-shim-target=` path or, without one, the single
-   `"$basedir/<target>" "$@"` it runs. That path only locates the evidence;
+   `"$basedir/<target>" "$@"` it runs. A shim is a script (`#!`) read whole,
+   up to 64 KiB, so a target named after the first 4 KiB is still found; a
+   larger script fails closed. That path only locates the evidence;
    `pnpm --version` must still match it. A standalone pnpm (a Mach-O or ELF
    executable, directly or as that shim target, as mise, asdf and pnpm's own
    installer with `@pnpm/exe` provide) embeds its Node runtime: it skips the
@@ -1114,7 +1181,7 @@ Windows bootstrap end to end still lacks native acceptance evidence.
 | Entry | Small CMD entry invokes fixed stock Windows PowerShell commands with no profile. Paths are environment data, not interpolated PowerShell source. Delayed CMD expansion is disabled. |
 | Storage | Claim a new random-named prerequisite directory directly below `%LOCALAPPDATA%`, or below `%USERPROFILE%` when `%LOCALAPPDATA%` fails `acl-mask` or `home-owner` (see [claim candidates](#claim-candidates-and-owners)); never reuse an existing destination. Verify each path component's reparse attributes, owner and role-specific ACL rights. Set the claimed directory's owner to the invoking SID, protect its DACL for the invoking SID, SYSTEM and Administrators, and read both back. |
 | Node | Reuse a proven stable existing Node ≥24.3.0 and the repository minimum. Otherwise (missing, an older stable version, or a Node whose storage fails the reparse/owner/ACL walk, which therefore never runs) leave it as it is and acquire only the fixed official Node 24.21.0 Windows x64/arm64 ZIP, with no redirects and bounded transport, verify SHA256 before opening the archive, validate the whole namespace and extract only regular `node.exe`. |
-| pnpm | A pnpm whose wrapper, Node, entry, metadata or exe fails the reparse/owner/ACL walk never runs: it is left as it is and pnpm is acquired as when missing. Reuse only a [known shim](#windows-command-shims) of pnpm's own JS entry, with package identity, bin target, stable CLI version, compatible engine and global add/bin help evidence, preserving its sibling-Node preference or proving its inherited cwd/PATH/PATHEXT Node selection; or a native `pnpm.exe` (pnpm's installer and `pnpm setup`, `pnpm self-update`, @pnpm/exe, pnpm 12, a Volta or mise shim), directly or as a known shim's target, whose `--version` is stable and equals a `package.json` beside it, with the same global help evidence. Never execute a shim via cmd.exe. Unknown wrappers block without replacement. One whose stable version is of another major or older than 11.1.1 is left as it is, and pnpm is acquired as when missing. |
+| pnpm | A pnpm whose wrapper, Node, entry, metadata or exe fails the reparse/owner/ACL walk never runs: it is left as it is and pnpm is acquired as when missing. Reuse only a [known shim](#windows-command-shims) of pnpm's own JS entry, with package identity, bin target, stable CLI version, compatible engine and global add/bin help evidence, preserving its sibling-Node preference or proving its inherited cwd/PATH/PATHEXT Node selection; or a native `pnpm.exe` (`pnpm setup`, `pnpm self-update`, @pnpm/exe, pnpm 12), directly or as a known shim's target (an extensionless target resolves through PATHEXT in order, and only an `.exe` first match counts), whose `--version` is stable and equals the `package.json` naming pnpm or `@pnpm/*` beside it, with the same global help evidence. A `pnpm.exe` without that `package.json` (pnpm's standalone installer, a Volta or mise shim), Corepack's `pnpm.cmd` and mise's file shim are not proven pnpm: they are never run and pnpm is acquired as when missing. Never execute a shim via cmd.exe. Other unknown wrappers block without replacement. One whose stable version is of another major or older than 11.1.1 is left as it is, and pnpm is acquired as when missing. |
 | Missing pnpm | Shared pnpm 11.1.1 URL/SRI and raw `>=22.13` engine identity are unchanged. Parse bounded gzip/USTAR bytes, reject unsupported extensions, links and unsafe Windows namespaces before no-clobber publication. Return a direct Node + JS-entry invocation; do not fabricate a wrapper. |
 | Handoff | Existing Node helper starts the fixed wizard entry `bin/gentle-shell-install.mjs`. Only child PATH is refreshed. No persistent PATH, global installation, product root or companion installation is created here. |
 
@@ -1252,8 +1319,13 @@ tester's layout passes and a writable ancestor still rejects it.
 The helper also stops failing on the user's own pnpm in such a profile. A pnpm
 whose wrapper, Node, entry, metadata or `pnpm.exe` fails the reparse, owner or
 ACL walk is never run: like an untrusted user Node in `bootstrap.cmd`, it is
-left as it is, and the pinned pnpm is acquired into the private directory. A
-`policy` denial, unknown evidence and every other check still stop.
+left as it is, and the pinned pnpm is acquired into the private directory. So
+is a `pnpm.exe` without pnpm's `package.json` beside it, Corepack's `pnpm.cmd`
+and mise's file shim: nothing proves they are pnpm, so they count as no pnpm
+at all. A `policy` denial, unknown evidence and every other check still stop.
+In the wizard, the user's pnpm in `$PNPM_HOME\bin` that fails the walk does not
+block either: it is not run, not replaced and not downgraded, and the
+bootstrap's verified pnpm runs every pnpm step.
 
 ### Windows PNPM_HOME
 
@@ -1336,21 +1408,65 @@ own children therefore get `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and
 `XDG_STATE_HOME` under it, unless the user set them. They are never persisted:
 `pnpm setup` still saves only PNPM_HOME and the user Path.
 
-Residual risk: after the installation, the user's own pnpm commands, and
-Gentle Shell's later `gentle-shell upgrade`, still use pnpm's default config
-and cache folders under `%LOCALAPPDATA%` unless the user configures them. The
-installer protects its own run and the binaries it persists; it does not make
-the rest of a writable `%LOCALAPPDATA%` safe.
+Residual risk (accepted, and stated in the plan before consent): after the
+installation, the user's own pnpm commands, and Gentle Shell's later
+`gentle-shell upgrade`, still use pnpm's default config, cache and state
+folders under `%LOCALAPPDATA%` unless the user configures them. pnpm 11.1.1
+resolves its config folder only from `XDG_CONFIG_HOME` or
+`%LOCALAPPDATA%\pnpm\config`, so there is no safe persistent pnpm-native
+setting the installer could save instead. The installer protects its own run
+and the binaries it persists; it does not make the rest of a writable
+`%LOCALAPPDATA%` safe.
 
 Accepted risk (user decision): the installer never creates or runs its own
 binaries in a folder another account can change. The user's own tools are
 used the way the user already uses them: a Node.js, npm, Go, Pi or npm-owned
 Gentle Shell that the plan reuses or updates may live in such a folder (an
 npm global prefix under `%APPDATA%`, for example), and the installer runs it
-there without walking it, as any terminal would. Only pnpm, the installer's own
-runner, and the Node.js that `bootstrap.cmd` runs are held to the walk. A
-notice in the plan that names such a folder, its principal and rights is a
-follow-up; until then this paragraph is the disclosure.
+there, as any terminal would. Only pnpm, the installer's own runner, and the
+Node.js that `bootstrap.cmd` runs are held to the walk as a blocker. The plan
+discloses the rest as a notice (below).
+
+#### Reused tool folders
+
+Before consent the wizard walks every reused tool's command and what it runs:
+`node`, `npm`, `go`, `pi` and `gentle-shell` as the user's PATH resolves them,
+plus the Node and JS entry of a known shim. Each file is walked where it really
+is (its realpath), and for every link on its path (a symbolic link or a
+junction, as `lstat` reports it) the real folder that holds the link is walked
+too, since whoever can change that folder can retarget the link. A component
+whose realpath is merely spelled differently, such as an 8.3 short name
+(`C:\Users\RUNNER~1`), is not a link: walking `C:\Users` as a link holder would
+hold `C:\` to the strict parent mask, which Windows' default
+CreateDirectories (`0x4`) for Authenticated Users fails. A real location that
+is not on a local drive (a mapped network drive, or a link to a UNC share) is
+never sent to PowerShell: it is "could not be checked" for that tool only, and
+the rest is walked as usual. pnpm's own links, the global `global\v11\<hash>\node_modules\<pkg>`
+junction into the store and a `pnpm runtime` `node.exe`, are therefore never a
+finding, while a weak ACL on the folders they lead to, or on the folder holding
+them, still is. A file whose real location cannot be read is reported as
+"could not be checked". All of them go to one Windows
+PowerShell launch (`verifyWindowsStorageMany`): the paths travel as one
+environment value joined by `|`, which no Windows path holds, and the script
+prints one line per path, in order: `safe`, the same `unsafe:<role>-<check>|<detail>`
+as the single-path walk, or `unknown` when that path's walk fails for another
+reason (an owner that denies READ_CONTROL, for example). `unknown` becomes
+`{ check: "unchecked", at }`: the notice says that path could not be checked.
+A count that does not match, any other line, or `unsafe:policy` rejects
+the whole result. A test keeps that walk identical to the single-path one.
+
+The plan records only the tools it reuses as they are: the user's Node.js and
+its npm, a Go that a build reuses, a Pi kept as it is, and a Gentle Shell
+that npm owns (kept or updated with npm). `tools.folders` is then
+`{ status: "notice", reused: [{ tool, check, at, sid?, account?, rights? }] }`
+(per tool the first walk rejection, else the first `unchecked` path), and the
+review screen names each tool, folder, account and rights. It never
+blocks and changes no action: the user decided to accept this risk. A
+policy denial, a PowerShell failure or a walk that cannot finish means no
+notice, never a blocker. The notice is left out of the plan fingerprint the
+install request re-checks, so a re-inventory whose walk timed out, or found a
+different notice, still installs the consented plan instead of answering
+`plan-changed` again and again.
 
 A pnpm whose storage fails the walk is never run anywhere. That includes the
 wizard probe's `--version` of the user's own pnpm next to the bootstrap's:
@@ -1557,7 +1673,20 @@ installer then runs that target itself with `shell:false`
 Anything else (mise's `file` shims, Volta's package shims, Corepack's pnpm, a
 hand-written wrapper) is never run: an npm is then not usable and the plan
 persists the installer's npm, a Pi is unknown, and the bootstrap refuses an
-unknown pnpm wrapper as before. Sources: the npm/cmd-shim tap snapshots
+unknown pnpm wrapper as before, except Corepack's `pnpm.cmd` and mise's file
+shim, which it treats as no pnpm and acquires its own. A `pnpm.cmd` runs only
+pnpm's own `node_modules\pnpm\bin\pnpm.cjs` or `pnpm.mjs` entry, so Corepack's
+`pnpm.js` never runs.
+
+An extensionless native target (an @pnpm/exe hard link) resolves the way CMD
+resolves it: through PATHEXT in order, and only when that first match is an
+`.exe`; a `.com`, `.bat` or `.cmd` found first, or none, is not run.
+
+Only local drive paths (`C:\...`) count: the command, the Node a shim selects
+from PATH and npm's global prefix. `lookPath` skips any other PATH entry (UNC,
+`\\?\`, `\\.\` or a drive-less rooted path) without touching it, since even a
+lookup can reach a remote share, and `windowsInvocation` rejects such a command
+or Node and keeps the bundled npm for such a prefix. Sources: the npm/cmd-shim tap snapshots
 (v4.1.0-v9.0.2), @zkochan/cmd-shim 9.0.8 and npm 6.14.18-11.19.0 `bin/npm.cmd`
 from the npm registry, volta-cli/volta `wix/main.wxs`, jdx/mise `src/shims.rs`,
 Schniz/fnm `src/fs.rs` and coreybutler/nvm-windows `src/nvm.go`.

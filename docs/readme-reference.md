@@ -399,6 +399,11 @@ package.
   package manager that owns this installation (`pnpm add -g … --allow-build=gentle-pi`
   under PNPM_HOME, otherwise `npm install -g …`). Already current: it says so and
   changes nothing.
+- **Pi with pnpm**: pnpm 11 installs each global add as its own group, and it may
+  give `gentle-pi` a newer Pi as an adjacent peer than the one the installer
+  pins; Gentle Shell runs that adjacent Pi when it meets the minimum. Pi and
+  Gentle Shell stay in separate groups, so Pi's own `pi update` never removes
+  Gentle Shell.
 - **main**: builds Gentle AI from the latest `main` commit with Go and installs
   Gentle Shell packed from the latest `main` commit (`<version>-main.<sha12>`),
   rebuilding only what moved since the recorded commits. The Gentle AI build is
@@ -409,6 +414,10 @@ package.
 - `--channel release|main` (or `--channel=…`) switches first. Switching to release
   removes the dev-binary override only when it points at a main build this
   command made; a binary you registered yourself is kept.
+- On Windows npm and pnpm are `.cmd` shims, which never run through a shell:
+  `upgrade` runs what a recognized shim runs (Node.js with npm's or pnpm's own
+  JavaScript entry, or a native `pnpm.exe`). A package manager that resolves only
+  to an unrecognized shim counts as missing. macOS and Linux are unchanged.
 
 `gentle-shell update` is different: it is Pi's own `update`, forwarded to the
 resolved home. The browser installation wizard offers the same main channel; see

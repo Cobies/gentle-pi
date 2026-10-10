@@ -81,7 +81,11 @@ path (after following symbolic links, including linked parent folders):
 
 - is or contains your home directory;
 - is, contains or lies inside your Pi home (`~/.pi/agent`, `PI_CODING_AGENT_DIR`
-  or `GENTLE_SHELL_USER_PI_HOME`) or Gentle AI's state in `~/.gentle-ai`;
+  or `GENTLE_SHELL_USER_PI_HOME`) or Gentle AI's state in `~/.gentle-ai`. Inside
+  a Gentle Shell session, `PI_CODING_AGENT_DIR` is the isolated home itself and
+  your Pi home travels in `GENTLE_SHELL_USER_PI_HOME`: when that variable is set,
+  a `PI_CODING_AGENT_DIR` equal to the isolated home is not treated as your Pi
+  home, so the command also works from inside a session;
 - is, contains or lies inside a `.pi` directory, such as a project's `.pi` or
   `.pi/gentle-ai` (containing means a `.pi` directly inside it). The default
   config home, `~/.pi/gentle-ai`, is the only `.pi` location allowed;
@@ -97,8 +101,16 @@ path (after following symbolic links, including linked parent folders):
 | Exit code | Meaning |
 | --- | --- |
 | 0 | Removed, or `--dry-run` printed the plan. |
-| 1 | Refused, cancelled, or a removal failed. A refusal exits 1 even with `--dry-run`, since the real run would refuse too. End of input (Ctrl-D or a closed stdin) at a question cancels. |
+| 1 | Refused, cancelled, interrupted, or a removal failed. A refusal exits 1 even with `--dry-run`, since the real run would refuse too. |
 | 2 | Usage error, including no terminal to confirm in without `--yes`. |
+
+At the questions:
+
+- Ctrl-C at any question stops the whole uninstall: it exits 1 and removes
+  nothing (both questions come before any removal).
+- End of input (Ctrl-D, or a closed stdin) answers No: at the first question
+  it cancels (exit 1, nothing removed); at the shared-configuration question it
+  keeps the shared files and the uninstall goes on.
 
 A refused plan lists no Gentle Shell data to remove, so no path ever appears both
 as removed and as not touched.
@@ -110,6 +122,12 @@ When only the package removal fails, it prints the command to run yourself.
 It runs before any Pi runtime check, so it also works when Pi is missing.
 
 ## Windows
+
+pnpm and npm run the same verified way `gentle-shell upgrade` runs them: through
+node.exe and the package manager's own JavaScript entry (or its native `.exe`),
+never a `.cmd` or `.bat` shim, which cannot run without a shell. A package manager
+that resolves only to such a shim counts as missing, and the command refuses
+before removing anything.
 
 Removing the running `gentle-pi` package with pnpm or npm on Windows has not been
 verified yet. If the package manager fails, Gentle Shell's data is already gone

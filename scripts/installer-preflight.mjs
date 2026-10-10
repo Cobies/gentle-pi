@@ -27,8 +27,9 @@ export const requirements = Object.freeze({
 export const PI_INSTALL_VERSION = "1.0.0";
 
 /** Runtime persisted under PNPM_HOME. Bootstrap-only Node: `pnpm runtime set
- * node <node> -g`, then `pnpm add -g npm@<npm> pnpm@<pnpm>`. Persistent Node:
- * one `pnpm add -g` of only the missing npm and/or bootstrap-only pnpm.
+ * node <node> -g`, then `pnpm add -g npm@<npm> pnpm@<pnpm>`, or only npm when
+ * pnpm is already persistent (never downgraded). Persistent Node: one
+ * `pnpm add -g` of only the missing npm and/or bootstrap-only pnpm.
  * npm 11.19.0 is the npm bundled with Node 24.21.0.
  */
 export const persistencePins = Object.freeze({ node: "24.21.0", npm: "11.19.0", pnpm: requirements.pnpm });
@@ -88,6 +89,9 @@ const probeNames = ["node", "pnpm", "pi", "shell", "gentleAi", "go", "globalBin"
  * On Windows the wizard passes pnpmHome, its PNPM_HOME decision (windowsPnpmHome),
  * which the inventory keeps. A blocked decision runs no probe at all: the user's
  * tools would otherwise run with that PNPM_HOME's bin first on PATH.
+ * On Windows a `folders` probe runs last: { node?, npm?, go?, pi?, shell? }, what
+ * the walk found on the folders those tools run from (S6 notice). It is kept as
+ * `folders` only when it names something; a failed walk is simply no record.
  */
 export async function collectInventory({ platform, arch, probes = {}, pnpmHome }) {
 	const inventory = { platform, arch, ...(pnpmHome === undefined || pnpmHome === null ? {} : { pnpmHome }) };
@@ -99,6 +103,10 @@ export async function collectInventory({ platform, arch, probes = {}, pnpmHome }
 			// Do not retain probe errors: they can contain private paths or credentials.
 			inventory[name] = { available: null };
 		}
+	}
+	if (platform === "win32" && probes.folders) {
+		const folders = await Promise.resolve().then(() => probes.folders()).catch(() => null);
+		if (plainRecord(folders) && !("available" in folders) && Object.keys(folders).length > 0) inventory.folders = folders;
 	}
 	return inventory;
 }
@@ -255,6 +263,22 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 			.filter((key) => typeof home.rejected[key] === "string").map((key) => [key, home.rejected[key]]));
 		tools.pnpmHome = { status: "private", path: home.path, default: home.rejected.path, finding };
 	}
+	// Windows only (S6 notice, never a blocker): reused tools whose folders another
+	// account can change, from the inventory's one `folders` walk. Only tools this
+	// plan uses as they are: the user's Node and its npm, a Go a build reuses, a Pi
+	// kept as it is, and an npm-owned Gentle Shell that is kept or updated by npm.
+	const folders = platform === "win32" && plainRecord(inventory.folders) ? inventory.folders : null;
+	if (folders) {
+		const userNode = tools.node.status === "reusable" && tools.node.found === undefined && inventory.node?.persistent === true;
+		const used = { node: userNode, npm: userNode && inventory.node?.npm === true, go: tools.go.status === "reusable", pi: tools.pi.status === "reusable",
+			shell: inventory.shell?.owner === "npm" && ["reusable", "needs-update"].includes(tools.shell.status) };
+		// A walk rejection, or a path the walk could not check; nothing else.
+		const known = /^(?:(?:target|parent|ancestor)-(?:reparse|owner|acl-mask)|unchecked)$/;
+		const reused = Object.keys(used).filter((tool) => used[tool] && plainRecord(folders[tool]) && known.test(String(folders[tool].check)))
+			.map((tool) => ({ tool, ...Object.fromEntries(["check", "at", "sid", "account", "rights"]
+				.filter((key) => typeof folders[tool][key] === "string").map((key) => [key, folders[tool][key]])) }));
+		if (reused.length > 0) tools.folders = { status: "notice", reused };
+	}
 	const missingShell = tools.shell.status === "unavailable";
 	// Setup recovery: the setup probe proved the pinned stack this pnpm installed
 	// (an earlier run stopped in setup), so only the public setup is rerun.
@@ -316,13 +340,15 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 	// never persists: the earlier run did that before installing the stack.
 	const node = inventory.node;
 	const persistable = tools.node.status === "reusable" && !recovering;
+	// A persistent pnpm, such as a newer pnpm 11 in $PNPM_HOME/bin, is never replaced.
+	const pnpm = inventory.pnpm?.persistent === false;
 	if (persistable && node.persistent === false) {
 		action("persist-node", "persist-runtime", "node", persistencePins.node);
-		action("persist-package-managers", "install-global", "package-managers");
+		if (pnpm) action("persist-package-managers", "install-global", "package-managers");
+		else action("persist-npm", "install-global", "npm", persistencePins.npm);
 		action("configure-npm-prefix", "configure", "npm-prefix");
 	} else if (persistable) {
 		const npm = node.npm === false;
-		const pnpm = inventory.pnpm?.persistent === false;
 		if (npm && pnpm) action("persist-package-managers", "install-global", "package-managers");
 		else if (npm) action("persist-npm", "install-global", "npm", persistencePins.npm);
 		else if (pnpm) action("persist-pnpm", "install-global", "pnpm", persistencePins.pnpm);

@@ -9,7 +9,7 @@ import { askLine, runSelfUninstall, SHARED_CONFIG_FILES } from "../lib/gentle-sh
 const posixOnly = { skip: process.platform === "win32" };
 const SHA = "1f9d5e6423e37f7d2316859045f379ba9b5d8c3a";
 
-type Owner = { name: "pnpm" | "npm"; command: string };
+type Owner = { name: "pnpm" | "npm"; command: string; prefix: string[] };
 type Options = {
 	ask?: (question: string) => Promise<string>;
 	owner?: Owner | Error;
@@ -66,7 +66,7 @@ function world() {
 			platform: options.platform ?? "darwin",
 			interactive: options.interactive ?? false,
 			resolveOwner: async () => {
-				const owner = options.owner ?? { name: "pnpm", command: "/usr/bin/pnpm" };
+				const owner = options.owner ?? { name: "pnpm", command: "/usr/bin/pnpm", prefix: [] };
 				if (owner instanceof Error) throw owner;
 				return owner;
 			},
@@ -166,9 +166,60 @@ test("--yes removes Gentle Shell's own data, then the package, then the empty ~/
 test("an npm-owned installation is removed with npm uninstall -g", async () => {
 	const w = world();
 	try {
-		assert.equal(await w.uninstall(["--yes"], { owner: { name: "npm", command: "/usr/bin/npm" } }), 0);
+		assert.equal(await w.uninstall(["--yes"], { owner: { name: "npm", command: "/usr/bin/npm", prefix: [] } }), 0);
 		assert.deepEqual(w.calls.map(({ command, argv }) => `${command} ${argv.join(" ")}`), ["/usr/bin/npm uninstall -g gentle-pi"]);
 	} finally { w.cleanup(); }
+});
+
+test("Windows: the package is removed through the owner's verified invocation, never a .cmd", async () => {
+	const node = "C:\\nodejs\\node.exe";
+	for (const [owner, expected] of [
+		[{ name: "pnpm", command: node, prefix: ["C:\\tools\\pnpm\\package\\bin\\pnpm.mjs"] }, ["C:\\tools\\pnpm\\package\\bin\\pnpm.mjs", "remove", "-g", "gentle-pi"]],
+		[{ name: "npm", command: node, prefix: ["C:\\nodejs\\node_modules\\npm\\bin\\npm-cli.js"] }, ["C:\\nodejs\\node_modules\\npm\\bin\\npm-cli.js", "uninstall", "-g", "gentle-pi"]],
+	] as const) {
+		const w = world();
+		try {
+			assert.equal(await w.uninstall(["--yes"], { owner: { ...owner, prefix: [...owner.prefix] }, platform: "win32" }), 0);
+			assert.deepEqual(w.calls.map(({ command, argv }) => [command, argv]), [[node, expected]]);
+			assert.ok(w.out.includes(`  ${owner.name} ${expected.slice(1).join(" ")}`), "the plan shows the command a person would type");
+		} finally { w.cleanup(); }
+	}
+});
+
+test("POSIX: the package manager runs as it was found, with no prefix", async () => {
+	const w = world();
+	try {
+		assert.equal(await w.uninstall(["--yes"], { platform: "linux" }), 0);
+		assert.deepEqual(w.calls.map(({ command, argv }) => [command, argv]), [["/usr/bin/pnpm", ["remove", "-g", "gentle-pi"]]]);
+	} finally { w.cleanup(); }
+});
+
+test("inside a Gentle Shell session the isolated home in PI_CODING_AGENT_DIR is not the user's Pi home", async () => {
+	const w = world();
+	try {
+		assert.equal(await w.uninstall(["--yes"], { env: { PI_CODING_AGENT_DIR: w.isolated, GENTLE_SHELL_USER_PI_HOME: w.piHome } }), 0, w.err.join("\n"));
+		assert.equal(existsSync(w.isolated), false);
+		assert.equal(existsSync(join(w.piHome, "settings.json")), true);
+		assert.ok(section(w.out, "Not touched:").some((line) => line.includes(`${w.piHome}  (your Pi home)`)));
+	} finally { w.cleanup(); }
+});
+
+test("inside a session the user's Pi home and any other PI_CODING_AGENT_DIR stay protected", async () => {
+	const cases = (w: World) => [
+		// GENTLE_SHELL_USER_PI_HOME pointing at the isolated home itself.
+		{ PI_CODING_AGENT_DIR: w.isolated, GENTLE_SHELL_USER_PI_HOME: w.isolated },
+		// A PI_CODING_AGENT_DIR other than the isolated home, inside it.
+		{ PI_CODING_AGENT_DIR: join(w.isolated, "pi"), GENTLE_SHELL_USER_PI_HOME: w.piHome },
+		// Without GENTLE_SHELL_USER_PI_HOME, PI_CODING_AGENT_DIR is the user's Pi home.
+		{ PI_CODING_AGENT_DIR: w.isolated },
+	];
+	for (let index = 0; index < 3; index += 1) {
+		const w = world();
+		try {
+			await refused(w, cases(w)[index], /your Pi home/);
+			untouched(w);
+		} finally { w.cleanup(); }
+	}
 });
 
 test("--yes --include-shared also removes exactly the shared Gentle AI configuration files", async () => {
@@ -547,6 +598,44 @@ test("end of input at a confirmation prompt cancels and removes nothing", async 
 			}
 		} finally { w.cleanup(); }
 	}
+});
+
+/** Answers each question in terminal mode by typing `keys` (one entry per question) once it is asked. */
+function typing(keys: string[]) {
+	const input = new PassThrough();
+	const output = new PassThrough();
+	output.resume();
+	return (question: string) => {
+		const answer = askLine(question, { input, output, terminal: true });
+		input.write(keys.shift() ?? "");
+		return answer;
+	};
+}
+
+test("Ctrl-C at any confirmation prompt aborts the whole uninstall", async () => {
+	for (const keys of [["\x03"], ["y\r", "\x03"]]) {
+		const w = world();
+		try {
+			assert.equal(await w.uninstall([], { interactive: true, ask: typing([...keys]) }), 1, JSON.stringify(keys));
+			assert.match(w.err.join("\n"), /Interrupted; nothing was removed\./);
+			untouched(w);
+		} finally { w.cleanup(); }
+	}
+});
+
+test("in a terminal, Ctrl-D at the first prompt cancels and at the shared question keeps it", async () => {
+	const first = world();
+	try {
+		assert.equal(await first.uninstall([], { interactive: true, ask: typing(["\x04"]) }), 1);
+		assert.match(first.out.join("\n"), /Cancelled; nothing was removed\./);
+		untouched(first);
+	} finally { first.cleanup(); }
+	const second = world();
+	try {
+		assert.equal(await second.uninstall([], { interactive: true, ask: typing(["y\r", "\x04"]) }), 0);
+		assert.equal(existsSync(join(second.config, "profiles.json")), true);
+		assert.deepEqual(second.ownLeft(), []);
+	} finally { second.cleanup(); }
 });
 
 test("askLine returns the typed line", async () => {
