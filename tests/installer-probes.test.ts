@@ -30,7 +30,7 @@ const bootstrapEnv = { HOME, PATH: `${TOOLS}/node/bin:${TOOLS}/pnpm/bin:/usr/bin
 function probes({ env = bootstrapEnv as Record<string, string>, files = [] as string[], dirs = [HOME] as string[],
 	writable = [HOME] as string[], others = [] as string[], realpaths = {} as Record<string, string>,
 	texts = {} as Record<string, string>, results = {} as Record<string, Result | (() => Result)>,
-	integrity = { ok: true } as object, platform = "linux" } = {}) {
+	integrity = { ok: true } as object, platform = "linux", storage = (() => {}) as (file: string) => void, pnpmHome = undefined as object | undefined } = {}) {
 	const calls: Call[] = [];
 	const unexpected: string[] = [];
 	const fileSet = new Set(files);
@@ -39,6 +39,8 @@ function probes({ env = bootstrapEnv as Record<string, string>, files = [] as st
 	const instance = createProbes({
 		platform,
 		env,
+		storage,
+		pnpmHome,
 		run: async (command: string, args: string[], options: { env: Record<string, string>; deadlineMs: number; cwd?: string }) => {
 			calls.push({ command, args, env: options.env, deadlineMs: options.deadlineMs, ...(options.cwd === undefined ? {} : { cwd: options.cwd }) });
 			const key = [command, ...args].join(" ");
@@ -321,6 +323,88 @@ test("Windows pnpm uses the direct bootstrap handoff; a .cmd shim alone is unkno
 	const shim = probes({ platform: "win32", env: { LOCALAPPDATA: local, Path: "C:\\Tools" }, files: ["C:\\Tools\\pnpm.cmd"] });
 	assert.deepEqual(await shim.probes.pnpm(), { available: null });
 	assert.deepEqual(shim.calls, []);
+});
+
+// Windows layouts, verbatim shim text (see installer-windows-bootstrap.test.ts for sources).
+const W_LOCAL = "C:\\Users\\u\\AppData\\Local";
+const W_TOOLS = `${W_LOCAL}\\.gentle-shell-bootstrap-tools.1`;
+const W_TOOLS_NODE = `${W_TOOLS}\\node\\node.exe`;
+const W_TOOLS_ENTRY = `${W_TOOLS}\\pnpm\\package\\bin\\pnpm.mjs`;
+const W_APPDATA_NPM = "C:\\Users\\u\\AppData\\Roaming\\npm";
+const W_NPM_ROOT = `${W_APPDATA_NPM}\\node_modules`;
+const W_NODE_DIR = "C:\\Program Files\\nodejs";
+const W_NODE = `${W_NODE_DIR}\\node.exe`;
+const W_NPM_CLI = `${W_NODE_DIR}\\node_modules\\npm\\bin\\npm-cli.js`;
+const cmdShimHead = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n";
+const cmdShim = (target: string) => `${cmdShimHead}\r\nIF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n) ELSE (\r\n  SET "_prog=node"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\${target}" %*\r\n`;
+const nodeNpmCmd = ":: Created by npm, please don't edit manually.\r\n@ECHO OFF\r\n\r\nSETLOCAL\r\n\r\nSET \"NODE_EXE=%~dp0\\node.exe\"\r\nIF NOT EXIST \"%NODE_EXE%\" (\r\n  SET \"NODE_EXE=node\"\r\n)\r\n\r\nSET \"NPM_PREFIX_JS=%~dp0\\node_modules\\npm\\bin\\npm-prefix.js\"\r\nSET \"NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js\"\r\nFOR /F \"delims=\" %%F IN ('CALL \"%NODE_EXE%\" \"%NPM_PREFIX_JS%\"') DO (\r\n  SET \"NPM_PREFIX_NPM_CLI_JS=%%F\\node_modules\\npm\\bin\\npm-cli.js\"\r\n)\r\nIF EXIST \"%NPM_PREFIX_NPM_CLI_JS%\" (\r\n  SET \"NPM_CLI_JS=%NPM_PREFIX_NPM_CLI_JS%\"\r\n)\r\n\r\n\"%NODE_EXE%\" \"%NPM_CLI_JS%\" %*\r\n";
+const W_PI = `${W_NPM_ROOT}\\@earendil-works\\pi-coding-agent`;
+const W_PI_ENTRY = `${W_PI}\\dist\\bundle\\cli.js`;
+// The wizard on Windows: the bootstrap's Node and pnpm handed off, Node.js on the user's Path.
+const windowsPi = (version: string, { shim = cmdShim("node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js"), root = W_NPM_ROOT } = {}) => probes({
+	platform: "win32",
+	env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: `${W_TOOLS}\\node;${W_APPDATA_NPM};${W_NODE_DIR}`, PATHEXT: ".COM;.EXE;.BAT;.CMD",
+		GENTLE_BOOTSTRAP_TOOLS: W_TOOLS, GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+	files: [`${W_APPDATA_NPM}\\pi.cmd`, `${W_APPDATA_NPM}\\pi`, W_PI_ENTRY, W_NODE, `${W_NODE_DIR}\\npm.cmd`, W_NPM_CLI],
+	dirs: [W_NPM_ROOT, root],
+	texts: { [`${W_APPDATA_NPM}\\pi.cmd`]: shim, [`${W_NODE_DIR}\\npm.cmd`]: nodeNpmCmd,
+		[`${W_PI}\\package.json`]: JSON.stringify({ name: "@earendil-works/pi-coding-agent", version }) },
+	results: { [`${W_TOOLS_NODE} ${W_TOOLS_ENTRY} ${LIST}`]: { code: 0, stdout: "[]" },
+		[`${W_NODE} ${W_PI_ENTRY} --version`]: { code: 0, stdout: `${version}\r\n` },
+		[`${W_NODE} ${W_NPM_CLI} root -g`]: { code: 0, stdout: `${root}\r\n` } },
+});
+test("Windows: an older Pi installed by npm is run through its shim and attributed to npm, as on POSIX", async () => {
+	const npm = windowsPi("0.87.1");
+	assert.deepEqual(await npm.probes.pi(), { available: true, version: "0.87.1", usable: true, external: true, owner: "npm" });
+	assert.deepEqual(await npm.probes.locatePi(), { root: W_PI, version: "0.87.1", owner: "npm" });
+	assert.deepEqual(npm.unexpected, []);
+	assert.equal(npm.calls.some((call) => /\.cmd$/i.test(call.command)), false, "no shim is ever spawned");
+	// npm's global root elsewhere: the Pi is reused or replaced alongside, never attributed.
+	const elsewhere = windowsPi("0.87.1", { root: "C:\\Other\\node_modules" });
+	assert.deepEqual(await elsewhere.probes.pi(), { available: true, version: "0.87.1", usable: true, external: true });
+	// A pi.cmd no structure resolves is never run: unknown, outside pnpm.
+	const mise = windowsPi("0.87.1", { shim: "@echo off\r\nsetlocal\r\nmise x -- %*\r\n" });
+	assert.deepEqual(await mise.probes.pi(), { available: null, outsidePnpm: true });
+	assert.equal(mise.calls.some((call) => call.args.includes("--version")), false);
+});
+
+test("Windows: a user's pnpm in $PNPM_HOME\\bin is run through its shim for the version it reports, never replaced", async () => {
+	const bin = `${W_LOCAL}\\pnpm\\bin`;
+	const exe = `${W_LOCAL}\\pnpm\\global\\v11\\5f1a\\node_modules\\@pnpm\\exe\\pnpm.exe`;
+	const h = probes({ platform: "win32", env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: bin, GENTLE_BOOTSTRAP_TOOLS: W_TOOLS,
+		GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+	files: [`${bin}\\pnpm.cmd`, `${bin}\\pnpm`, exe],
+	texts: { [`${bin}\\pnpm.cmd`]: "@SETLOCAL\r\n@\"%~dp0\\..\\global\\v11\\5f1a\\node_modules\\@pnpm\\exe\\pnpm.exe\"   %*\r\n" },
+	results: { [`${W_TOOLS_NODE} ${W_TOOLS_ENTRY} --version`]: { code: 0, stdout: "11.1.1\r\n" }, [`${exe} --version`]: { code: 0, stdout: "11.0.5\r\n" } } });
+	assert.deepEqual(await h.probes.pnpm(), { available: true, version: "11.0.5", usable: true, compatible: false, persistent: true, inGlobalBin: true });
+	assert.deepEqual(h.calls.find((call) => call.command === exe)?.cwd, "C:\\");
+});
+
+test("Windows npm counts by behavior whatever installed it: Node.js, nvm-windows, fnm or a Volta npm.exe", async () => {
+	const layouts = {
+		node: { dir: W_NODE_DIR, npm: "npm.cmd" },
+		nvm: { dir: "C:\\nvm4w\\nodejs", npm: "npm.cmd" },
+		fnm: { dir: `${W_LOCAL}\\fnm_multishells\\1234_1700000000000`, npm: "npm.cmd" },
+		volta: { dir: "C:\\Program Files\\Volta", npm: "npm.exe" },
+	};
+	for (const [name, { dir, npm }] of Object.entries(layouts)) {
+		const node = `${dir}\\node.exe`; const cli = `${dir}\\node_modules\\npm\\bin\\npm-cli.js`;
+		const command = npm === "npm.exe" ? `${dir}\\npm.exe` : node;
+		const prefix = npm === "npm.exe" ? [] : [cli];
+		const h = probes({ platform: "win32", env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: dir, PATHEXT: ".COM;.EXE;.BAT;.CMD",
+			GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+		files: [node, `${dir}\\${npm}`, cli], texts: { [`${dir}\\npm.cmd`]: nodeNpmCmd },
+		results: { [`${node} --version`]: { code: 0, stdout: "v24.18.0\r\n" }, [[command, ...prefix, "--version"].join(" ")]: { code: 0, stdout: "11.6.2\r\n" },
+			[[command, ...prefix, "config", "get", "prefix"].join(" ")]: { code: 0, stdout: `${W_APPDATA_NPM}\r\n` } } });
+		assert.deepEqual(await h.probes.node(), { available: true, version: "24.18.0", usable: true, persistent: true, npm: true }, name);
+	}
+	// mise's file shim cannot be run without cmd.exe: no usable npm, so the plan persists one.
+	const mise = `${W_LOCAL}\\mise\\shims`;
+	const h = probes({ platform: "win32", env: { LOCALAPPDATA: W_LOCAL, Path: `${mise};${W_NODE_DIR}`, PATHEXT: ".COM;.EXE;.BAT;.CMD",
+		GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+	files: [`${mise}\\npm.cmd`, W_NODE], texts: { [`${mise}\\npm.cmd`]: "@echo off\r\nsetlocal\r\nmise x -- %*\r\n" },
+	results: { [`${W_NODE} --version`]: { code: 0, stdout: "v24.18.0\r\n" } } });
+	assert.deepEqual(await h.probes.node(), { available: true, version: "24.18.0", usable: true, persistent: true, npm: false });
 });
 
 function listing(dependencies: object) {
@@ -683,4 +767,62 @@ test("host run settles at the deadline even when the child's stdout never closes
 	assert.equal((spawned[0][2] as { shell: boolean }).shell, false);
 	// A late close after the deadline does not change the settled result.
 	child.emit("close", 0, null);
+});
+
+// S6: a pnpm whose storage fails the walk is never run, not even with --version.
+const W_PRIVATE = "C:\\Users\\u\\.pnpm";
+test("Windows: the user's pnpm in a folder another principal may write is never run; the bootstrap's pnpm is used", async () => {
+	const bin = `${W_LOCAL}\\pnpm\\bin`;
+	const exe = `${W_LOCAL}\\pnpm\\global\\v11\\5f1a\\node_modules\\@pnpm\\exe\\pnpm.exe`;
+	const walked: string[] = [];
+	const layout = (storage: (file: string) => void) => probes({ platform: "win32", storage,
+		env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", PNPM_HOME: W_PRIVATE, Path: bin, GENTLE_BOOTSTRAP_TOOLS: W_TOOLS,
+			GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+		files: [`${bin}\\pnpm.cmd`, exe],
+		texts: { [`${bin}\\pnpm.cmd`]: "@SETLOCAL\r\n@\"%~dp0\\..\\global\\v11\\5f1a\\node_modules\\@pnpm\\exe\\pnpm.exe\"   %*\r\n" },
+		results: { [`${W_TOOLS_NODE} ${W_TOOLS_ENTRY} --version`]: { code: 0, stdout: "11.1.1\r\n" }, [`${exe} --version`]: { code: 0, stdout: "10.0.0\r\n" } } });
+	const weak = layout((file) => {
+		walked.push(file);
+		if (file.startsWith(`${W_LOCAL}\\pnpm`)) throw Object.assign(new Error("Windows ACL evidence rejected"), { check: "parent-acl-mask" });
+	});
+	assert.deepEqual(await weak.probes.pnpm(), { available: true, version: "11.1.1", usable: true, compatible: true, persistent: false });
+	assert.equal(weak.calls.some((call) => call.command === exe), false, "the untrusted pnpm.exe never runs");
+	assert.ok(walked.includes(`${bin}\\pnpm.cmd`), "its shim is walked before anything runs");
+	// Any failed walk, not only a rejection code, means it is not usable.
+	const unknown = layout(() => { throw new Error("Windows prerequisite process failed"); });
+	await unknown.probes.pnpm();
+	assert.equal(unknown.calls.some((call) => call.command === exe), false);
+	// A trusted one is still run for the version it reports, as before.
+	const trusted = layout(() => {});
+	assert.deepEqual(await trusted.probes.pnpm(), { available: true, version: "11.1.1", usable: true, compatible: true, persistent: false, found: "10.0.0" });
+});
+
+test("Windows: a private PNPM_HOME not created yet holds no global packages, so pnpm list -g never runs before consent", async () => {
+	const env = { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", PNPM_HOME: W_PRIVATE, Path: "C:\\Windows",
+		GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY };
+	const pnpmHome = { available: true, path: W_PRIVATE, source: "private", rejected: { path: `${W_LOCAL}\\pnpm`, check: "target-acl-mask" } };
+	const absentHome = probes({ platform: "win32", env, pnpmHome, dirs: ["C:\\Users\\u"] });
+	assert.deepEqual([await absentHome.probes.shell(), await absentHome.probes.pi(), await absentHome.probes.gentleAi(), await absentHome.probes.setup()],
+		[{ available: false }, { available: false }, { available: false }, false]);
+	assert.deepEqual(absentHome.calls, []);
+	// Once it exists (created by an earlier run), its packages are listed as usual.
+	const existing = probes({ platform: "win32", env, pnpmHome, dirs: ["C:\\Users\\u", W_PRIVATE],
+		results: { [`${W_TOOLS_NODE} ${W_TOOLS_ENTRY} ${LIST}`]: { code: 0, stdout: "[]" } } });
+	assert.deepEqual(await existing.probes.shell(), { available: false });
+	assert.equal(existing.calls.length, 1);
+	assert.equal(existing.calls[0].env.PNPM_HOME, W_PRIVATE);
+});
+
+test("Windows: with a blocked PNPM_HOME decision the real probes run no command and the plan blocks", async () => {
+	const pnpmHome = { available: true, path: `${W_LOCAL}\\pnpm`, source: "default", installed: true,
+		untrusted: { check: "target-acl-mask", at: `${W_LOCAL}\\pnpm`, sid: "S-1-5-21-1", rights: "0x001301BF" } };
+	const env = { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: `${W_LOCAL}\\pnpm\\bin;${W_NODE_DIR}`, PATHEXT: ".COM;.EXE;.BAT;.CMD",
+		GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY };
+	const walked: string[] = [];
+	const h = probes({ platform: "win32", env, pnpmHome, storage: (file) => { walked.push(file); },
+		files: [W_NODE, `${W_NODE_DIR}\\npm.cmd`, W_NPM_CLI, `${W_LOCAL}\\pnpm\\bin\\npm.cmd`], texts: { [`${W_NODE_DIR}\\npm.cmd`]: nodeNpmCmd },
+		results: { [`${W_NODE} --version`]: { code: 0, stdout: "v24.18.0\r\n" }, [`${W_NODE} ${W_NPM_CLI} --version`]: { code: 0, stdout: "11.6.2\r\n" } } });
+	const inventory = await collectInventory({ platform: "win32", arch: "x64", probes: h.probes, pnpmHome });
+	assert.deepEqual([h.calls, walked], [[], []], "no command runs and nothing is walked");
+	assert.deepEqual(planPreflight(inventory).blockers, [{ code: "untrusted-pnpm-home", tool: "pnpmHome" }]);
 });
