@@ -1185,21 +1185,34 @@ async function nativeCmd(root: string, stages: string[], env: NodeJS.ProcessEnv 
 	return nativeCmdFile(root, "fixture.cmd", env, limit);
 }
 async function nativeCmdFile(root: string, file: string, env: NodeJS.ProcessEnv, limit = 5000): Promise<NativeResult> {
+	const started = performance.now();
+	const trace = (phase: string, detail: Record<string, unknown> = {}) => {
+		if (file === "scripts\\bootstrap.cmd") console.error("WINDOWS_ENTRY_PHASE", JSON.stringify({ phase, elapsedMs: performance.now() - started, limit, ...detail }));
+	};
+	trace("spawn-request");
 	const child = spawn(join(process.env.SystemRoot!, "System32/cmd.exe"), ["/d", "/c", file], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
 	let stdout = ""; let stderr = ""; let guardKilled = false;
+	child.once("spawn", () => trace("cmd-spawned"));
+	child.once("exit", (status, signal) => trace("cmd-exit", { status, signal }));
 	let guardError: unknown;
 	const result = await new Promise<NativeResult>((resolveChild, reject) => {
 		const timer = setTimeout(() => {
 			guardKilled = true;
+			trace("guard-fired", { recordExists: existsSync(join(root, "process-records")), diagnosticSeen: /No acquisition attempted/.test(stderr) });
 			try { cleanNativeProcesses(root); } catch (error) { guardError = error; }
 			child.kill("SIGKILL");
 			child.stdout.destroy(); child.stderr.destroy();
 			resolveChild({ status: null, stdout, stderr, guardKilled });
 		}, limit);
 		child.stdout.on("data", (bytes: Buffer) => { stdout += bytes.toString(); if (stdout.length > 1048576) { guardError = new Error("Fixture output limit"); child.kill("SIGKILL"); } });
-		child.stderr.on("data", (bytes: Buffer) => { stderr += bytes.toString(); if (stderr.length > 1048576) { guardError = new Error("Fixture output limit"); child.kill("SIGKILL"); } });
+		child.stderr.on("data", (bytes: Buffer) => {
+			const before = stderr;
+			stderr += bytes.toString();
+			if (!before.length) trace("first-stderr", { bytes: bytes.length });
+			if (!/No acquisition attempted/.test(before) && /No acquisition attempted/.test(stderr)) trace("missing-bundle-diagnostic");
+			if (stderr.length > 1048576) { guardError = new Error("Fixture output limit"); child.kill("SIGKILL"); } });
 		child.once("error", (error) => { clearTimeout(timer); reject(error); });
-		child.once("close", (status) => { clearTimeout(timer); resolveChild({ status, stdout, stderr, guardKilled }); });
+		child.once("close", (status) => { trace("cmd-close", { status, guardKilled }); clearTimeout(timer); resolveChild({ status, stdout, stderr, guardKilled }); });
 	});
 	const residualReaped = cleanNativeProcesses(root);
 	assert.equal(residualReaped, false, "production must reap its own recorded children; fixture cleanup cannot mask a failure");
