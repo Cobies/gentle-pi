@@ -256,6 +256,23 @@ test("/api/plan is built server-side and explains profile and runtime persistenc
 	}
 });
 
+test("/api/plan lists only Node.js and npm for persistence when a newer pnpm 11 is already in $PNPM_HOME/bin", async () => {
+	const { host, port, login, runs } = await start({ collect: async () => collected({
+		pnpm: { available: true, version: "11.5.0", usable: true, compatible: true, persistent: true, inGlobalBin: true },
+	}) });
+	try {
+		const view = await plan(port, await login());
+		assert.deepEqual(view.blockers, []);
+		assert.deepEqual(view.actions.map((action: { id: string }) => action.id).filter((id: string) => /^(persist-|configure-npm)/.test(id)),
+			["persist-node", "persist-npm", "configure-npm-prefix"]);
+		assert.deepEqual(view.persistence.tools, ["node", "npm"]);
+		assert.ok(view.persistence.description.startsWith("node, npm will be installed under $PNPM_HOME"), view.persistence.description);
+		assert.deepEqual(runs, []);
+	} finally {
+		await host.close("test");
+	}
+});
+
 test("/api/plan reports blockers with guidance and no profile change when already on PATH", async () => {
 	const { host, port, login } = await start({ collect: async () => collected({
 		node: { available: true, version: "24.18.0", usable: true, persistent: true, npm: true },
@@ -425,6 +442,44 @@ test("/api/plan explains a Pi whose version cannot be read", async () => {
 			"Pi is already installed, but `pi --version` did not report a version this installer can check. Make sure `pi --version` works in a terminal, then select Check again.");
 	} finally {
 		await host.close("test");
+	}
+});
+
+test("/api/plan says that pnpm may put a newer Pi next to Gentle Shell, at least the minimum", async () => {
+	// A newer Pi installed with pnpm never blocks: it is kept as it is.
+	const { host, port, login } = await start({ collect: async () => collected({ pi: { available: true, version: "1.1.0", usable: true } }) });
+	try {
+		const view = await plan(port, await login());
+		assert.deepEqual(view.blockers, []);
+		assert.equal(view.actions.find((action: { id: string }) => action.id === "install-shell").description,
+			`Install Gentle Shell (gentle-pi) globally with pnpm. pnpm may put a newer Pi than ${PI_INSTALL_VERSION} next to it ` +
+			`(at least Pi ${requirements.pi}), and Gentle Shell runs that Pi.`);
+	} finally {
+		await host.close("test");
+	}
+});
+
+test("the outcome says which Pi Gentle Shell runs only when it is not the installer's Pi", async () => {
+	const cases: [object, string][] = [
+		[{ outcome: "ready", completed: [], piVersion: "1.1.0" }, `${guidance.outcomes.ready} Gentle Shell runs Pi 1.1.0, which pnpm installed next to it.`],
+		[{ outcome: "terminal-action-required", action: "open-new-terminal", completed: [], piVersion: "1.1.0" },
+			`${guidance.outcomes["terminal-action-required"]} Gentle Shell runs Pi 1.1.0, which pnpm installed next to it.`],
+		[{ outcome: "ready", completed: [] }, guidance.outcomes.ready],
+		[{ outcome: "ready", completed: [], piVersion: PI_INSTALL_VERSION }, guidance.outcomes.ready],
+		[{ outcome: "ready", completed: [], piVersion: "1.1.0 <script>" }, guidance.outcomes.ready],
+	];
+	for (const [result, expected] of cases) {
+		const { host, port, login } = await start({ runInstall: async () => result as never });
+		try {
+			const cookie = await login();
+			const { planId } = await plan(port, cookie);
+			assert.equal((await post(port, "/api/install", cookie, { planId, consent: true })).status, 202);
+			await waitFor(() => host.outcome() !== null);
+			assert.equal(host.outcome()?.guidance, expected, JSON.stringify(result));
+			assert.equal("piVersion" in (host.outcome() ?? {}), false);
+		} finally {
+			await host.close("test");
+		}
 	}
 });
 

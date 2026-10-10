@@ -96,6 +96,15 @@ test("a release install updates to the latest release with the package manager t
 	}
 });
 
+test("a pnpm upgrade adds only gentle-pi, in its own pnpm group: a Pi installed with pnpm is never read or replaced", async () => {
+	// A separate add keeps `pi update` (which replaces Pi's own group) from removing gentle-pi.
+	const w = world();
+	try {
+		assert.equal(await w.upgrade([]), 0);
+		assert.deepEqual(w.calls.map((call) => `${call.command} ${call.argv.join(" ")}`), ["/usr/bin/pnpm add -g gentle-pi@4.1.0 --allow-build=gentle-pi"]);
+	} finally { w.cleanup(); }
+});
+
 test("a Gentle Shell that neither pnpm nor npm owns, such as an npm-linked checkout, is never reinstalled", async () => {
 	const w = world({ owner: "linked" });
 	try {

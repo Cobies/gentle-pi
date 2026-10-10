@@ -133,7 +133,8 @@ export function expectedSteps(actionIds) {
 	// The pinned Go comes right after the checks, before anything is persisted.
 	const steps = [...(addNpm ? [] : ["check-npm"]), "check-global-bin", shellOnly ? "check-existing-shell" : "check-existing-stack", ...piCheck, ...go];
 	if (ids.has("persist-node")) {
-		steps.push("persist-node", "persist-package-managers", "verify-persistent-runtime", "check-npm", "configure-npm-prefix");
+		// Only npm is added next to a persistent pnpm, which is never downgraded.
+		steps.push("persist-node", ids.has("persist-npm") ? "persist-npm" : "persist-package-managers", "verify-persistent-runtime", "check-npm", "configure-npm-prefix");
 	} else if (addNpm || addPnpm) {
 		const add = ["persist-package-managers", "persist-npm", "persist-pnpm"].find((id) => ids.has(id));
 		steps.push(add);

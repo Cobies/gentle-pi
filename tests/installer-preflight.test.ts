@@ -79,7 +79,7 @@ test("the pinned Go is a 1.25 patch release that meets the requirement", () => {
 test("the pinned Go is acquired before the runtime is persisted, so a failed Go download changes nothing", () => {
 	const persisting = { ...tool("24.18.0"), persistent: false, npm: true };
 	for (const [platform, channel] of [["linux", "main"], ["darwin", "main"], ["win32", "release"]] as const) {
-		const inventory = { ...clean(platform), node: persisting, pnpm: { ...tool("11.1.1"), compatible: true },
+		const inventory = { ...clean(platform), node: persisting, pnpm: { ...tool("11.1.1"), compatible: true, persistent: false },
 			globalBin: { available: true, path: "/disposable/bin", writable: true, onPath: true }, go: absent };
 		const plan = planPreflight(inventory, { channel });
 		assert.deepEqual(plan.blockers, [], platform);
@@ -232,6 +232,16 @@ test("an existing compatible Pi from any installation is reused and only Gentle 
 		assert.equal(plan.tools.pi.status, "reusable");
 		assert.deepEqual(updateIds(plan), ["install-shell", "setup-shell", "verify-readiness"]);
 	}
+});
+
+test("a pnpm Pi newer than the installer's pin never blocks: Gentle Shell is added or updated beside it", () => {
+	const newer = { ...tool("1.1.0") };
+	const install = planPreflight({ ...installed(), pi: newer, shell: absent, gentleAi: absent, setup: false });
+	assert.deepEqual([install.blockers, updateIds(install)], [[], ["install-shell", "setup-shell", "verify-readiness"]]);
+	const update = planPreflight({ ...installed(), pi: newer, shell: owned("3.9.0"), gentleAi: unchecked, setup: unchecked });
+	assert.deepEqual([update.blockers, updateIds(update)], [[], ["update-shell-release", "setup-shell", "verify-readiness"]]);
+	// Even a probe that reported an owner is not a blocker: only an older owned Pi is updated.
+	assert.deepEqual(planPreflight({ ...installed(), pi: { ...newer, owner: "pnpm" }, shell: absent, gentleAi: absent, setup: false }).blockers, []);
 });
 
 // An older Pi that pnpm or npm owns is updated to the version the installer installs.
@@ -415,10 +425,11 @@ test("runtime persistence intents persist only what is missing", async () => {
 		pnpm: { ...tool("11.1.1"), compatible: true, ...(pnpmPersistent === undefined ? {} : { persistent: pnpmPersistent }) },
 		globalBin: { available: true, path: "/disposable/bin", writable: true, onPath: true } });
 	const rest = ["install-pi", "install-shell", "setup-shell", "verify-readiness"];
-	// Bootstrap-only Node: the full group, whatever npm and pnpm report.
+	// Bootstrap-only Node: the runtime and npm whatever npm reports, and pnpm only when it is bootstrap-only too.
 	for (const npm of [true, false]) {
 		for (const pnpm of [true, false, undefined]) {
-			assert.deepEqual(ids(stack({ ...tool("24.18.0"), persistent: false, npm }, pnpm)), [...full, ...rest]);
+			const group = pnpm === false ? full : ["persist-node", "persist-npm", "configure-npm-prefix"];
+			assert.deepEqual(ids(stack({ ...tool("24.18.0"), persistent: false, npm }, pnpm)), [...group, ...rest]);
 		}
 	}
 	assert.deepEqual(planPreflight(stack({ ...tool("24.18.0"), persistent: false, npm: true })).actions[0],
@@ -437,7 +448,24 @@ test("runtime persistence intents persist only what is missing", async () => {
 	assert.deepEqual(ids(stack({ ...tool("20.0.0"), persistent: false, npm: false })), []);
 	const unreachable = { ...stack({ ...tool("24.18.0"), persistent: false, npm: false }),
 		globalBin: { available: true, path: "/disposable/bin", writable: true, onPath: false } };
-	assert.deepEqual(ids(unreachable).slice(0, 4), ["setup-global-bin", ...full]);
+	assert.deepEqual(ids({ ...unreachable, pnpm: { ...unreachable.pnpm, persistent: false } }).slice(0, 4), ["setup-global-bin", ...full]);
+});
+
+test("a bootstrap-only Node next to a persistent pnpm persists Node and npm only, never pnpm", async () => {
+	const { persistencePins } = await import("../scripts/installer-preflight.mjs");
+	const stack = (pnpm: object) => ({ ...clean(), node: { ...tool("24.18.0"), persistent: false, npm: true },
+		pnpm: { ...tool("11.1.1"), compatible: true, ...pnpm }, globalBin: { available: true, path: "/disposable/bin", writable: true, onPath: true } });
+	const rest = ["install-pi", "install-shell", "setup-shell", "verify-readiness"];
+	// A compatible newer pnpm 11 already in $PNPM_HOME/bin (or persistent elsewhere) is kept as it is.
+	// So is a Windows user pnpm in $PNPM_HOME\bin that failed the storage walk (S7): never replaced.
+	for (const pnpm of [{ version: "11.5.0", persistent: true, inGlobalBin: true }, { persistent: true }, {},
+		{ version: "11.9.0", persistent: true, inGlobalBin: true, untrusted: true }]) {
+		const plan = planPreflight(stack(pnpm));
+		assert.deepEqual(plan.actions.map((action: { id: string }) => action.id), ["persist-node", "persist-npm", "configure-npm-prefix", ...rest], JSON.stringify(pnpm));
+		assert.deepEqual(plan.actions[1], { id: "persist-npm", kind: "install-global", target: "npm", version: persistencePins.npm });
+	}
+	// A bootstrap-only pnpm is still persisted with npm in one add.
+	assert.deepEqual(ids(stack({ persistent: false })), ["persist-node", "persist-package-managers", "configure-npm-prefix", ...rest]);
 });
 
 // An older Node or an incompatible pnpm on the user's PATH: the bootstrap's
@@ -453,7 +481,9 @@ test("an older Node is left as it is: the pinned Node is persisted alongside ins
 	const plan = planPreflight(runtimeStack(pinnedNode("22.18.0"), { ...pinnedPnpm(), persistent: true }));
 	assert.deepEqual(plan.blockers, []);
 	assert.deepEqual(plan.tools.node, { status: "reusable", required: requirements.node, found: "22.18.0", version: "24.21.0" });
-	assert.deepEqual(updateIds(plan), ["persist-node", "persist-package-managers", "configure-npm-prefix", ...rest]);
+	// The user's persistent pnpm stays; only Node and npm are persisted.
+	assert.deepEqual(updateIds(plan), ["persist-node", "persist-npm", "configure-npm-prefix", ...rest]);
+	assert.deepEqual(updateIds(planPreflight(runtimeStack(pinnedNode("22.18.0"), pinnedPnpm()))), ["persist-node", "persist-package-managers", "configure-npm-prefix", ...rest]);
 });
 
 test("an incompatible pnpm is left as it is: the pinned pnpm is persisted alongside instead of blocking", () => {
