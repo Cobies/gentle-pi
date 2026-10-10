@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { collectInventory, planPreflight, pnpmGlobalBin } from "../scripts/installer-preflight.mjs";
 import { createProbes, hostAdapters, userEnvironment } from "../scripts/installer-probes.mjs";
 import { acquireGo } from "../scripts/installer-downloads.mjs";
-import { childEnvironment, goFirstEnvironment, lookPath, packageNativeGentleAi, pnpmInvocation, runStandardInstall } from "../scripts/installer-runner.mjs";
+import { childEnvironment, goFirstEnvironment, lookPath, packageNativeGentleAi, pnpmInvocation, runStandardInstall, upgradeInvocation } from "../scripts/installer-runner.mjs";
 import { createInstallerServer } from "../scripts/installer-server.mjs";
 import { configHome, mainChannelAdapter, runUpgrade } from "../scripts/main-channel.mjs";
 import { ensureWindowsPnpmHome, windowsWizardEnvironment } from "../scripts/installer-windows.mjs";
@@ -172,9 +172,11 @@ async function main() {
 			// Only a plan that needs Go and found it missing or older: verified go.dev
 			// bytes under <config home>/tools/go, used by path or child PATH only.
 			acquireGo: () => acquireGo({ root: join(configHome(ctx), "tools", "go"), platform, arch }),
-			// A pinned Go goes first on the PATH of the upgrade's children only.
+			// A pinned Go goes first on the PATH of the upgrade's children only. On
+			// Windows npm and pnpm (the bootstrap's handoff) run without cmd.exe.
 			upgradeShell: async ({ channel, packageRoot, currentVersion, goPath }) => {
 				const upgradeEnv = upgradeEnvironment({ platform, env: runnerEnv, pnpmHome, goPath });
+				const invocation = upgradeInvocation({ platform, env: upgradeEnv, run, fs, handoff: true });
 				return (await runUpgrade({
 					args: ["--channel", channel],
 					ctx,
@@ -186,6 +188,7 @@ async function main() {
 						fetch: globalThis.fetch,
 						fs: fsPromises,
 						which: (name) => lookPath(name, upgradeEnv, platform, fs),
+						...(invocation ? { invocation } : {}),
 						// stderrTail: a failed main build or extraction keeps its bounded stderr as the error's cause.
 						run: (command, argv, options = {}) => run(command, argv, { env: options.env ?? upgradeEnv, cwd: options.cwd, deadlineMs: options.deadlineMs ?? 20 * 60_000,
 							...(options.stderrTail === undefined ? {} : { stderrTail: options.stderrTail }) }),

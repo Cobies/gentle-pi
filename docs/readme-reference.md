@@ -407,6 +407,10 @@ package.
 - `--channel release|main` (or `--channel=…`) switches first. Switching to release
   removes the dev-binary override only when it points at a main build this
   command made; a binary you registered yourself is kept.
+- On Windows npm and pnpm are `.cmd` shims, which never run through a shell:
+  `upgrade` runs what a recognized shim runs (Node.js with npm's or pnpm's own
+  JavaScript entry, or a native `pnpm.exe`). A package manager that resolves only
+  to an unrecognized shim counts as missing. macOS and Linux are unchanged.
 
 `gentle-shell update` is different: it is Pi's own `update`, forwarded to the
 resolved home. The browser installation wizard offers the same main channel; see

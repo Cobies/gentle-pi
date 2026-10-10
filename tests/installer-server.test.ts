@@ -1201,9 +1201,27 @@ test("/api/plan says before consent that a private PNPM_HOME replaces a default 
 	names(view.profileChange.description, [W_DEFAULT, weak.at, "S-1-5-21-1-2-3-1002 (PC\\other)", "0x001301BF", W_PRIVATE, "`pnpm setup`",
 		`PNPM_HOME=${W_PRIVATE}`, `${W_PRIVATE}\\bin`, "new terminals", "only you, SYSTEM and Administrators"]);
 	assert.equal(view.persistence.pnpmHome, W_PRIVATE);
+	// S13: the accepted residual risk of later pnpm commands, stated before consent.
+	names(view.profileChange.description, ["pnpm commands you run later", "configuration, cache and state", "%LOCALAPPDATA%", W_DEFAULT]);
 	// A passing default keeps the existing copy.
 	const plain = await windowsView({ available: true, path: W_DEFAULT, source: "default" });
-	assert.doesNotMatch(plain.profileChange.description, /private/);
+	assert.doesNotMatch(plain.profileChange.description, /private|%LOCALAPPDATA%/);
+});
+
+// S6 notice: reused tools in folders another account can change, before consent.
+test("/api/plan notes reused tools in folders another account can change, without blocking or changing the plan", async () => {
+	const roaming = { check: "parent-acl-mask", at: "C:\\Users\\m\\AppData\\Roaming", sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" };
+	const reused = { node: { available: true, version: "24.18.0", usable: true, persistent: true, npm: true }, pi: { available: true, version: "1.2.0", usable: true, external: true },
+		pnpm: { available: true, version: "11.1.1", usable: true, compatible: true, persistent: true } };
+	const view = await windowsView({ available: true, path: W_DEFAULT, source: "default" }, { ...reused,
+		folders: { node: roaming, npm: roaming, pi: { check: "target-owner", at: "C:\\Users\\m\\AppData\\Roaming\\npm\\pi.cmd", sid: "S-1-5-21-9" } } });
+	assert.deepEqual(view.blockers, []);
+	assert.ok(view.actions.length > 0);
+	names(view.sharedFolders.description, ["Node.js", "npm", "Pi", "S-1-5-21-1-2-3-1002 (PC\\other) can change C:\\Users\\m\\AppData\\Roaming", "0x001301BF",
+		"C:\\Users\\m\\AppData\\Roaming\\npm\\pi.cmd is owned by S-1-5-21-9", "never creates or runs its own programs there", "accepted risk", "not a blocker"]);
+	assert.deepEqual(view.sharedFolders.tools, ["node", "npm", "pi"]);
+	// Nothing to note: no record.
+	assert.equal((await windowsView({ available: true, path: W_DEFAULT, source: "default" }, reused)).sharedFolders, null);
 });
 
 test("/api/plan names the folder, principal, rights and remedy when PNPM_HOME is not private", async () => {

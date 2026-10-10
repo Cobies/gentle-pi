@@ -366,7 +366,24 @@ function privateHomeDescription(home) {
 	const fallback = plainText(home.default);
 	return `pnpm's default folder ${fallback} is not private: ${findingText(home.finding)}. So the installer uses a new private folder, ${path}, as PNPM_HOME, ` +
 		`which only you, SYSTEM and Administrators can change. \`pnpm setup\` will save PNPM_HOME=${path} in your user environment and add ${path}\\bin ` +
-		`to your user PATH, so new terminals use it. Nothing in ${fallback} is changed. Open a new terminal afterwards.`;
+		`to your user PATH, so new terminals use it. Nothing in ${fallback} is changed. Open a new terminal afterwards. ` +
+		// S13: pnpm reads its configuration folder only from XDG_CONFIG_HOME or %LOCALAPPDATA%\pnpm\config.
+		"Only the installer's own pnpm steps keep pnpm's configuration, cache and state inside that private folder: pnpm commands you run later keep " +
+		"pnpm's default configuration, cache and state under %LOCALAPPDATA%, which pnpm offers no safe persistent setting to move. This is an accepted risk.";
+}
+
+// S6 notice: reused tools whose folders another account can change (never a blocker).
+const folderTools = Object.freeze({ node: "Node.js", npm: "npm", go: "Go", pi: "Pi", shell: "Gentle Shell" });
+function sharedFoldersView(plan) {
+	const reused = Array.isArray(plan.tools?.folders?.reused) ? plan.tools.folders.reused.filter((entry) => Object.hasOwn(folderTools, entry?.tool)) : [];
+	if (reused.length === 0) return null;
+	const found = reused.map((entry) => `${folderTools[entry.tool]}: ${findingText(entry)}`).join("; ");
+	return {
+		tools: reused.map((entry) => entry.tool),
+		description: `These tools are reused as they are, from folders another account can change. ${found}. ` +
+			"The installer never creates or runs its own programs there, but whoever can change those folders can change what these tools run for you, including for Gentle Shell. " +
+			"This is an accepted risk and not a blocker. To remove it, remove that account's write access, then select Check again.",
+	};
 }
 
 function planView(planId, { inventory, plan }) {
@@ -402,6 +419,7 @@ function planView(planId, { inventory, plan }) {
 				? `\`pnpm setup\` will add ${binDir ?? "the pnpm global bin directory"} to your PATH: it edits your shell profile on macOS and Linux, or your user PATH on Windows. Open a new terminal afterwards.`
 				: "Your PATH already contains the pnpm global bin directory; no shell profile or PATH change is planned.",
 		},
+		sharedFolders: sharedFoldersView(plan),
 		persistence: {
 			tools,
 			pnpmHome,

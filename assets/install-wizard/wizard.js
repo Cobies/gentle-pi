@@ -182,6 +182,8 @@ export function planModel(view) {
 		kind,
 		actions,
 		blockers,
+		// S6: reused tools in folders another account can change; a notice, never a blocker.
+		notice: typeof view?.sharedFolders?.description === "string" ? text(view.sharedFolders.description) : null,
 		disclosures: [
 			{
 				id: "profile",
@@ -472,6 +474,9 @@ export function renderPlan(doc, model, handlers) {
 	el(doc, "section", { class: "block", "aria-labelledby": "changes-title" },
 		el(doc, "h2", { id: "changes-title", class: "section-title" }, "What changes on this computer"),
 		el(doc, "div", { class: "grid" }, model.disclosures.map((item) => disclosureCard(doc, item)))),
+	model.notice ? el(doc, "section", { class: "alert alert-warning", "aria-labelledby": "notice-title" },
+		el(doc, "h2", { id: "notice-title", class: "alert-title" }, el(doc, "span", { "aria-hidden": "true" }, "! "), "Tools in folders other accounts can change"),
+		el(doc, "p", {}, rich(doc, model.notice))) : null,
 	el(doc, "section", { class: "block", "aria-labelledby": "steps-title" },
 		el(doc, "h2", { id: "steps-title", class: "section-title" }, recovery ? "Setup steps" : updating || updatingPi ? "Update steps" : "Installation steps"),
 		el(doc, "ol", { class: "plan-steps" }, model.actions.map((action) => el(doc, "li", {},

@@ -275,18 +275,27 @@ export async function pnpmInvocation(env, platform, fs) {
 	return null;
 }
 
+/** Windows PATHEXT extensions in order: lowercased, dot-prefixed, default .com/.exe/.bat/.cmd. */
+function pathExtensions(env) {
+	return String(envValue(env, "PATHEXT", "win32") || ".com;.exe;.bat;.cmd").toLowerCase().split(";")
+		.filter((extension) => extension.length > 0).map((extension) => extension.startsWith(".") ? extension : `.${extension}`);
+}
+
+/** A path on a local drive (`C:\...`). UNC, `\\?\`, `\\.\` and drive-less rooted
+ * paths are not: even looking one up can reach a remote share. */
+const LOCAL_DRIVE = /^[A-Za-z]:\\/;
+
 /** First `name` the way Go's exec.LookPath (used by Gentle AI) finds it: each
  * absolute PATH directory in order and, on Windows, every PATHEXT extension in
- * PATHEXT order (lowercased, dot-prefixed, default .com/.exe/.bat/.cmd).
+ * PATHEXT order (lowercased, dot-prefixed, default .com/.exe/.bat/.cmd). On
+ * Windows only local drive directories are searched; any other one is skipped,
+ * like a relative one, and never touched.
  */
 export async function lookPath(name, env, platform, fs) {
 	const path = platform === "win32" ? win32 : posix;
-	const extensions = platform === "win32"
-		? String(envValue(env, "PATHEXT", platform) || ".com;.exe;.bat;.cmd").toLowerCase().split(";")
-			.filter((extension) => extension.length > 0).map((extension) => extension.startsWith(".") ? extension : `.${extension}`)
-		: [""];
+	const extensions = platform === "win32" ? pathExtensions(env) : [""];
 	for (const directory of String(env[pathKeyOf(env, platform)] ?? "").split(path.delimiter)) {
-		if (!path.isAbsolute(directory)) continue;
+		if (!path.isAbsolute(directory) || (platform === "win32" && !LOCAL_DRIVE.test(directory))) continue;
 		for (const extension of extensions) {
 			const candidate = path.join(directory, `${name}${extension}`);
 			if (await fs.isFile(candidate)) return candidate;
@@ -303,13 +312,18 @@ export function spawnable(file, platform) {
 /** How a Windows command runs with shell:false, never through cmd.exe: an .exe
  * as it is, or what a known shim (windowsShim) runs, its native target or its
  * JS entry with the Node it selects (an absolute node.exe it names, its sibling
- * node.exe, else the first node on PATH, which must be an .exe). npm's own
+ * node.exe, else the first node on PATH, which must be an .exe). A native target
+ * without an extension resolves like CMD resolves it, through PATHEXT in order,
+ * and runs only when that first match is an .exe. A `pnpm.cmd` runs only pnpm's
+ * own `node_modules\pnpm\bin\pnpm.[cm]js` entry (never Corepack's). npm's own
  * npm.cmd keeps its redirect: it asks npm for the global prefix (from the drive
  * root, like any probe) and runs the npm-cli.js installed there, when there is
- * one. Returns { command, prefix } or null when the command is anything else.
+ * one. The command, the Node and npm's prefix must be local drive paths.
+ * Returns { command, prefix } or null when the command is anything else.
  */
 export async function windowsInvocation(file, env, adapters) {
 	const { fs } = adapters;
+	if (!LOCAL_DRIVE.test(file)) return null;
 	const extension = win32.extname(file).toLowerCase();
 	if (extension === ".exe") return (await fs.isFile(file)) ? { command: file, prefix: [] } : null;
 	if (extension !== ".cmd") return null;
@@ -317,16 +331,23 @@ export async function windowsInvocation(file, env, adapters) {
 	if (!shim) return null;
 	const directory = win32.dirname(file);
 	if (shim.exe !== undefined) {
-		// @pnpm/exe hard-links its binary under both names; the shim may name either.
 		let exe = win32.resolve(directory, shim.exe);
-		if (win32.extname(exe) === "" && (await fs.isFile(`${exe}.exe`))) exe = `${exe}.exe`;
+		// @pnpm/exe hard-links its binary under both names; the shim may name either.
+		if (win32.extname(exe) === "") {
+			let first = null;
+			for (const candidate of pathExtensions(env)) if (first === null && (await fs.isFile(`${exe}${candidate}`))) first = `${exe}${candidate}`;
+			if (first === null) return null;
+			exe = first;
+		}
 		return win32.extname(exe).toLowerCase() === ".exe" && (await fs.isFile(exe)) ? { command: exe, prefix: [] } : null;
 	}
 	const sibling = win32.join(directory, "node.exe");
 	const node = shim.node ?? ((await fs.isFile(sibling)) ? sibling : await lookPath("node", env, "win32", fs));
-	if (!node || !spawnable(node, "win32") || !(await fs.isFile(node))) return null;
+	if (!node || !LOCAL_DRIVE.test(node) || !spawnable(node, "win32") || !(await fs.isFile(node))) return null;
 	const npmCli = (root) => win32.join(root, "node_modules", "npm", "bin", "npm-cli.js");
 	let entry = shim.npm ? npmCli(directory) : win32.resolve(directory, shim.entry);
+	const pnpmEntry = (path) => entryShape(path, win32, "pnpm", "pnpm.cjs") || entryShape(path, win32, "pnpm", "pnpm.mjs");
+	if (win32.basename(file).toLowerCase() === "pnpm.cmd" && (shim.npm || !pnpmEntry(entry))) return null;
 	if (shim.npm) {
 		const query = shim.npm === "prefix-js" ? [win32.join(directory, "node_modules", "npm", "bin", "npm-prefix.js")] : [entry, "prefix", "-g"];
 		// Without npm-prefix.js, npm.cmd's FOR /F reads no line and keeps the bundled npm.
@@ -334,7 +355,7 @@ export async function windowsInvocation(file, env, adapters) {
 			const result = await adapters.run(node, query, { env, cwd: win32.parse(node).root, deadlineMs: deadlines.probe });
 			const prefix = succeeded(result) && result.truncated !== true
 				? String(result.stdout ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1) : undefined;
-			if (prefix && win32.isAbsolute(prefix) && (await fs.isFile(npmCli(prefix)))) entry = npmCli(prefix);
+			if (prefix && LOCAL_DRIVE.test(prefix) && (await fs.isFile(npmCli(prefix)))) entry = npmCli(prefix);
 		}
 	}
 	return (await fs.isFile(entry)) ? { command: node, prefix: [entry] } : null;
@@ -347,6 +368,23 @@ export async function npmInvocation(env, platform, adapters) {
 	const npm = await lookPath("npm", env, platform, adapters.fs);
 	if (!npm) return null;
 	return platform === "win32" ? windowsInvocation(npm, env, adapters).catch(() => null) : { command: npm, prefix: [] };
+}
+
+/** runUpgrade's `invocation` adapter on Windows: npm through npmInvocation, any
+ * other command (pnpm) through windowsInvocation of the first one on PATH, or,
+ * with `handoff` (the wizard), pnpm from the bootstrap handoff (pnpmInvocation).
+ * Never a .cmd with shell:false. Undefined on POSIX, where the command `which`
+ * finds runs as it is.
+ */
+export function upgradeInvocation({ platform, env, run, fs, handoff = false }) {
+	if (platform !== "win32") return undefined;
+	const adapters = { run, fs };
+	return async (name) => {
+		if (name === "npm") return npmInvocation(env, platform, adapters);
+		if (name === "pnpm" && handoff) return pnpmInvocation(env, platform, fs);
+		const file = await lookPath(name, env, platform, fs);
+		return file ? windowsInvocation(file, env, adapters).catch(() => null) : null;
+	};
 }
 
 /** `.../node_modules/<name>/bin/<file>`: a package's own bin entry. */

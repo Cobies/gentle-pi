@@ -21,7 +21,7 @@ import {
 	succeeded,
 	windowsInvocation,
 } from "./installer-runner.mjs";
-import { verifyWindowsStorage } from "./installer-windows.mjs";
+import { verifyWindowsStorage, verifyWindowsStorageMany } from "./installer-windows.mjs";
 
 // Real host probes for collectInventory. Every effect goes through injected
 // adapters; probes only run fixed read-only argv (`--version`, `go version`,
@@ -184,16 +184,18 @@ export function hostAdapters({ maxOutputBytes = 1024 * 1024, maxTextBytes = 1024
 }
 
 /**
- * createProbes({ platform, env, run, fs, home?, verifyGentleAi?, storage?, pnpmHome? }) -> the eight
- * named collectInventory probes. `env` is the wizard's environment (bootstrap
+ * createProbes({ platform, env, run, fs, home?, verifyGentleAi?, storage?, storageMany?, pnpmHome? }) -> the eight
+ * named collectInventory probes, plus `folders` (Windows only). `env` is the wizard's environment (bootstrap
  * tools first on PATH); `run` and `fs` follow hostAdapters. Each probe returns
  * the shape collectInventory documents, or { available: null } when unknown or
  * failed; errors are never thrown or retained. On Windows, `storage(file)` walks a
- * file the way the bootstrap does (verifyWindowsStorage by default) and `pnpmHome`
- * is the wizard's PNPM_HOME decision (windowsPnpmHome).
+ * file the way the bootstrap does (verifyWindowsStorage by default), `storageMany(files)`
+ * walks many in one launch (verifyWindowsStorageMany) and `pnpmHome` is the
+ * wizard's PNPM_HOME decision (windowsPnpmHome).
  */
 export function createProbes({ platform, env, run, fs, home, verifyGentleAi = packageNativeGentleAi,
-	storage = platform === "win32" ? (file) => verifyWindowsStorage(file, env) : null, pnpmHome = null }) {
+	storage = platform === "win32" ? (file) => verifyWindowsStorage(file, env) : null,
+	storageMany = platform === "win32" ? (files) => verifyWindowsStorageMany(files, env) : null, pnpmHome = null }) {
 	const path = pathOf(platform);
 	const user = userEnvironment({ platform, env });
 	const globalBin = pnpmGlobalBin({ platform, env: user });
@@ -315,6 +317,34 @@ export function createProbes({ platform, env, run, fs, home, verifyGentleAi = pa
 	};
 
 	const probes = {
+		/** Windows (S6 notice): the folders of the tools the user's PATH resolves (Node,
+		 * npm, Go, Pi, Gentle Shell), each command and what it runs, walked in one
+		 * storageMany launch. { node?, npm?, go?, pi?, shell? }: the first failing path's
+		 * finding per tool, or null when nothing fails or the walk cannot finish.
+		 */
+		async folders() {
+			if (!storageMany) return null;
+			const files = {};
+			for (const [tool, command] of [["node", "node"], ["npm", "npm"], ["go", "go"], ["pi", "pi"], ["shell", "gentle-shell"]]) {
+				const found = await lookPath(command, user, platform, fs);
+				if (!found) continue;
+				const runs = await invocation(found).catch(() => null);
+				files[tool] = [found, ...(runs ? [runs.command, ...runs.prefix] : [])];
+			}
+			const key = (file) => file.toLowerCase();
+			const paths = [...new Map(Object.values(files).flat().map((file) => [key(file), file])).values()];
+			if (paths.length === 0) return null;
+			let results;
+			try {
+				results = await storageMany(paths);
+			} catch {
+				return null;
+			}
+			const byPath = new Map(paths.map((file, index) => [key(file), results[index] ?? null]));
+			const findings = Object.fromEntries(Object.entries(files).map(([tool, list]) => [tool, list.map((file) => byPath.get(key(file))).find(Boolean)])
+				.filter(([, finding]) => finding));
+			return Object.keys(findings).length > 0 ? findings : null;
+		},
 		/** The installed Gentle Shell for an update: real root, version and owner (pnpm, npm or null). */
 		async locateShell() {
 			const shell = await globalPackage(SHELL_PACKAGE, "gentle-shell");
@@ -322,7 +352,7 @@ export function createProbes({ platform, env, run, fs, home, verifyGentleAi = pa
 				return { root: await fs.realpath(shell.entry.path), version: shell.version, owner: "pnpm" };
 			}
 			if (shell.state !== "unknown" || !shell.outsidePnpm) return null;
-			const found = await packageOnPath("gentle-shell", SHELL_PACKAGE);
+			const found = await packageOnPath("gentle-shell", SHELL_PACKAGE, true);
 			if (!found) return null;
 			return { root: found.root, version: found.version, owner: installOwner({ packageRoot: found.root, pnpmHome: null, npmRoot: await npmGlobalRoot(), platform }) };
 		},
@@ -382,7 +412,10 @@ export function createProbes({ platform, env, run, fs, home, verifyGentleAi = pa
 			const usableFound = found !== null && Number(found.split(".")[0]) === PNPM_MAJOR && atLeast(found, requirements.pnpm);
 			// Persisting pnpm writes $PNPM_HOME/bin: a user's pnpm there is reported as it is
 			// (incompatible, or unknown without a version), never replaced or downgraded.
+			// One that fails the walk never runs: the bootstrap's pnpm is reported in its
+			// place, as persistent, so nothing is persisted over the user's.
 			if (own && globalBin && samePath(path.dirname(own), globalBin.path, platform)) {
+				if (ownPnpm !== null && !runnable) return { available: true, version, usable: true, compatible, persistent: true, inGlobalBin: true, untrusted: true };
 				return found ? { available: true, version: found, usable: true, compatible: usableFound, persistent: true, inGlobalBin: true }
 					: { ...unknown(), inGlobalBin: true };
 			}
@@ -411,7 +444,8 @@ export function createProbes({ platform, env, run, fs, home, verifyGentleAi = pa
 			if (shell.state === "present") return { available: true, version: shell.version, usable: await fs.isFile(shellBin()), global: true, owner: "pnpm" };
 			if (shell.state === "absent" || !shell.outsidePnpm) return shell.state === "absent" ? absent() : unknown();
 			// Installed by npm only when it really lives in npm's global root; a linked checkout stays unknown.
-			const found = await packageOnPath("gentle-shell", SHELL_PACKAGE);
+			// A Windows shim is followed to the entry it runs, as for Pi.
+			const found = await packageOnPath("gentle-shell", SHELL_PACKAGE, true);
 			const owner = found ? installOwner({ packageRoot: found.root, pnpmHome: null, npmRoot: await npmGlobalRoot(), platform }) : null;
 			const version = found && (exactVersion(found.version, STABLE) ?? (MAIN_BUILD.test(found.version) ? found.version : null));
 			return owner === "npm" && version ? { available: true, version, usable: true, global: true, owner } : notPnpmGlobal(shell);

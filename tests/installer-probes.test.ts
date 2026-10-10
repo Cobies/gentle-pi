@@ -380,6 +380,92 @@ test("Windows: a user's pnpm in $PNPM_HOME\\bin is run through its shim for the 
 	assert.deepEqual(h.calls.find((call) => call.command === exe)?.cwd, "C:\\");
 });
 
+// S8: an npm-owned Gentle Shell on Windows is found through what its shim runs, so the
+// wizard can update it with npm (run through npm.cmd's own invocation, never the .cmd).
+test("Windows: a Gentle Shell installed by npm is followed through its shim and attributed to npm", async () => {
+	const shellCmd = `${W_APPDATA_NPM}\\gentle-shell.cmd`;
+	const shellRoot = `${W_NPM_ROOT}\\gentle-pi`;
+	const shellEntry = `${shellRoot}\\bin\\gentle-shell.mjs`;
+	const layout = (root = W_NPM_ROOT) => probes({ platform: "win32",
+		env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: `${W_TOOLS}\\node;${W_APPDATA_NPM};${W_NODE_DIR}`, PATHEXT: ".COM;.EXE;.BAT;.CMD",
+			GENTLE_BOOTSTRAP_TOOLS: W_TOOLS, GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+		files: [shellCmd, shellEntry, W_NODE, `${W_NODE_DIR}\\npm.cmd`, W_NPM_CLI], dirs: [W_NPM_ROOT, root],
+		texts: { [shellCmd]: cmdShim("node_modules\\gentle-pi\\bin\\gentle-shell.mjs"), [`${W_NODE_DIR}\\npm.cmd`]: nodeNpmCmd,
+			[`${shellRoot}\\package.json`]: JSON.stringify({ name: "gentle-pi", version: "0.9.0" }) },
+		results: { [`${W_TOOLS_NODE} ${W_TOOLS_ENTRY} ${LIST}`]: { code: 0, stdout: "[]" }, [`${W_NODE} ${W_NPM_CLI} root -g`]: { code: 0, stdout: `${root}\r\n` } } });
+	const npm = layout();
+	assert.deepEqual(await npm.probes.shell(), { available: true, version: "0.9.0", usable: true, global: true, owner: "npm" });
+	assert.deepEqual(await npm.probes.locateShell(), { root: shellRoot, version: "0.9.0", owner: "npm" });
+	assert.equal(npm.calls.some((call) => /\.cmd$/i.test(call.command)), false, "no shim is ever spawned");
+	// npm's global root elsewhere: not npm's, so it stays unknown and is never updated.
+	const elsewhere = layout("C:\\Other\\node_modules");
+	assert.deepEqual(await elsewhere.probes.shell(), { available: null, outsidePnpm: true });
+	assert.deepEqual(await elsewhere.probes.locateShell(), { root: shellRoot, version: "0.9.0", owner: null });
+});
+
+// S7: one that fails the walk (a reparse point, a folder another account can change)
+// never runs and is never replaced: the bootstrap's verified pnpm runs the installer.
+test("Windows: a user's pnpm in $PNPM_HOME\\bin that fails the walk is not run, not blocked and never replaced", async () => {
+	const bin = `${W_LOCAL}\\pnpm\\bin`;
+	const exe = `${W_LOCAL}\\pnpm\\global\\v11\\5f1a\\node_modules\\@pnpm\\exe\\pnpm.exe`;
+	const walked: string[] = [];
+	const h = probes({ platform: "win32", storage: (file) => {
+		walked.push(file);
+		if (file === exe) throw Object.assign(new Error("Windows ACL evidence rejected"), { check: "target-reparse" });
+	}, env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: `${bin};${W_NODE_DIR}`, GENTLE_BOOTSTRAP_TOOLS: W_TOOLS,
+		GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+	files: [`${bin}\\pnpm.cmd`, exe],
+	texts: { [`${bin}\\pnpm.cmd`]: "@SETLOCAL\r\n@\"%~dp0\\..\\global\\v11\\5f1a\\node_modules\\@pnpm\\exe\\pnpm.exe\"   %*\r\n" },
+	results: { [`${W_TOOLS_NODE} ${W_TOOLS_ENTRY} --version`]: { code: 0, stdout: "11.1.1\r\n" }, [`${exe} --version`]: { code: 0, stdout: "11.0.5\r\n" } } });
+	const pnpm = await h.probes.pnpm();
+	assert.deepEqual(pnpm, { available: true, version: "11.1.1", usable: true, compatible: true, persistent: true, inGlobalBin: true, untrusted: true });
+	assert.equal(h.calls.some((call) => call.command === exe), false, "the user's pnpm never runs");
+	assert.deepEqual(walked, [`${bin}\\pnpm.cmd`, exe]);
+	// The plan reuses the bootstrap's pnpm and persists nothing over the user's.
+	const plan = planPreflight({ platform: "win32", arch: "x64", node: { available: true, version: "24.18.0", usable: true, persistent: true, npm: true }, pnpm,
+		pi: { available: false }, shell: { available: false }, gentleAi: { available: false }, go: { available: true, version: "1.26.0", usable: true },
+		globalBin: { available: true, path: bin, writable: true, onPath: true }, setup: false });
+	assert.deepEqual(plan.blockers, []);
+	assert.equal(plan.tools.pnpm.status, "reusable");
+	assert.equal(plan.actions.some((action: { id: string }) => action.id.startsWith("persist-")), false);
+	// A shim no structure resolves there is still unknown, as before.
+	const unresolved = probes({ platform: "win32", env: { LOCALAPPDATA: W_LOCAL, Path: bin, GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY,
+		GENTLE_BOOTSTRAP_TOOLS: W_TOOLS }, files: [`${bin}\\pnpm.cmd`], texts: { [`${bin}\\pnpm.cmd`]: "@echo off\r\nvolta run %~n0 %*\r\n" },
+	results: { [`${W_TOOLS_NODE} ${W_TOOLS_ENTRY} --version`]: { code: 0, stdout: "11.1.1\r\n" } } });
+	assert.deepEqual(await unresolved.probes.pnpm(), { available: null, inGlobalBin: true });
+});
+
+// S6 notice: every reused tool's command, and what it runs, walked in one launch.
+test("Windows: the folders probe walks every tool found on the user's PATH in one launch and reports only what fails", async () => {
+	const goExe = "C:\\Program Files\\Go\\bin\\go.exe";
+	const shellCmd = `${W_APPDATA_NPM}\\gentle-shell.cmd`;
+	const shellEntry = `${W_NPM_ROOT}\\gentle-pi\\bin\\gentle-shell.mjs`;
+	const launches: string[][] = [];
+	const weak = { check: "parent-acl-mask", at: W_APPDATA_NPM, sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" };
+	const layout = (storageMany: (paths: string[]) => unknown) => createProbes({ platform: "win32", env: { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: `${W_TOOLS}\\node;${W_APPDATA_NPM};${W_NODE_DIR};C:\\Program Files\\Go\\bin`,
+			PATHEXT: ".COM;.EXE;.BAT;.CMD", GENTLE_BOOTSTRAP_TOOLS: W_TOOLS, GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY },
+		run: async () => ({ code: 1, signal: null, timedOut: false, stdout: "" }), storage: () => {}, storageMany,
+		fs: { isFile: async (path: string) => [`${W_APPDATA_NPM}\\pi.cmd`, W_PI_ENTRY, W_NODE, `${W_NODE_DIR}\\npm.cmd`, W_NPM_CLI, goExe, shellCmd, shellEntry].includes(path),
+			isDirectory: async () => false, exists: async () => false, realpath: async (path: string) => path, writable: async () => false,
+			readText: async (path: string) => ({ [`${W_APPDATA_NPM}\\pi.cmd`]: cmdShim("node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js"),
+				[`${W_NODE_DIR}\\npm.cmd`]: nodeNpmCmd, [shellCmd]: cmdShim("node_modules\\gentle-pi\\bin\\gentle-shell.mjs") } as Record<string, string>)[path] ?? Promise.reject(new Error("ENOENT")) } });
+	const paths = [W_NODE, `${W_NODE_DIR}\\npm.cmd`, W_NPM_CLI, goExe, `${W_APPDATA_NPM}\\pi.cmd`, W_PI_ENTRY, shellCmd, shellEntry];
+	const probesWith = layout((list) => { launches.push(list); return list.map((path) => (path.startsWith(W_APPDATA_NPM) ? weak : null)); });
+	assert.deepEqual(await probesWith.folders(), { pi: weak, shell: weak });
+	assert.deepEqual(launches, [paths], "one launch, each path once, never a bootstrap tool");
+	// Nothing weak, a policy denial or a walk that cannot finish: no notice, never a blocker.
+	assert.equal(await layout((list) => list.map(() => null)).folders(), null);
+	assert.equal(await layout(() => { throw new Error("Windows ACL evidence rejected"); }).folders(), null);
+	// Nothing found: nothing walked.
+	const none: string[][] = [];
+	const empty = createProbes({ platform: "win32", env: { Path: "C:\\Windows", PATHEXT: ".EXE" }, run: async () => ({ code: 1 }), storageMany: (list: string[]) => { none.push(list); return []; },
+		fs: { isFile: async () => false, isDirectory: async () => false, exists: async () => false, realpath: async (path: string) => path, readText: async () => "", writable: async () => false } });
+	assert.equal(await empty.folders(), null);
+	assert.deepEqual(none, []);
+	// POSIX has no such walk.
+	assert.equal(await probes({ ...userNode }).probes.folders(), null);
+});
+
 test("Windows npm counts by behavior whatever installed it: Node.js, nvm-windows, fnm or a Volta npm.exe", async () => {
 	const layouts = {
 		node: { dir: W_NODE_DIR, npm: "npm.cmd" },

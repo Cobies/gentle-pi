@@ -13,10 +13,12 @@ import {
 	childEnvironment,
 	failedSteps,
 	genuineNpm,
+	lookPath,
 	packageNativeGentleAi,
 	pnpmInvocation,
 	runStandardInstall as runUnobserved,
 	setupErrorDetail,
+	upgradeInvocation,
 	windowsInvocation,
 } from "../scripts/installer-runner.mjs";
 
@@ -474,6 +476,93 @@ test("windowsInvocation runs what a Windows npm or pnpm shim runs, never through
 	const exe = `${W_PNPM_HOME}\\global\\v11\\abc\\node_modules\\@pnpm\\exe\\pnpm.exe`;
 	const native = windowsShapes({ files: [exe], texts: { [pnpmShim]: "@SETLOCAL\r\n@\"%~dp0\\..\\global\\v11\\abc\\node_modules\\@pnpm\\exe\\pnpm\"   %*\r\n" } });
 	assert.deepEqual(await windowsInvocation(pnpmShim, env, native.adapters), { command: exe, prefix: [] }, "@pnpm/exe's extensionless hard link runs as its .exe twin");
+});
+
+// S10: only local drive paths. A UNC, `\\?\` or drive-less rooted path is never
+// searched, read or run (even a lookup can reach a remote share).
+const nonLocal = ["\\\\server\\share\\bin", "\\\\?\\C:\\bin", "\\\\.\\C:\\bin", "\\bin"];
+function recordedShapes(options: Parameters<typeof windowsShapes>[0] = {}) {
+	const shapes = windowsShapes(options);
+	const touched: string[] = [];
+	const { isFile, readText } = shapes.adapters.fs;
+	shapes.adapters.fs = { isFile: async (path: string) => { touched.push(path); return isFile(path); }, readText: async (path: string) => { touched.push(path); return readText(path); } };
+	return { ...shapes, touched };
+}
+test("Windows lookPath and windowsInvocation accept only local drive paths for the command, the PATH node and the npm prefix", async () => {
+	const env = { Path: [...nonLocal, "C:\\Local"].join(";"), PATHEXT: ".COM;.EXE;.BAT;.CMD" };
+	const everywhere = recordedShapes({ files: [...nonLocal, "C:\\Local"].map((directory) => `${directory}\\node.exe`) });
+	assert.equal(await lookPath("node", env, "win32", everywhere.adapters.fs), "C:\\Local\\node.exe");
+	assert.deepEqual(everywhere.touched.filter((path) => !/^[A-Za-z]:\\/.test(path)), [], "no non-local directory is searched");
+	for (const directory of nonLocal) {
+		const shapes = recordedShapes({ files: [`${directory}\\npm.exe`, `${directory}\\npm.cmd`, W_NODE, W_NPM_CLI], texts: { [`${directory}\\npm.cmd`]: NODE_NPM_CMD } });
+		for (const file of [`${directory}\\npm.exe`, `${directory}\\npm.cmd`]) assert.equal(await windowsInvocation(file, env, shapes.adapters), null, file);
+		assert.deepEqual([shapes.touched, shapes.calls], [[], []], directory);
+	}
+	// The PATH node of a shim without a sibling node.exe: only a local one runs.
+	const shim = `${W_APPDATA_NPM}\\npm.cmd`;
+	const remoteNode = recordedShapes({ files: ["\\\\server\\share\\bin\\node.exe", W_REDIRECTED_CLI], texts: { [shim]: cmdShim("node_modules\\npm\\bin\\npm-cli.js") } });
+	assert.equal(await windowsInvocation(shim, { ...env, Path: "\\\\server\\share\\bin" }, remoteNode.adapters), null);
+	// npm's global prefix: anything but a local drive path keeps the bundled npm.
+	for (const prefix of ["\\\\server\\share\\npm", "\\\\?\\C:\\Users\\u\\AppData\\Roaming\\npm", "\\npm"]) {
+		const h = recordedShapes({ files: [W_NODE, W_NPM_CLI, W_PREFIX_JS, `${prefix}\\node_modules\\npm\\bin\\npm-cli.js`], texts: { [W_NPM_CMD]: NODE_NPM_CMD },
+			results: { [`${W_NODE} ${W_PREFIX_JS}`]: { code: 0, stdout: `${prefix}\r\n` } } });
+		assert.deepEqual(await windowsInvocation(W_NPM_CMD, env, h.adapters), { command: W_NODE, prefix: [W_NPM_CLI] }, prefix);
+		assert.equal(h.touched.some((path) => path.startsWith(prefix)), false, prefix);
+	}
+});
+
+// S11: CMD runs an extensionless shim target through PATHEXT, in PATHEXT order.
+test("an extensionless native shim target runs only when the first PATHEXT match is an .exe", async () => {
+	const pnpmShim = `${W_BIN}\\pnpm.cmd`;
+	const target = `${W_PNPM_HOME}\\global\\v11\\abc\\node_modules\\@pnpm\\exe\\pnpm`;
+	const texts = { [pnpmShim]: "@SETLOCAL\r\n@\"%~dp0\\..\\global\\v11\\abc\\node_modules\\@pnpm\\exe\\pnpm\"   %*\r\n" };
+	const invoke = (files: string[], PATHEXT = ".COM;.EXE;.BAT;.CMD") => windowsInvocation(pnpmShim, { Path: W_BIN, PATHEXT }, windowsShapes({ files, texts }).adapters);
+	assert.deepEqual(await invoke([target, `${target}.exe`, `${target}.cmd`]), { command: `${target}.exe`, prefix: [] });
+	assert.deepEqual(await invoke([`${target}.exe`], "exe;.CMD"), { command: `${target}.exe`, prefix: [] }, "PATHEXT entries are lowercased and dot-prefixed");
+	for (const [files, PATHEXT] of [[[`${target}.com`, `${target}.exe`]], [[`${target}.cmd`, `${target}.exe`], ".CMD;.EXE"], [[`${target}.bat`]], [[target]]] as [string[], string?][]) {
+		assert.equal(await invoke(files, PATHEXT), null, `${files.join(",")} ${PATHEXT ?? ""}`);
+	}
+});
+
+// S8: how `gentle-shell upgrade` (and the wizard's update) runs npm and pnpm on Windows.
+test("upgradeInvocation resolves npm and pnpm on Windows without cmd.exe, and is absent on POSIX", async () => {
+	for (const platform of ["linux", "darwin"]) assert.equal(upgradeInvocation({ platform, env: {}, ...windowsShapes().adapters }), undefined);
+	const env = { Path: `${W_BIN};${W_NODE_DIR}`, PATHEXT: ".COM;.EXE;.BAT;.CMD", GENTLE_INSTALL_PNPM_NODE: "C:\\Tools\\node.exe", GENTLE_INSTALL_PNPM_ENTRY: W_ENTRY };
+	const exe = `${W_PNPM_HOME}\\global\\v11\\abc\\node_modules\\@pnpm\\exe\\pnpm.exe`;
+	const h = windowsShapes({ files: [W_NODE, W_NPM_CMD, W_NPM_CLI, `${W_BIN}\\pnpm.cmd`, exe, `${W_BIN}\\other.cmd`],
+		texts: { [W_NPM_CMD]: NODE_NPM_CMD, [`${W_BIN}\\pnpm.cmd`]: "@SETLOCAL\r\n@\"%~dp0\\..\\global\\v11\\abc\\node_modules\\@pnpm\\exe\\pnpm.exe\"   %*\r\n",
+			[`${W_BIN}\\other.cmd`]: "@echo off\r\nvolta run %~n0 %*\r\n" } });
+	const cli = upgradeInvocation({ platform: "win32", env, ...h.adapters });
+	assert.deepEqual(await cli!("npm"), { command: W_NODE, prefix: [W_NPM_CLI] });
+	assert.deepEqual(await cli!("pnpm"), { command: exe, prefix: [] }, "the CLI runs the user's own pnpm, as its shim runs it");
+	assert.equal(await cli!("other"), null, "a shim no structure resolves never runs");
+	assert.equal(await cli!("missing"), null);
+	// The wizard hands pnpm over from the bootstrap: its verified pnpm runs the update.
+	const wizard = upgradeInvocation({ platform: "win32", env, ...h.adapters, handoff: true });
+	assert.deepEqual(await wizard!("pnpm"), { command: "C:\\Tools\\node.exe", prefix: [W_ENTRY] });
+	assert.deepEqual(await wizard!("npm"), { command: W_NODE, prefix: [W_NPM_CLI] });
+	assert.equal(h.calls.some((call) => /\.(cmd|bat)$/i.test(call.command)), false);
+});
+
+// S9: Corepack's pnpm.cmd runs Corepack, never pnpm's own entry: it is not pnpm.
+test("windowsInvocation runs a pnpm shim only when it names pnpm's own bin entry", async () => {
+	const env = { Path: W_NODE_DIR, PATHEXT: ".COM;.EXE;.BAT;.CMD" };
+	const pnpmCmd = `${W_NODE_DIR}\\pnpm.cmd`;
+	for (const entry of ["node_modules\\corepack\\dist\\pnpm.js", "node_modules\\pnpm\\dist\\pnpm.cjs", "node_modules\\other\\bin\\pnpm.cjs"]) {
+		const h = windowsShapes({ files: [W_NODE, `${W_NODE_DIR}\\${entry}`], texts: { [pnpmCmd]: cmdShim(entry) } });
+		assert.equal(await windowsInvocation(pnpmCmd, env, h.adapters), null, entry);
+		assert.deepEqual(h.calls, []);
+	}
+	for (const file of ["pnpm.cjs", "pnpm.mjs"]) {
+		const entry = `${W_NODE_DIR}\\node_modules\\pnpm\\bin\\${file}`;
+		const h = windowsShapes({ files: [W_NODE, entry], texts: { [pnpmCmd]: cmdShim(`node_modules\\pnpm\\bin\\${file}`) } });
+		assert.deepEqual(await windowsInvocation(pnpmCmd, env, h.adapters), { command: W_NODE, prefix: [entry] }, file);
+	}
+	// Any other command keeps its JS entry, whatever it is called (here Corepack's own shim).
+	const corepackCmd = `${W_NODE_DIR}\\corepack.cmd`;
+	const corepackEntry = `${W_NODE_DIR}\\node_modules\\corepack\\dist\\corepack.js`;
+	const corepack = windowsShapes({ files: [W_NODE, corepackEntry], texts: { [corepackCmd]: cmdShim("node_modules\\corepack\\dist\\corepack.js") } });
+	assert.deepEqual(await windowsInvocation(corepackCmd, env, corepack.adapters), { command: W_NODE, prefix: [corepackEntry] });
 });
 
 test("a Windows npm is usable only by behavior: a stable --version and one absolute prefix", async () => {
