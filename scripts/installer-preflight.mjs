@@ -277,6 +277,9 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 	acquire("node");
 	acquire("pnpm");
 	if (tools.globalBin.status !== "reusable") action("setup-global-bin", "setup", "globalBin");
+	// The pinned Go comes before anything is persisted or installed, so a failed
+	// download leaves this computer as it was.
+	const goAt = actions.length;
 	// A bootstrap Node lives in a temporary tools directory, and Gentle AI's Engram
 	// step needs a working npm: persist what is missing under PNPM_HOME through
 	// pnpm itself. A persistent Node is never replaced or shadowed. A recovery
@@ -294,7 +297,6 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 		else if (npm) action("persist-npm", "install-global", "npm", persistencePins.npm);
 		else if (pnpm) action("persist-pnpm", "install-global", "pnpm", persistencePins.pnpm);
 	}
-	const goAt = actions.length;
 	if (installPi) action("install-pi", "install-global", "pi", requirements.pi);
 	if (updatePi) action("update-pi", "upgrade", "pi", PI_INSTALL_VERSION);
 	if (missingShell) action("install-shell", "install-global", "shell", requirements.shell);

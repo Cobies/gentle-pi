@@ -6,6 +6,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import test, { type TestContext } from "node:test";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { crc32, deflateRawSync, gzipSync } from "node:zlib";
 import { artifactFor, verifiedDownload, compatibleEngine, ensurePnpm, launchWizard, bootstrap, removeOwnedTools, acquireGo, installedGo } from "../scripts/installer-downloads.mjs";
 
@@ -1029,9 +1031,46 @@ test("an existing Go destination the installer did not publish is never replaced
 	try {
 		mkdirSync(join(r.root, "1.25.14", "go", "bin"), { recursive: true });
 		writeFileSync(join(r.root, "1.25.14", "go", "bin", "go"), "user's own");
-		await assert.rejects(acquireGo({ root: r.root, platform: "darwin", arch: "arm64", adapters: goAdapters(goTree()) }), /Go verified acquisition failed/);
+		const counter = { downloads: 0 };
+		// The cause names the folder in the way, so the wizard can say which one to remove.
+		await assert.rejects(acquireGo({ root: r.root, platform: "darwin", arch: "arm64", adapters: goAdapters(goTree(), counter) }),
+			(error: Error) => /Go verified acquisition failed/.test(error.message) &&
+				(error.cause as Error)?.message === `Conflicting Go destination: ${join(r.root, "1.25.14")}`);
+		assert.equal(counter.downloads, 0, "nothing is downloaded next to a conflicting folder");
 		assert.equal(readFileSync(join(r.root, "1.25.14", "go", "bin", "go"), "utf8"), "user's own");
 		assert.deepEqual(readdirSync(r.root), ["1.25.14"]);
 		assert.equal(installedGo(r.root, "darwin", "arm64"), null);
 	} finally { r.cleanup(); }
+});
+
+test("the pinned Go destination appears only complete and marked, so an interrupted run never leaves it half published", async () => {
+	const r = goRoot();
+	const destination = join(r.root, "1.25.14");
+	const marker = join(destination, ".gentle-shell-go");
+	const violations: string[] = [];
+	const originals = { mkdirSync: fs.mkdirSync, renameSync: fs.renameSync, writeFileSync: fs.writeFileSync };
+	// Every filesystem mutation is a point where the process could die: after each
+	// one, the destination is either absent or already carries its marker.
+	for (const name of Object.keys(originals) as Array<keyof typeof originals>) {
+		(fs as Record<string, unknown>)[name] = (...args: unknown[]) => {
+			const result = (originals[name] as (...a: unknown[]) => unknown)(...args);
+			if (existsSync(destination) && !existsSync(marker)) violations.push(`${name} ${String(args[0])}`);
+			return result;
+		};
+	}
+	syncBuiltinESMExports();
+	try {
+		// A staging directory left by an earlier interrupted run does not get in the way.
+		mkdirSync(join(r.root, ".stage-interrupted", "go"), { recursive: true, mode: 0o700 });
+		const result = await acquireGo({ root: r.root, platform: "darwin", arch: "arm64", adapters: goAdapters(goTree()) });
+		assert.equal(result.acquired, true);
+		assert.deepEqual(violations, []);
+		assert.equal(readFileSync(marker, "utf8"), `${artifactFor("go", "darwin", "arm64").url}\n`);
+		if (process.platform !== "win32") assert.equal(lstatSync(destination).mode & 0o077, 0);
+		assert.equal(installedGo(r.root, "darwin", "arm64"), result.goPath);
+	} finally {
+		Object.assign(fs, originals);
+		syncBuiltinESMExports();
+		r.cleanup();
+	}
 });

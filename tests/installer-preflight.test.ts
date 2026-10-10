@@ -76,6 +76,18 @@ test("the pinned Go is a 1.25 patch release that meets the requirement", () => {
 	assert.ok(major === rMajor && minor === rMinor && patch >= rPatch);
 });
 
+test("the pinned Go is acquired before the runtime is persisted, so a failed Go download changes nothing", () => {
+	const persisting = { ...tool("24.18.0"), persistent: false, npm: true };
+	for (const [platform, channel] of [["linux", "main"], ["darwin", "main"], ["win32", "release"]] as const) {
+		const inventory = { ...clean(platform), node: persisting, pnpm: { ...tool("11.1.1"), compatible: true },
+			globalBin: { available: true, path: "/disposable/bin", writable: true, onPath: true }, go: absent };
+		const plan = planPreflight(inventory, { channel });
+		assert.deepEqual(plan.blockers, [], platform);
+		assert.deepEqual(plan.actions.map((action: { id: string }) => action.id).slice(0, 5),
+			["acquire-go", "verify-go", "persist-node", "persist-package-managers", "configure-npm-prefix"], platform);
+	}
+});
+
 test("the main channel acquires the pinned Go when Go is missing or older, before the build, on every platform", () => {
 	for (const platform of ["linux", "darwin", "win32"]) {
 		for (const [go, found] of [[absent, null], [tool("1.25.9"), "1.25.9"]] as const) {

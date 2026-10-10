@@ -234,7 +234,7 @@ export function progressModel(steps, entries, { running = false, outcome = null 
 	};
 }
 
-const detailCommands = new Map([["shell-setup", "gentle-shell setup"], ["persist-path", "pnpm setup"]]);
+const detailCommands = new Map([["shell-setup", "gentle-shell setup"], ["persist-path", "pnpm setup"], ["acquire-go", "the Go download"]]);
 
 /** Final screen model for every runner outcome. Guidance always comes from the host. */
 export function outcomeModel(outcome) {
@@ -260,7 +260,7 @@ export function outcomeModel(outcome) {
 			next: ["Follow the guidance above.", "Run the installer again from your terminal."] };
 	}
 	const id = text(outcome?.failedStep);
-	// The host sends a detail only for these fixed setup commands; bound it again here.
+	// The host sends a detail only for these fixed steps; bound it again here.
 	const detailCommand = detailCommands.get(id) ?? null;
 	const detail = detailCommand ? Array.from(text(outcome?.detail)).slice(0, 300).join("") : "";
 	return { ...base, outcome: "failed", tone: "error", badge: "Failed", title: "Installation failed",

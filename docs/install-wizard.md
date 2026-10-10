@@ -161,7 +161,8 @@ A clean target receives these intents in dependency order:
    `persist-package-managers` when both are missing.
 2. When a build needs Go (the main channel, or a Windows Gentle Shell install or
    update whose postinstall may build Gentle AI) and Go is missing or older,
-   `acquire-go` and `verify-go` come before the first step that builds.
+   `acquire-go` and `verify-go` come before every persistence and install step,
+   so a failed Go download leaves the computer as it was.
 3. Install Pi globally, then `gentle-pi` globally (its existing postinstall owns
    native installation). For an existing Shell with missing native binary, call
    the existing installer instead.
@@ -394,7 +395,8 @@ Mutating and verification steps, returning `failed` with `failedStep` and the
    pnpm `ERR_` code), else the last non-empty line, without terminal escapes,
    control or bidi characters, with the user's home replaced by `~` and at most
    300 characters (`setupErrorDetail`). The raw output is not kept; only this
-   step and `persist-path` have a detail.
+   step, `persist-path` and `acquire-go` (the Go folder in its way) have a
+   detail.
 6. `persist-path`, only when `$PNPM_HOME/bin` was not on the user's own PATH:
    `pnpm setup`, then the outcome is `terminal-action-required` with
    `action: "open-new-terminal"`. A child environment never proves that a fresh
@@ -622,8 +624,9 @@ publishes main builds, so main is built on this computer
 Go is needed only after the wizard knows the channel, so it is not a bootstrap
 prerequisite: Node and pnpm are acquired by the bootstraps because the wizard
 cannot run without them, while Go is acquired by the runner after consent, as the
-first mutating steps of a plan that builds with it. Nothing is downloaded before
-consent.
+first mutating steps of a plan that builds with it, before anything is persisted
+or installed. Nothing is downloaded before consent, and a failed download leaves
+the computer as it was.
 
 - `acquire-go`: [`acquireGo`](../scripts/installer-downloads.mjs) downloads the
   official go.dev archive for the platform (darwin, linux and windows; amd64 and
@@ -634,14 +637,19 @@ consent.
   extracted in process into a private staging directory: only regular files and
   directories under `go/`, with no links, traversal, absolute paths or duplicate
   names, and `go/VERSION` must name the pin. The tree is published without
-  replacing anything as `<config home>/tools/go/<version>/go` (directory `0700`)
-  with a marker naming the archive written last; a later run reuses a marked
-  copy without downloading. Any mismatch fails the step and publishes nothing.
+  replacing anything as `<config home>/tools/go/<version>/go` (directory `0700`):
+  the marker naming the archive is written into the staging directory, which then
+  becomes `<version>` in one rename, so that folder never exists unmarked. A
+  later run reuses a marked copy without downloading. Any mismatch fails the step
+  and publishes nothing. An existing `<version>` folder without the marker (left
+  by an interrupted run of an earlier installer, or not the installer's) is never
+  replaced: the step fails before downloading, and the wizard shows that folder
+  (home as `~`) with guidance to remove it.
 - `verify-go`: the published `go` (by absolute path, `GOTOOLCHAIN=local`) must
   print `go version go<pin> …`.
 - The pinned Go is never put on the user's PATH or profile, and the user's Go
-  (Homebrew, mise, an official package, anything) is never run, changed or
-  removed. The runner passes it by path to `build-gentle-ai-main` and puts its
+  (Homebrew, mise, an official package, anything) is only asked its version
+  (`go version`, as the preflight probe always did), never changed or removed. The runner passes it by path to `build-gentle-ai-main` and puts its
   `bin` directory first on PATH only for the children that may build Gentle AI:
   `pnpm add -g` (gentle-pi's Windows postinstall finds `go.exe` there) and the
   wizard's Gentle Shell update.
@@ -805,7 +813,7 @@ simply unknown paths.
 `guidance` (exported) holds fixed English text for every runner blocked
 reason, every failed step, every preflight blocker code and both successful
 outcomes, plus a generic fallback; a runner exception becomes a `failed`
-outcome with the fallback. A failed `shell-setup` or `persist-path` outcome also passes the
+outcome with the fallback. A failed `shell-setup`, `persist-path` or `acquire-go` outcome also passes the
 runner's `detail` through, bounded again (string only, control and bidi
 characters removed, at most 300 characters); the host drops it for any other
 step. When that detail names GitHub's rate limit (`rate limit`, or `GitHub API`
@@ -814,7 +822,11 @@ anonymous API limit was reached on this network, wait up to an hour and run the
 installer again. No token or credential is ever requested. For `persist-path`,
 a detail with `ERR_PNPM_UNKNOWN_SHELL` or `ERR_PNPM_UNSUPPORTED_SHELL` selects
 `guidance.persistPathShell`: open a regular terminal and run the installer
-again, or add `$PNPM_HOME/bin` to PATH manually. `scripts/installer-runner.mjs` exports the frozen
+again, or add `$PNPM_HOME/bin` to PATH manually. For `acquire-go`, a detail
+starting with `Conflicting Go destination: ` selects
+`guidance.goDestinationConflict`: a folder from an earlier, interrupted run is in
+the way and is never replaced; remove that folder and run the installer again.
+`scripts/installer-runner.mjs` exports the frozen
 arrays `blockedReasons` and `failedSteps`; a test requires guidance for exactly
 those entries, and the runner tests check that every reason and step their
 scenarios observe is listed.
@@ -832,7 +844,7 @@ HTML).
 | Check | Shown while `GET /api/progress?after=0` and `GET /api/plan` run. A running installation resumes the Install screen; a finished one shows its outcome instead of a new plan. |
 | Review | Each fixed action with its description, the `profileChange` and `persistence` disclosures (state as text: "Will change", "No change"), one consent checkbox and **Install Gentle Shell** (for a setup recovery, "Finish setting up Gentle Shell" and **Complete setup**). Without the checkbox no request is sent; the error is announced and focus moves to the checkbox. Preflight blockers replace the plan with their guidance, **Check again** and **Close installer**. |
 | Install | Expected runner steps (`expectedSteps`) with a text status (Done, In progress, Pending, Failed, Blocked, Not run), a `<progress>` bar and a terminal-style log of `{ seq, step, status, reason }` entries. |
-| Done | `ready`: run `gentle-shell`. `terminal-action-required`: open a new terminal, then run `gentle-shell`. `blocked`/`failed`: the host's guidance, the reason or failed step, the steps that finished and the log. A failed `shell-setup` or `persist-path` with a detail also shows it under **Last error from gentle-shell setup** or **Last error from pnpm setup** as one plain text node (backticks stay literal). Every outcome offers **Close installer** (`POST /api/shutdown`). |
+| Done | `ready`: run `gentle-shell`. `terminal-action-required`: open a new terminal, then run `gentle-shell`. `blocked`/`failed`: the host's guidance, the reason or failed step, the steps that finished and the log. A failed `shell-setup`, `persist-path` or `acquire-go` with a detail also shows it under **Last error from gentle-shell setup**, **Last error from pnpm setup** or **Last error from the Go download** as one plain text node (backticks stay literal). Every outcome offers **Close installer** (`POST /api/shutdown`). |
 
 Behavior worth knowing:
 

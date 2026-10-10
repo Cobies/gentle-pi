@@ -144,6 +144,7 @@ export const guidance = Object.freeze({
 	// A failed shell-setup whose detail shows GitHub's anonymous API limit.
 	setupRateLimit: "`gentle-shell setup` could not finish because GitHub's limit for anonymous API requests was reached on this network. Wait up to an hour, then run the installer again.",
 	// A failed persist-path whose detail shows pnpm could not tell the shell (POSIX SHELL missing or unsupported).
+	goDestinationConflict: `A Go folder from an earlier, interrupted installer run is in the way, and the installer never replaces a folder it cannot prove it published. Remove that folder (shown below), then run the installer again. Nothing was installed.`,
 	persistPathShell: "`pnpm setup` could not tell which shell profile to edit because the SHELL environment variable is missing or names an unsupported shell. Open a regular terminal and run the installer again, or add `$PNPM_HOME/bin` to your PATH yourself.",
 	fallback: "The installation stopped for an unexpected reason. Nothing else will run; check the terminal and run the installer again.",
 });
@@ -158,9 +159,10 @@ function setupDetail(value) {
 }
 const rateLimited = (detail) => /rate limit/i.test(detail) || (/GitHub API/i.test(detail) && /\b403\b/.test(detail));
 const unknownShell = (detail) => /ERR_PNPM_(?:UNKNOWN|UNSUPPORTED)_SHELL/.test(detail);
-// Fixed setup commands whose sanitized last error line may reach the browser.
-const detailSteps = Object.freeze({ "shell-setup": rateLimited, "persist-path": unknownShell });
-const detailGuidance = Object.freeze({ "shell-setup": "setupRateLimit", "persist-path": "persistPathShell" });
+const goConflict = (detail) => detail.startsWith("Conflicting Go destination: ");
+// Fixed steps whose sanitized last error line may reach the browser.
+const detailSteps = Object.freeze({ "shell-setup": rateLimited, "persist-path": unknownShell, "acquire-go": goConflict });
+const detailGuidance = Object.freeze({ "shell-setup": "setupRateLimit", "persist-path": "persistPathShell", "acquire-go": "goDestinationConflict" });
 
 const ID = /^[a-z][a-z0-9-]{0,63}$/;
 function identifier(value, fallback = "unknown") {

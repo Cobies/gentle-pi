@@ -634,7 +634,8 @@ export function setupErrorDetail(text, home, platform) {
  * Outcomes: blocked (nothing installed), failed (stopped after `completed`),
  * terminal-action-required (installed; user PATH persisted, open a new
  * terminal) or ready. A failed `shell-setup` or `persist-path` may add `detail`,
- * one sanitized output line (setupErrorDetail); no other output is kept. When the plan persists the Node runtime, successful
+ * one sanitized output line (setupErrorDetail), and a failed `acquire-go` the Go
+ * folder in its way, with the home as ~; no other output is kept. When the plan persists the Node runtime, successful
  * outcomes also report npmPrefix: "configured" or "unchanged". Adapters: platform, nodePath, env (user env), home?,
  * run(command, argv, { env, deadlineMs, stderrTail? }) with shell:false semantics returning
  * { code, signal, timedOut, stdout, stderrTail? }, fs { isFile, realpath, readText },
@@ -813,7 +814,17 @@ export async function runStandardInstall(request, adapters) {
 	let pinnedGo = null;
 	const buildEnv = () => (pinnedGo ? goFirstEnvironment(child, platform, pinnedGo) : child);
 	const goSteps = ids.includes("acquire-go") ? [
-		["acquire-go", async () => typeof (pinnedGo = (await adapters.acquireGo())?.goPath ?? null) === "string"],
+		["acquire-go", async () => {
+			try {
+				pinnedGo = (await adapters.acquireGo())?.goPath ?? null;
+			} catch (error) {
+				// Only a folder in the way is reported, by its path with the home as ~.
+				const cause = String(error?.cause?.message ?? "");
+				if (cause.startsWith("Conflicting Go destination: ")) setupDetail = setupErrorDetail(cause, home, platform);
+				return false;
+			}
+			return typeof pinnedGo === "string";
+		}],
 		// It runs and reports exactly the pinned version; GOTOOLCHAIN=local keeps it from switching toolchains.
 		["verify-go", async () => {
 			if (!path.isAbsolute(pinnedGo) || !spawnable(pinnedGo, platform)) return false;
@@ -857,8 +868,9 @@ export async function runStandardInstall(request, adapters) {
 		];
 	}
 	const steps = [
-		...(persistRuntime ? persistence : addOnly ? packageManagers : []),
+		// The pinned Go first: a failed download leaves nothing persisted or installed.
 		...goSteps,
+		...(persistRuntime ? persistence : addOnly ? packageManagers : []),
 		...piSteps,
 		...(recovering ? [] : [install]),
 		["verify-global-list", async () => {
@@ -933,7 +945,7 @@ export async function runStandardInstall(request, adapters) {
 	for (const [step, run] of steps) {
 		if (!(await Promise.resolve().then(run).catch(() => false))) {
 			log({ step, status: "failed" });
-			const detail = ["shell-setup", "persist-path"].includes(step) && setupDetail ? { detail: setupDetail } : {};
+			const detail = ["shell-setup", "persist-path", "acquire-go"].includes(step) && setupDetail ? { detail: setupDetail } : {};
 			return { outcome: "failed", failedStep: step, completed, ...detail };
 		}
 		completed.push(step);

@@ -791,6 +791,25 @@ test("a failed setup passes only its bounded detail through, with rate-limit gui
 			await run.host.close("test");
 		}
 	}
+	// A failed Go download passes its folder conflict through, with guidance to remove that folder.
+	const conflict = "Conflicting Go destination: ~/.pi/gentle-ai/tools/go/1.25.14";
+	for (const [detail, expected] of [[conflict, guidance.goDestinationConflict], ["Error: size", guidance.failed["acquire-go"]]]) {
+		const run = await start({ runInstall: async () => ({ outcome: "failed", failedStep: "acquire-go", completed: [], detail }) });
+		try {
+			const cookie = await run.login();
+			const { planId } = await plan(run.port, cookie);
+			await post(run.port, "/api/install", cookie, { planId, consent: true });
+			await waitFor(() => run.host.outcome() !== null);
+			const progress = JSON.parse((await send(run.port, { path: "/api/progress", headers: { cookie, ...API } })).body);
+			assert.equal(progress.outcome.detail, detail);
+			assert.equal(progress.outcome.guidance, expected, detail);
+		} finally {
+			await run.host.close("test");
+		}
+	}
+	assert.match(guidance.goDestinationConflict, /earlier/);
+	assert.match(guidance.goDestinationConflict, /Remove that folder/);
+	assert.doesNotMatch(guidance.goDestinationConflict, /network/);
 	assert.match(guidance.persistPathShell, /SHELL/);
 	assert.match(guidance.persistPathShell, /regular terminal/);
 	assert.match(guidance.persistPathShell, /\$PNPM_HOME\/bin/);

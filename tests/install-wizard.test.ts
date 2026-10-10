@@ -637,6 +637,11 @@ test("a failed setup shows its last error as labelled plain text", () => {
 	const persist = wizard.outcomeModel({ outcome: "failed", failedStep: "persist-path", completed: [], guidance: guidance.persistPathShell, detail: pnpmDetail });
 	assert.equal(persist.detail, pnpmDetail);
 	assert.equal(persist.detailCommand, "pnpm setup");
+	// The Go download's folder conflict is labelled with that step.
+	const goDetail = "Conflicting Go destination: ~/.pi/gentle-ai/tools/go/1.25.14";
+	const go = wizard.outcomeModel({ outcome: "failed", failedStep: "acquire-go", completed: [], guidance: guidance.goDestinationConflict, detail: goDetail });
+	assert.equal(go.detail, goDetail);
+	assert.equal(go.detailCommand, "the Go download");
 	const persistNode = wizard.renderOutcome(document, persist, { close() {} });
 	const persistSection = all(persistNode, "section").find((element) => element.textContent.startsWith("Last error from pnpm setup"));
 	assert.ok(persistSection, "pnpm setup detail section");
