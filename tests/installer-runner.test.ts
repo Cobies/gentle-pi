@@ -1406,6 +1406,28 @@ test("a main plan with a missing or older Go builds Gentle AI with the pinned Go
 	}
 });
 
+test("a failed pinned Go download stops before the runtime is persisted, so nothing was installed", async () => {
+	const fixed = mainPlan({ node: bootstrapNode, go: absent });
+	assert.deepEqual(fixed.blockers, []);
+	const h = withGo(mainHarness(), new Error("Go verified acquisition failed; nothing was published", { cause: new Error("size") }));
+	const result = await runStandardInstall({ plan: fixed, consent: true }, h.adapters);
+	assert.equal(result.outcome, "failed");
+	assert.equal(result.failedStep, "acquire-go");
+	assert.deepEqual(result.completed, ["check-global-bin", "check-existing-stack"]);
+	assert.equal(h.pnpmCalls().includes(RUNTIME_SET), false, "Node is not persisted");
+	assert.equal("detail" in result, false, "a download failure carries no detail");
+});
+
+test("a Go destination left by an earlier run fails acquire-go with the folder to remove, the home shortened to ~", async () => {
+	const folder = `${HOME}/.pi/gentle-ai/tools/go/${goAcquisition.version}`;
+	const h = withGo(mainHarness(), new Error("Go verified acquisition failed; nothing was published",
+		{ cause: new Error(`Conflicting Go destination: ${folder}`) }));
+	const result = await runStandardInstall({ plan: mainPlan({ go: absent }), consent: true }, h.adapters);
+	assert.equal(result.outcome, "failed");
+	assert.equal(result.failedStep, "acquire-go");
+	assert.equal(result.detail, `Conflicting Go destination: ~/.pi/gentle-ai/tools/go/${goAcquisition.version}`);
+});
+
 test("a channel that cannot be recorded fails the record step after the main Shell is installed", async () => {
 	const h = mainHarness();
 	h.adapters.mainChannel.writeChannel = async () => { throw new Error("EACCES /home/u/.pi"); };

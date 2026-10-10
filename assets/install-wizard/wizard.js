@@ -128,7 +128,8 @@ export function expectedSteps(actionIds) {
 	// An npm that is about to be installed is checked after it is added.
 	// With Pi already installed, only Gentle Shell is added, so only it must be absent.
 	const shellOnly = ids.has("install-shell") && !ids.has("install-pi");
-	const steps = [...(addNpm ? [] : ["check-npm"]), "check-global-bin", shellOnly ? "check-existing-shell" : "check-existing-stack", ...piCheck];
+	// The pinned Go comes right after the checks, before anything is persisted.
+	const steps = [...(addNpm ? [] : ["check-npm"]), "check-global-bin", shellOnly ? "check-existing-shell" : "check-existing-stack", ...piCheck, ...go];
 	if (ids.has("persist-node")) {
 		steps.push("persist-node", "persist-package-managers", "verify-persistent-runtime", "check-npm", "configure-npm-prefix");
 	} else if (addNpm || addPnpm) {
@@ -137,7 +138,7 @@ export function expectedSteps(actionIds) {
 		if (addNpm) steps.push("check-npm");
 		if (addPnpm) steps.push("verify-persistent-pnpm");
 	}
-	steps.push(...go, ...piSteps, "install-global", "verify-global-list", "verify-shell-bin", "verify-gentle-ai", "shell-setup");
+	steps.push(...piSteps, "install-global", "verify-global-list", "verify-shell-bin", "verify-gentle-ai", "shell-setup");
 	if (ids.has("setup-global-bin")) steps.push("persist-path");
 	return withMain(ids, steps);
 }
@@ -234,7 +235,7 @@ export function progressModel(steps, entries, { running = false, outcome = null 
 	};
 }
 
-const detailCommands = new Map([["shell-setup", "gentle-shell setup"], ["persist-path", "pnpm setup"]]);
+const detailCommands = new Map([["shell-setup", "gentle-shell setup"], ["persist-path", "pnpm setup"], ["acquire-go", "the Go download"]]);
 
 /** Final screen model for every runner outcome. Guidance always comes from the host. */
 export function outcomeModel(outcome) {
@@ -260,7 +261,7 @@ export function outcomeModel(outcome) {
 			next: ["Follow the guidance above.", "Run the installer again from your terminal."] };
 	}
 	const id = text(outcome?.failedStep);
-	// The host sends a detail only for these fixed setup commands; bound it again here.
+	// The host sends a detail only for these fixed steps; bound it again here.
 	const detailCommand = detailCommands.get(id) ?? null;
 	const detail = detailCommand ? Array.from(text(outcome?.detail)).slice(0, 300).join("") : "";
 	return { ...base, outcome: "failed", tone: "error", badge: "Failed", title: "Installation failed",

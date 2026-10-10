@@ -448,6 +448,14 @@ test("expectedSteps runs the pinned Go acquisition after the pre-install checks 
 	assert.deepEqual(wizard.expectedSteps([...go, "install-pi", "install-shell", "setup-shell", "verify-readiness", ...mainIds]),
 		["check-npm", "check-global-bin", "check-existing-stack", ...go, "install-global", "verify-global-list", "verify-shell-bin",
 			"verify-gentle-ai", ...mainIds, "shell-setup"]);
+	// Like the runner, the pinned Go comes before the runtime is persisted.
+	assert.deepEqual(wizard.expectedSteps(["setup-global-bin", ...go, "persist-node", "persist-package-managers", "configure-npm-prefix",
+		"install-pi", "install-shell", "setup-shell", "verify-readiness", ...mainIds]),
+		["check-global-bin", "check-existing-stack", ...go, "persist-node", "persist-package-managers", "verify-persistent-runtime", "check-npm",
+			"configure-npm-prefix", "install-global", "verify-global-list", "verify-shell-bin", "verify-gentle-ai", ...mainIds, "shell-setup", "persist-path"]);
+	assert.deepEqual(wizard.expectedSteps([...go, "persist-pnpm", "install-pi", "install-shell", "setup-shell", "verify-readiness"]),
+		["check-npm", "check-global-bin", "check-existing-stack", ...go, "persist-pnpm", "verify-persistent-pnpm", "install-global",
+			"verify-global-list", "verify-shell-bin", "verify-gentle-ai", "shell-setup"]);
 	assert.deepEqual(wizard.expectedSteps([...go, "update-shell-main", "setup-shell", "verify-readiness"]),
 		["check-npm", "check-global-bin", "check-installed-shell", ...go, "update-shell", "verify-updated-shell", "shell-setup"]);
 	for (const id of go) assert.notEqual(wizard.stepLabel(id), id, `label for ${id}`);
@@ -637,6 +645,11 @@ test("a failed setup shows its last error as labelled plain text", () => {
 	const persist = wizard.outcomeModel({ outcome: "failed", failedStep: "persist-path", completed: [], guidance: guidance.persistPathShell, detail: pnpmDetail });
 	assert.equal(persist.detail, pnpmDetail);
 	assert.equal(persist.detailCommand, "pnpm setup");
+	// The Go download's folder conflict is labelled with that step.
+	const goDetail = "Conflicting Go destination: ~/.pi/gentle-ai/tools/go/1.25.14";
+	const go = wizard.outcomeModel({ outcome: "failed", failedStep: "acquire-go", completed: [], guidance: guidance.goDestinationConflict, detail: goDetail });
+	assert.equal(go.detail, goDetail);
+	assert.equal(go.detailCommand, "the Go download");
 	const persistNode = wizard.renderOutcome(document, persist, { close() {} });
 	const persistSection = all(persistNode, "section").find((element) => element.textContent.startsWith("Last error from pnpm setup"));
 	assert.ok(persistSection, "pnpm setup detail section");
