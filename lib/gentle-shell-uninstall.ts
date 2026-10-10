@@ -245,7 +245,11 @@ async function planSelfUninstall(input: SelfUninstallInput, configHome: string, 
 	// link (or a symlinked ancestor) never leads it somewhere protected.
 	// Inside a Gentle Shell session PI_CODING_AGENT_DIR is the isolated home itself
 	// and the user's Pi home travels in GENTLE_SHELL_USER_PI_HOME (see userPiHome).
-	const sessionAgentDir = (name: string, value: string) => name === "PI_CODING_AGENT_DIR" && Boolean(env.GENTLE_SHELL_USER_PI_HOME)
+	// Only an existing directory other than the isolated home proves that session.
+	const sessionPiHome = env.GENTLE_SHELL_USER_PI_HOME ? canonical(env.GENTLE_SHELL_USER_PI_HOME) : null;
+	const inSession = sessionPiHome !== null && inspect(sessionPiHome, "dir") === "ok"
+		&& comparable(sessionPiHome, platform) !== comparable(isolatedReal, platform);
+	const sessionAgentDir = (name: string, value: string) => name === "PI_CODING_AGENT_DIR" && inSession
 		&& comparable(canonical(value), platform) === comparable(isolatedReal, platform);
 	const guards: Guard[] = [
 		{ path: homedir, label: "your home directory", inside: false },

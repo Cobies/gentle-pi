@@ -212,8 +212,10 @@ test("inside a session the user's Pi home and any other PI_CODING_AGENT_DIR stay
 		{ PI_CODING_AGENT_DIR: join(w.isolated, "pi"), GENTLE_SHELL_USER_PI_HOME: w.piHome },
 		// Without GENTLE_SHELL_USER_PI_HOME, PI_CODING_AGENT_DIR is the user's Pi home.
 		{ PI_CODING_AGENT_DIR: w.isolated },
+		// A GENTLE_SHELL_USER_PI_HOME that is not an existing directory proves no session.
+		{ PI_CODING_AGENT_DIR: w.isolated, GENTLE_SHELL_USER_PI_HOME: join(w.root, "missing-pi-home") },
 	];
-	for (let index = 0; index < 3; index += 1) {
+	for (let index = 0; index < 4; index += 1) {
 		const w = world();
 		try {
 			await refused(w, cases(w)[index], /your Pi home/);

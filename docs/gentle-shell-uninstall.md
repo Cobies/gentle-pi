@@ -83,9 +83,10 @@ path (after following symbolic links, including linked parent folders):
 - is, contains or lies inside your Pi home (`~/.pi/agent`, `PI_CODING_AGENT_DIR`
   or `GENTLE_SHELL_USER_PI_HOME`) or Gentle AI's state in `~/.gentle-ai`. Inside
   a Gentle Shell session, `PI_CODING_AGENT_DIR` is the isolated home itself and
-  your Pi home travels in `GENTLE_SHELL_USER_PI_HOME`: when that variable is set,
-  a `PI_CODING_AGENT_DIR` equal to the isolated home is not treated as your Pi
-  home, so the command also works from inside a session;
+  your Pi home travels in `GENTLE_SHELL_USER_PI_HOME`: when that variable names
+  an existing directory other than the isolated home, a `PI_CODING_AGENT_DIR`
+  equal to the isolated home is not treated as your Pi home, so the command
+  also works from inside a session;
 - is, contains or lies inside a `.pi` directory, such as a project's `.pi` or
   `.pi/gentle-ai` (containing means a `.pi` directly inside it). The default
   config home, `~/.pi/gentle-ai`, is the only `.pi` location allowed;
