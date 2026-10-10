@@ -1069,7 +1069,7 @@ test("production and fixture PowerShell never depend on autoloading Microsoft.Po
 		assert.match(source, /if \(\$item\.PSIsContainer\) \{ \$acl = \[IO\.Directory\]::GetAccessControl\(\$path\) \} else \{ \$acl = \[IO\.File\]::GetAccessControl\(\$path\) \}/);
 	}
 });
-const psRecordLine = '  "$record = [Diagnostics.Process]::GetCurrentProcess(); [IO.File]::AppendAllText($env:GENTLE_FIXTURE_RECORDS,([string]$record.Id + [char]124 + [string]$record.StartTime.ToUniversalTime().Ticks + [Environment]::NewLine)); [Console]::Error.WriteLine(\'WINDOWS_DIAG_PS_READY\');" ^';
+const psRecordLine = '  "$record = [Diagnostics.Process]::GetCurrentProcess(); [IO.File]::AppendAllText($env:GENTLE_FIXTURE_RECORDS,([string]$record.Id + [char]124 + [string]$record.StartTime.ToUniversalTime().Ticks + [Environment]::NewLine));" ^';
 function observeStage(stage: string) {
 	const lines = stage.split("\n");
 	const index = lines.findIndex((line) => line.includes("LanguageMode"));
@@ -1198,7 +1198,7 @@ async function nativeCmdFile(root: string, file: string, env: NodeJS.ProcessEnv,
 	const result = await new Promise<NativeResult>((resolveChild, reject) => {
 		const timer = setTimeout(() => {
 			guardKilled = true;
-			trace("guard-fired", { recordExists: existsSync(join(root, "process-records")), powershellReady: stderr.includes("WINDOWS_DIAG_PS_READY"), diagnosticSeen: /No acquisition attempted/.test(stderr) });
+			trace("guard-fired", { recordExists: existsSync(join(root, "process-records")), diagnosticSeen: /No acquisition attempted/.test(stderr) });
 			try { cleanNativeProcesses(root); } catch (error) { guardError = error; }
 			child.kill("SIGKILL");
 			child.stdout.destroy(); child.stderr.destroy();
@@ -1209,7 +1209,6 @@ async function nativeCmdFile(root: string, file: string, env: NodeJS.ProcessEnv,
 			const before = stderr;
 			stderr += bytes.toString();
 			if (!before.length) trace("first-stderr", { bytes: bytes.length });
-			if (!before.includes("WINDOWS_DIAG_PS_READY") && stderr.includes("WINDOWS_DIAG_PS_READY")) trace("powershell-ready");
 			if (!/No acquisition attempted/.test(before) && /No acquisition attempted/.test(stderr)) trace("missing-bundle-diagnostic");
 			if (stderr.length > 1048576) { guardError = new Error("Fixture output limit"); child.kill("SIGKILL"); } });
 		child.once("error", (error) => { clearTimeout(timer); reject(error); });
