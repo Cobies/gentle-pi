@@ -7,7 +7,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { exitCodeFor, openBrowser, openerFor, redirectPage, runnerEnvironment, writeRedirect } from "../bin/gentle-shell-install.mjs";
+import { exitCodeFor, openBrowser, openerFor, redirectPage, runnerEnvironment, upgradeEnvironment, writeRedirect } from "../bin/gentle-shell-install.mjs";
 import { planPreflight, requirements } from "../scripts/installer-preflight.mjs";
 import { PI_INSTALL_VERSION, blockedReasons, failedSteps } from "../scripts/installer-runner.mjs";
 import { createInstallerServer, guidance } from "../scripts/installer-server.mjs";
@@ -1225,4 +1225,16 @@ test("/api/plan names the folder, principal, rights and remedy when PNPM_HOME is
 	assert.match(failed.blockers[0].guidance, /PNPM_HOME/);
 	assert.ok(guidance.blocked["pnpm-home-changed"].length > 20);
 	assert.ok(guidance.failed["prepare-pnpm-home"].includes("%USERPROFILE%\\.pnpm"));
+});
+
+// R2: an update's children (gentle-shell upgrade, its pnpm and postinstall) get the
+// same private-mode environment as the runner's children; otherwise it is unchanged.
+test("upgradeEnvironment isolates TEMP, TMP and pnpm's folders in a private Windows PNPM_HOME only", () => {
+	const env = { USERPROFILE: "C:\\Users\\m", PNPM_HOME: W_PRIVATE, Path: "C:\\Windows", TEMP: "C:\\Users\\m\\AppData\\Local\\Temp" };
+	const privateHome = { available: true, path: W_PRIVATE, source: "private", rejected: { path: W_DEFAULT, check: "target-acl-mask" } };
+	const isolated = upgradeEnvironment({ platform: "win32", env, pnpmHome: privateHome, goPath: "C:\\go\\bin\\go.exe" });
+	assert.deepEqual([isolated.TEMP, isolated.TMP, isolated.XDG_CACHE_HOME, isolated.PNPM_HOME], [`${W_PRIVATE}\\tmp`, `${W_PRIVATE}\\tmp`, `${W_PRIVATE}\\.cache`, W_PRIVATE]);
+	assert.equal(isolated.Path.split(";")[0], "C:\\go\\bin");
+	assert.deepEqual(upgradeEnvironment({ platform: "win32", env, pnpmHome: { available: true, path: W_PRIVATE, source: "user" } }), env);
+	assert.deepEqual(upgradeEnvironment({ platform: "linux", env: { PATH: "/usr/bin" }, pnpmHome: null }), { PATH: "/usr/bin" });
 });

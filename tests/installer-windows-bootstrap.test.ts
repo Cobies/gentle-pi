@@ -577,9 +577,12 @@ test("native Windows entry: spaces, Unicode, CMD metacharacters and early missin
 		writeFileSync(join(scripts, "bootstrap.cmd"), observeStage(readFileSync(new URL("../scripts/bootstrap.cmd", import.meta.url), "utf8")));
 		const local = join(f.root, "home"); mkdirSync(local);
 		const env = { ...nativeEnv(f.root), LOCALAPPDATA: local };
-		console.error("WINDOWS_ENTRY_PROBE_START timeoutMs=5000");
+		// The same outer bound as every other production fragment (nativeCmd): a cold
+		// cmd.exe plus Windows PowerShell 5.1 start can exceed 5 s while the CI step runs
+		// the installer suites in parallel. The bundle stage itself has no deadline.
+		console.error("WINDOWS_ENTRY_PROBE_START timeoutMs=14000");
 		const started = performance.now();
-		const result = await nativeCmdFile(f.root, "scripts\\bootstrap.cmd", env, 5000);
+		const result = await nativeCmdFile(f.root, "scripts\\bootstrap.cmd", env, 14000);
 		console.error("WINDOWS_ENTRY_PROBE_RESULT", JSON.stringify({ elapsedMs: performance.now() - started, status: result.status, guardKilled: result.guardKilled, expectedDiagnostic: /No acquisition attempted/.test(result.stderr) }));
 		// Spawn errors reject the helper; a guard intervention or unexpected exit
 		// must still fail acceptance rather than being hidden by fixture cleanup.
@@ -1031,6 +1034,28 @@ test("the private PNPM_HOME claim reuses the bootstrap's protected DACL and read
 	if (process.platform !== "win32") assert.throws(() => windowsModule.ensureWindowsPnpmHome(W_PRIVATE, homeEnv, { processAdapter: () => "claimed" }), /Native Windows/);
 });
 
+// R2: the claim also creates the children's TEMP/TMP folder inside the claimed
+// home, after the DACL readback, so it inherits that protected DACL; the Node side
+// walks both before any command runs.
+test("prepare-pnpm-home creates the private tmp folder inside the claimed home and walks it", () => {
+	const source = readFileSync(new URL("../scripts/installer-windows.mjs", import.meta.url), "utf8");
+	const claim = source.split("const pnpmHomeClaim = String.raw`")[1].split("`;")[0];
+	const tmp = claim.indexOf("$temp = Join-Path $target 'tmp';");
+	assert.ok(tmp > claim.indexOf("throw 'private-ace'"), "after the readback");
+	assert.ok(claim.includes("if (Test-Path -LiteralPath $temp) { $folder = Get-Item -LiteralPath $temp -Force; if (-not $folder.PSIsContainer -or ($folder.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'foreign' } } else { $null = New-Item -ItemType Directory -Path $temp };"));
+	assert.ok(tmp < claim.indexOf("  $result\n"), "also for a kept home");
+	for (const output of ["claimed", "kept"]) {
+		const walked: string[] = []; const scripts: string[] = [];
+		const result = windowsModule.ensureWindowsPnpmHome(W_PRIVATE, homeEnv, { platform: "win32",
+			processAdapter: (_command: string, args: string[], env: Record<string, string>) => { scripts.push(args[4]); assert.equal(env.GENTLE_WINDOWS_PNPM_HOME, W_PRIVATE); return output; },
+			storage: (path: string) => { walked.push(path); } });
+		assert.equal(result, output);
+		assert.deepEqual(walked, [W_PRIVATE, `${W_PRIVATE}\\tmp`]);
+		assert.equal(scripts[0], claim);
+	}
+	assert.equal(windowsModule.privatePnpmHome.temp, "tmp");
+});
+
 test("production and fixture PowerShell never depend on autoloading Microsoft.PowerShell.Security", () => {
 	const batch = readFileSync(new URL("../scripts/bootstrap.cmd", import.meta.url), "utf8");
 	const sources = { batch, aclCheck: productionAclSources()[2], fixtureAclSetup, fixtureOwnerSetup, guardCommand, processPrimitive: processPrimitive() };
@@ -1467,6 +1492,8 @@ test("native Windows: a weak default PNPM_HOME holding nothing makes the plan us
 		assert.equal(existsSync(own), false, "nothing is created before consent");
 		// After consent: claimed with the protected DACL and owned by the user (the walk passes), then kept.
 		assert.equal(windowsModule.ensureWindowsPnpmHome(own, env), "claimed");
+		// Its tmp folder (the children's TEMP/TMP) exists and, inheriting the DACL, passed the same walk.
+		assert.equal(existsSync(join(own, "tmp")), true);
 		verifyWindowsStorage(own, env);
 		assert.equal(readFileSync(join(own, ".gentle-shell-pnpm-home"), "utf8"), "gentle-pi private pnpm home");
 		mkdirSync(join(own, "bin"));
@@ -1490,7 +1517,11 @@ test("native Windows: a weak default PNPM_HOME that already holds files blocks a
 		const env = withoutPnpmHome(process.env, { LOCALAPPDATA: local, USERPROFILE: profile });
 		const decided = windowsModule.windowsWizardEnvironment({ env });
 		assert.equal(decided.pnpmHome.installed, true, JSON.stringify(decided.pnpmHome));
-		assert.deepEqual([decided.pnpmHome.untrusted.at, decided.pnpmHome.untrusted.sid, decided.pnpmHome.untrusted.rights], [join(local, "pnpm"), "S-1-1-0", "0x001301BF"]);
+		// The walk reports the component as Windows PowerShell's GetFullPath resolves it
+		// (long form); the fixture's tmpdir may be an 8.3 short path such as RUNNER~1.
+		assert.equal(decided.pnpmHome.path, join(local, "pnpm"), "the configured folder is kept as the user's environment spells it");
+		assert.deepEqual([realpathSync.native(decided.pnpmHome.untrusted.at), decided.pnpmHome.untrusted.sid, decided.pnpmHome.untrusted.rights],
+			[realpathSync.native(join(local, "pnpm")), "S-1-1-0", "0x001301BF"]);
 		assert.equal(decided.env, env, "the environment is unchanged");
 		const plan = planPreflight({ platform: "win32", arch: "x64", node: { available: false }, pnpm: { available: false }, pi: { available: false }, shell: { available: false },
 			gentleAi: { available: false }, go: { available: false }, globalBin: { available: false }, setup: false, pnpmHome: decided.pnpmHome });

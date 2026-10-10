@@ -85,10 +85,13 @@ const probeNames = ["node", "pnpm", "pi", "shell", "gentleAi", "go", "globalBin"
  * { available: true, recoverable: true } for the pinned stack this pnpm installed
  * whose setup did not finish (only its setup is then planned).
  * Version values are exact stable versions, not raw arbitrary command output.
- * On Windows the wizard adds pnpmHome, its PNPM_HOME decision (windowsPnpmHome).
+ * On Windows the wizard passes pnpmHome, its PNPM_HOME decision (windowsPnpmHome),
+ * which the inventory keeps. A blocked decision runs no probe at all: the user's
+ * tools would otherwise run with that PNPM_HOME's bin first on PATH.
  */
-export async function collectInventory({ platform, arch, probes = {} }) {
-	const inventory = { platform, arch };
+export async function collectInventory({ platform, arch, probes = {}, pnpmHome }) {
+	const inventory = { platform, arch, ...(pnpmHome === undefined || pnpmHome === null ? {} : { pnpmHome }) };
+	if (pnpmHomeBlocker(inventory)) return inventory;
 	for (const name of probeNames) {
 		try {
 			inventory[name] = probes[name] ? await probes[name]() : { available: null };
@@ -103,6 +106,16 @@ export async function collectInventory({ platform, arch, probes = {} }) {
 const MAIN_BUILD = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-main\.[0-9a-f]{12}$/;
 function plainRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+/** Windows only: the blocker of a PNPM_HOME decision that is untrusted, or whose
+ * walk could not finish (S6), with the plan's record of it; null otherwise.
+ */
+function pnpmHomeBlocker({ platform, pnpmHome: home }) {
+	if (platform !== "win32" || !plainRecord(home)) return null;
+	if (home.failed === true) return { blocker: { code: "unknown-tool", tool: "pnpmHome" } };
+	if (home.available !== true || !plainRecord(home.untrusted) || typeof home.path !== "string") return null;
+	return { blocker: { code: "untrusted-pnpm-home", tool: "pnpmHome" },
+		record: { status: "untrusted", path: home.path, source: home.source === "user" ? "user" : "default" } };
 }
 function versionParts(version) {
 	if (typeof version !== "string" || !/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) return null;
@@ -151,6 +164,9 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 	if (!supportedTarget) {
 		return { tools, blockers: [{ code: "unsupported-target", tool: "target" }], actions, ready: false };
 	}
+	// A blocked Windows PNPM_HOME decision: no probe ran, so it is the only blocker.
+	const homeBlocked = pnpmHomeBlocker(inventory);
+	if (homeBlocked) return { tools: homeBlocked.record ? { pnpmHome: homeBlocked.record } : {}, blockers: [homeBlocked.blocker], actions, ready: false };
 	// An installed Gentle Shell whose owner (pnpm or npm) is known is updated with
 	// that package manager instead of blocking: older, unusable or main-channel
 	// versions on release, and any version on main. A current pnpm-owned Shell
@@ -231,14 +247,10 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 	record("globalBin", bin?.available === false ? "unavailable" : binKnown ? (bin.onPath ? "reusable" : "needs-setup") : "unknown");
 	// Windows only: the PNPM_HOME decision the wizard made before probing (S6,
 	// windowsPnpmHome). A passing user or default folder changes nothing here; a
-	// private one is recorded for the runner and the plan copy; an untrusted one, or
-	// a walk that could not finish, blocks.
+	// private one is recorded for the runner and the plan copy (a blocked one
+	// returned above).
 	const home = platform === "win32" && plainRecord(inventory.pnpmHome) ? inventory.pnpmHome : null;
-	if (home?.failed === true) blockers.push({ code: "unknown-tool", tool: "pnpmHome" });
-	else if (home?.available === true && plainRecord(home.untrusted) && typeof home.path === "string") {
-		tools.pnpmHome = { status: "untrusted", path: home.path, source: home.source === "user" ? "user" : "default" };
-		blockers.push({ code: "untrusted-pnpm-home", tool: "pnpmHome" });
-	} else if (home?.available === true && home.source === "private" && typeof home.path === "string" && typeof home.rejected?.path === "string") {
+	if (home?.available === true && home.source === "private" && typeof home.path === "string" && typeof home.rejected?.path === "string") {
 		const finding = Object.fromEntries(["check", "at", "sid", "account", "rights"]
 			.filter((key) => typeof home.rejected[key] === "string").map((key) => [key, home.rejected[key]]));
 		tools.pnpmHome = { status: "private", path: home.path, default: home.rejected.path, finding };

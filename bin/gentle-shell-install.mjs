@@ -4,10 +4,10 @@ import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { collectInventory, planPreflight } from "../scripts/installer-preflight.mjs";
+import { collectInventory, planPreflight, pnpmGlobalBin } from "../scripts/installer-preflight.mjs";
 import { createProbes, hostAdapters, userEnvironment } from "../scripts/installer-probes.mjs";
 import { acquireGo } from "../scripts/installer-downloads.mjs";
-import { goFirstEnvironment, lookPath, packageNativeGentleAi, pnpmInvocation, runStandardInstall } from "../scripts/installer-runner.mjs";
+import { childEnvironment, goFirstEnvironment, lookPath, packageNativeGentleAi, pnpmInvocation, runStandardInstall } from "../scripts/installer-runner.mjs";
 import { createInstallerServer } from "../scripts/installer-server.mjs";
 import { configHome, mainChannelAdapter, runUpgrade } from "../scripts/main-channel.mjs";
 import { ensureWindowsPnpmHome, windowsWizardEnvironment } from "../scripts/installer-windows.mjs";
@@ -121,6 +121,15 @@ export async function runnerEnvironment({ platform, env, fs }) {
 	return { ...user, PATH: [posix.dirname(wizard.command), ...rest].join(posix.delimiter) };
 }
 
+/** An update's children: with a private Windows PNPM_HOME, the runner children's
+ * environment (pnpm's folders, TEMP and TMP inside it); a pinned Go first on PATH.
+ */
+export function upgradeEnvironment({ platform, env, pnpmHome, goPath }) {
+	const globalBin = platform === "win32" && pnpmHome?.source === "private" ? pnpmGlobalBin({ platform, env }) : null;
+	const base = globalBin ? childEnvironment(env, platform, globalBin, { privateHome: true }) : env;
+	return goPath ? goFirstEnvironment(base, platform, goPath) : base;
+}
+
 async function main() {
 	const { platform, arch, env } = process;
 	const { run, fs } = hostAdapters();
@@ -141,8 +150,7 @@ async function main() {
 		collectPlan: async (channel) => {
 			const { env: wizardEnv, pnpmHome } = decide();
 			// Fresh probes every time: createProbes caches its global package listing.
-			const inventory = await collectInventory({ platform, arch, probes: createProbes({ platform, env: wizardEnv, run, fs, pnpmHome }) });
-			if (pnpmHome) inventory.pnpmHome = pnpmHome;
+			const inventory = await collectInventory({ platform, arch, probes: createProbes({ platform, env: wizardEnv, run, fs, pnpmHome }), pnpmHome });
 			return { inventory, plan: planPreflight(inventory, { channel }) };
 		},
 		runInstall: async (request, log) => {
@@ -166,7 +174,7 @@ async function main() {
 			acquireGo: () => acquireGo({ root: join(configHome(ctx), "tools", "go"), platform, arch }),
 			// A pinned Go goes first on the PATH of the upgrade's children only.
 			upgradeShell: async ({ channel, packageRoot, currentVersion, goPath }) => {
-				const upgradeEnv = goPath ? goFirstEnvironment(runnerEnv, platform, goPath) : runnerEnv;
+				const upgradeEnv = upgradeEnvironment({ platform, env: runnerEnv, pnpmHome, goPath });
 				return (await runUpgrade({
 					args: ["--channel", channel],
 					ctx,

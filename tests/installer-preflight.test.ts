@@ -586,3 +586,37 @@ test("an untrusted Windows PNPM_HOME, or one that could not be checked, blocks b
 	}
 	assert.equal(planPreflight({ ...clean("win32"), pnpmHome: cases[0][0] }).tools.pnpmHome.status, "untrusted");
 });
+
+// R1: a blocked Windows PNPM_HOME decision means no probe runs at all; the plan
+// carries only that blocker.
+test("a blocked Windows PNPM_HOME decision runs no probe and plans only that blocker", async () => {
+	const cases = [
+		[{ available: true, path: W_DEFAULT, source: "default", untrusted: weakFinding, installed: true }, { code: "untrusted-pnpm-home", tool: "pnpmHome" }],
+		[{ available: true, path: "D:\\pnpm", source: "user", untrusted: weakFinding }, { code: "untrusted-pnpm-home", tool: "pnpmHome" }],
+		[{ available: null, failed: true }, { code: "unknown-tool", tool: "pnpmHome" }],
+	] as const;
+	for (const [pnpmHome, blocker] of cases) {
+		const called: string[] = [];
+		const probes = Object.fromEntries(["node", "pnpm", "pi", "shell", "gentleAi", "go", "globalBin", "setup"]
+			.map((name) => [name, async () => { called.push(name); return { available: null }; }]));
+		const inventory = await collectInventory({ platform: "win32", arch: "x64", probes, pnpmHome });
+		assert.deepEqual(called, [], JSON.stringify(pnpmHome));
+		assert.deepEqual(inventory.pnpmHome, pnpmHome);
+		const plan = planPreflight(inventory);
+		assert.deepEqual([plan.blockers, plan.actions, plan.ready], [[blocker], [], false]);
+		// Even with every other tool unknown, that blocker stands alone.
+		assert.deepEqual(planPreflight({ ...clean("win32"), node: { available: null }, pi: { available: null }, pnpmHome }).blockers, [blocker]);
+	}
+	// A passing or private decision still runs every probe.
+	for (const pnpmHome of [{ available: true, path: W_DEFAULT, source: "default" },
+		{ available: true, path: W_PRIVATE, source: "private", rejected: { path: W_DEFAULT, ...weakFinding } }]) {
+		const called: string[] = [];
+		await collectInventory({ platform: "win32", arch: "x64", probes: { node: async () => { called.push("node"); return absent; } }, pnpmHome });
+		assert.deepEqual(called, ["node"]);
+	}
+	// POSIX ignores a decision record.
+	const posixCalled: string[] = [];
+	await collectInventory({ platform: "linux", arch: "x64", probes: { node: async () => { posixCalled.push("node"); return absent; } },
+		pnpmHome: { available: null, failed: true } });
+	assert.deepEqual(posixCalled, ["node"]);
+});

@@ -330,8 +330,9 @@ No-process gates, all returning `blocked`:
 Every child process receives the user's environment plus `PNPM_HOME` and
 `$PNPM_HOME/bin` first on PATH. With a private Windows PNPM_HOME, the children
 also get `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` under it
-(unless the user set them), and the first step, `prepare-pnpm-home`, claims
-that folder before any command ([Windows PNPM_HOME](#windows-pnpm_home)).
+(unless the user set them) and `TEMP`/`TMP` set to its `tmp` folder, and the
+first step, `prepare-pnpm-home`, claims that folder before any command
+([Windows PNPM_HOME](#windows-pnpm_home)).
 
 Pre-install checks, returning `blocked` on a false result or adapter error:
 
@@ -1275,6 +1276,10 @@ yet (held to the strict depth-0 mask).
 | Not set: `%LOCALAPPDATA%\pnpm` | Fails, and something is installed there | Blocked: `untrusted-pnpm-home`. |
 | Any | The walk cannot finish (policy, PowerShell) | Blocked: `unknown-tool` for `pnpmHome`. |
 
+A blocked decision (`untrusted-pnpm-home`, or `unknown-tool` for `pnpmHome`)
+runs no probe at all: the node probe would otherwise run the user's npm with
+that PNPM_HOME's `bin` first on PATH. The plan then holds only that blocker.
+
 "Nothing is installed" has one exact meaning: `%LOCALAPPDATA%\pnpm` does not
 exist, or it is a real directory (not a link) with no entries at all. Any
 entry, even an empty `store` folder or a pnpm config file, counts as an
@@ -1300,8 +1305,17 @@ uses the bootstrap claim's exact statements: owner set to the user, a
 protected DACL with FullControl only for the user, SYSTEM and Administrators,
 then a readback of the protection, the owner and every ACE. An empty existing
 folder gets the same DACL; a marked one is kept as it is. Then the marker is
-written and the folder is walked again. Any failure stops the installation
+written, a `tmp` folder is created inside it (a real directory, never a link),
+and the folder and `tmp` are walked again. Any failure stops the installation
 before any command (`prepare-pnpm-home`).
+
+The installer's children, and an update's `gentle-shell upgrade` children, get
+`TEMP` and `TMP` set to that `tmp` folder. It inherits the protected DACL, so
+a postinstall's `os.tmpdir()` stays private: the Windows Gentle AI source
+build creates its `gai-` directory there and runs `gentle-ai.exe` from it
+before publishing it. A default `%TEMP%` lives under `%LOCALAPPDATA%`, which
+another account may write. These values are never persisted, and nothing
+changes outside private mode or on POSIX.
 
 `pnpm setup` persists the folder. pnpm 11.1.1's `setup` reads its home from
 the `PNPM_HOME` environment variable (`getDataDir`) and, on Windows, writes it
@@ -1327,6 +1341,16 @@ Gentle Shell's later `gentle-shell upgrade`, still use pnpm's default config
 and cache folders under `%LOCALAPPDATA%` unless the user configures them. The
 installer protects its own run and the binaries it persists; it does not make
 the rest of a writable `%LOCALAPPDATA%` safe.
+
+Accepted risk (user decision): the installer never creates or runs its own
+binaries in a folder another account can change. The user's own tools are
+used the way the user already uses them: a Node.js, npm, Go, Pi or npm-owned
+Gentle Shell that the plan reuses or updates may live in such a folder (an
+npm global prefix under `%APPDATA%`, for example), and the installer runs it
+there without walking it, as any terminal would. Only pnpm, the installer's own
+runner, and the Node.js that `bootstrap.cmd` runs are held to the walk. A
+notice in the plan that names such a folder, its principal and rights is a
+follow-up; until then this paragraph is the disclosure.
 
 A pnpm whose storage fails the walk is never run anywhere. That includes the
 wizard probe's `--version` of the user's own pnpm next to the bootstrap's:

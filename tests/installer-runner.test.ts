@@ -10,6 +10,7 @@ import {
 	PI_INSTALL_VERSION,
 	PI_PACKAGE as PI_PACKAGE_NAME,
 	blockedReasons,
+	childEnvironment,
 	failedSteps,
 	genuineNpm,
 	packageNativeGentleAi,
@@ -1926,4 +1927,20 @@ test("exported blocked reasons and failed steps match what the scenarios observe
 	// Every reason is reached; only the single-manager add failures have no scenario above.
 	assert.deepEqual(blockedReasons.filter((reason) => !observed.reasons.has(reason)), []);
 	assert.deepEqual(failedSteps.filter((step) => !observed.steps.has(step)), ["persist-npm", "persist-pnpm"]);
+});
+
+// R2: in private mode the installer's children also get TEMP and TMP inside the
+// claimed private home, so a postinstall's os.tmpdir() (the Gentle AI source
+// build) never uses a %LOCALAPPDATA%\Temp another account may write.
+test("childEnvironment puts TEMP and TMP under a private Windows PNPM_HOME only", () => {
+	const globalBin = { pnpmHome: W_PNPM_HOME, path: W_BIN, onPath: false };
+	const base = { Path: "C:\\Windows", Temp: "C:\\Users\\u\\AppData\\Local\\Temp", TMP: "C:\\Users\\u\\AppData\\Local\\Temp" };
+	const isolated = childEnvironment(base, "win32", globalBin, { privateHome: true });
+	const temps = (env: Record<string, string>) => Object.entries(env).filter(([key]) => /^(TEMP|TMP)$/i.test(key));
+	assert.deepEqual(temps(isolated), [["TEMP", `${W_PNPM_HOME}\\tmp`], ["TMP", `${W_PNPM_HOME}\\tmp`]], "one key each, any spelling replaced");
+	assert.deepEqual(temps(childEnvironment(base, "win32", globalBin)), [["Temp", base.Temp], ["TMP", base.TMP]], "unchanged outside private mode");
+	const posix = { PATH: "/usr/bin", TMPDIR: "/tmp/x" };
+	assert.deepEqual(childEnvironment(posix, "linux", { pnpmHome: PNPM_HOME, path: BIN, onPath: false }, { privateHome: true }),
+		{ ...posix, PNPM_HOME, PATH: `${BIN}:/usr/bin` }, "POSIX unchanged");
+	assert.equal(base.Temp, "C:\\Users\\u\\AppData\\Local\\Temp", "the caller's env is not modified");
 });

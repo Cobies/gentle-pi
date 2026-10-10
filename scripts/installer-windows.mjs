@@ -203,7 +203,7 @@ export function verifyWindowsStorage(path, env, processAdapter = windowsProcessC
 
 // S6: the wizard's PNPM_HOME on Windows. pnpm runs and persists binaries there,
 // so it gets the same walk as the bootstrap's tools directory before consent.
-export const privatePnpmHome = Object.freeze({ directory: ".pnpm", marker: ".gentle-shell-pnpm-home", text: "gentle-pi private pnpm home" });
+export const privatePnpmHome = Object.freeze({ directory: ".pnpm", marker: ".gentle-shell-pnpm-home", text: "gentle-pi private pnpm home", temp: "tmp" });
 const hostHomeFs = Object.freeze({
 	/** "missing", "directory" or "file" (neither a link), or "other". */
 	kind(path) {
@@ -306,7 +306,8 @@ export function windowsWizardEnvironment({ env, ...adapters }) {
 // The private PNPM_HOME, after consent: created, or an empty one adopted, with the
 // bootstrap claim's protected DACL (owner and FullControl for the invoking SID,
 // SYSTEM and Administrators only), read back, then marked. A marked one is kept
-// as it is. Anything else is `foreign` and never changed.
+// as it is. Anything else is `foreign` and never changed. Either way its `tmp`
+// folder (the children's TEMP/TMP) is created inside it, inheriting that DACL.
 const pnpmHomeClaim = String.raw`
 $ErrorActionPreference = 'Stop';
 $target = $null; $created = $false;
@@ -335,17 +336,19 @@ try {
     foreach ($rule in $verified.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) { if ($rule.AccessControlType -ne 'Allow' -or @($me.Value,'S-1-5-18','S-1-5-32-544') -notcontains $rule.IdentityReference.Value) { throw 'private-ace' } };
     $null = New-Item -ItemType File -Path $marker -Value 'gentle-pi private pnpm home';
   };
+  $temp = Join-Path $target 'tmp';
+  if (Test-Path -LiteralPath $temp) { $folder = Get-Item -LiteralPath $temp -Force; if (-not $folder.PSIsContainer -or ($folder.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'foreign' } } else { $null = New-Item -ItemType Directory -Path $temp };
   $result
 } catch {
   if ($created) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue };
   if ($_.Exception.Message -cmatch '^(policy|foreign|protected-dacl|private-owner|private-ace)$') { 'unsafe:' + $_.Exception.Message } else { throw }
 }
 `;
-/** Claims the private PNPM_HOME (pnpmHomeClaim), then walks it like any storage.
- * Returns "claimed" or "kept"; anything else throws.
+/** Claims the private PNPM_HOME (pnpmHomeClaim), then walks it and its `tmp`
+ * folder like any storage. Returns "claimed" or "kept"; anything else throws.
  */
-export function ensureWindowsPnpmHome(home, env, { processAdapter = windowsProcessCheck, storage = verifyWindowsStorage } = {}) {
-	if (process.platform !== "win32") throw new Error("Native Windows storage verification unavailable");
+export function ensureWindowsPnpmHome(home, env, { processAdapter = windowsProcessCheck, storage = verifyWindowsStorage, platform = process.platform } = {}) {
+	if (platform !== "win32") throw new Error("Native Windows storage verification unavailable");
 	if (!win32.isAbsolute(home) || home.startsWith("\\\\")) throw new Error("Unsafe Windows storage path");
 	const output = windowsPowerShell(env, pnpmHomeClaim, { GENTLE_WINDOWS_PNPM_HOME: home }, processAdapter);
 	if (output !== "claimed" && output !== "kept") {
@@ -353,6 +356,7 @@ export function ensureWindowsPnpmHome(home, env, { processAdapter = windowsProce
 		throw Object.assign(new Error("Windows PNPM_HOME claim rejected"), check ? { check } : {});
 	}
 	storage(home, env);
+	storage(win32.join(home, privatePnpmHome.temp), env);
 	return output;
 }
 

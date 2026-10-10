@@ -812,3 +812,17 @@ test("Windows: a private PNPM_HOME not created yet holds no global packages, so 
 	assert.equal(existing.calls.length, 1);
 	assert.equal(existing.calls[0].env.PNPM_HOME, W_PRIVATE);
 });
+
+test("Windows: with a blocked PNPM_HOME decision the real probes run no command and the plan blocks", async () => {
+	const pnpmHome = { available: true, path: `${W_LOCAL}\\pnpm`, source: "default", installed: true,
+		untrusted: { check: "target-acl-mask", at: `${W_LOCAL}\\pnpm`, sid: "S-1-5-21-1", rights: "0x001301BF" } };
+	const env = { LOCALAPPDATA: W_LOCAL, USERPROFILE: "C:\\Users\\u", Path: `${W_LOCAL}\\pnpm\\bin;${W_NODE_DIR}`, PATHEXT: ".COM;.EXE;.BAT;.CMD",
+		GENTLE_INSTALL_PNPM_NODE: W_TOOLS_NODE, GENTLE_INSTALL_PNPM_ENTRY: W_TOOLS_ENTRY };
+	const walked: string[] = [];
+	const h = probes({ platform: "win32", env, pnpmHome, storage: (file) => { walked.push(file); },
+		files: [W_NODE, `${W_NODE_DIR}\\npm.cmd`, W_NPM_CLI, `${W_LOCAL}\\pnpm\\bin\\npm.cmd`], texts: { [`${W_NODE_DIR}\\npm.cmd`]: nodeNpmCmd },
+		results: { [`${W_NODE} --version`]: { code: 0, stdout: "v24.18.0\r\n" }, [`${W_NODE} ${W_NPM_CLI} --version`]: { code: 0, stdout: "11.6.2\r\n" } } });
+	const inventory = await collectInventory({ platform: "win32", arch: "x64", probes: h.probes, pnpmHome });
+	assert.deepEqual([h.calls, walked], [[], []], "no command runs and nothing is walked");
+	assert.deepEqual(planPreflight(inventory).blockers, [{ code: "untrusted-pnpm-home", tool: "pnpmHome" }]);
+});

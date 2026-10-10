@@ -222,15 +222,21 @@ function envValue(env, name, platform) {
  * With a private Windows PNPM_HOME (S6), pnpm's config, cache and state move into
  * it too, unless the user set those folders: pnpm otherwise keeps them under
  * %LOCALAPPDATA%, which another principal may write, and trusts its cached registry
- * metadata for exact versions. Only these children get them; nothing persists them.
+ * metadata for exact versions. TEMP and TMP always move to its `tmp` folder
+ * (created by prepare-pnpm-home), so a postinstall's os.tmpdir(), such as the
+ * Gentle AI source build, stays private. Only these children get them; nothing
+ * persists them.
  */
 export function childEnvironment(env, platform, globalBin, { privateHome = false } = {}) {
 	const path = platform === "win32" ? win32 : posix;
 	const key = pathKeyOf(env, platform);
 	const rest = String(env[key] ?? "").split(path.delimiter).filter((entry) => entry.length > 0);
-	const xdg = platform === "win32" && privateHome ? Object.fromEntries([["XDG_CONFIG_HOME", ".config"], ["XDG_CACHE_HOME", ".cache"], ["XDG_STATE_HOME", ".state"]]
+	const isolate = platform === "win32" && privateHome;
+	const xdg = isolate ? Object.fromEntries([["XDG_CONFIG_HOME", ".config"], ["XDG_CACHE_HOME", ".cache"], ["XDG_STATE_HOME", ".state"]]
 		.filter(([name]) => envValue(env, name, platform) === undefined).map(([name, folder]) => [name, win32.join(globalBin.pnpmHome, folder)])) : {};
-	return { ...env, PNPM_HOME: globalBin.pnpmHome, ...xdg, [key]: [globalBin.path, ...rest].join(path.delimiter) };
+	const temp = isolate ? win32.join(globalBin.pnpmHome, "tmp") : null;
+	const kept = isolate ? Object.fromEntries(Object.entries(env).filter(([name]) => !/^(?:TEMP|TMP)$/i.test(name))) : env;
+	return { ...kept, PNPM_HOME: globalBin.pnpmHome, ...xdg, ...(temp ? { TEMP: temp, TMP: temp } : {}), [key]: [globalBin.path, ...rest].join(path.delimiter) };
 }
 
 /** A build child's env: `env` with the pinned Go's bin directory first on PATH. */
