@@ -25,6 +25,16 @@ export { PI_INSTALL_VERSION };
 export const PI_PACKAGE = "@earendil-works/pi-coding-agent";
 export const SHELL_PACKAGE = "gentle-pi";
 
+/** One pnpm 11 global group (`pnpm add -g a,b`) of the installer's Pi and a
+ * gentle-pi spec: pnpm resolves gentle-pi's optional peer Pi inside its own
+ * group, so only then is the Pi beside gentle-pi (the one the launcher runs)
+ * the pin instead of the latest Pi. pnpm replaces any global group that already
+ * holds Pi. Null for a spec with a comma, which pnpm would split.
+ */
+export function piGroup(spec) {
+	return typeof spec === "string" && spec.length > 0 && !spec.includes(",") ? `${PI_PACKAGE}@${PI_INSTALL_VERSION},${spec}` : null;
+}
+
 /** Every `reason` a `blocked` outcome can carry (for host guidance; no behavior). */
 export const blockedReasons = Object.freeze([
 	"invalid-request",
@@ -42,6 +52,7 @@ export const blockedReasons = Object.freeze([
 	"global-list-unavailable",
 	"existing-stack",
 	"existing-stack-unverified",
+	"pnpm-pi-newer",
 ]);
 /** Every `failedStep` a `failed` outcome can carry (for host guidance; no behavior). */
 export const failedSteps = Object.freeze([
@@ -121,9 +132,11 @@ const goActions = ["acquire-go", "verify-go"];
 // saw a recoverable setup), so only setup and the optional PATH step remain.
 const recoveryActions = ["setup-shell", "verify-readiness"];
 // Runtime persistence is one of these exact sets planPreflight emits, or nothing:
-// bootstrap-only Node, or a persistent Node missing npm and/or pnpm (one add -g).
+// bootstrap-only Node (with pnpm, or only npm next to a persistent pnpm), or a
+// persistent Node missing npm and/or pnpm (one add -g).
 const persistenceVariants = Object.freeze([
 	["persist-node", "persist-package-managers", "configure-npm-prefix"],
+	["persist-node", "persist-npm", "configure-npm-prefix"],
 	["persist-package-managers"],
 	["persist-npm"],
 	["persist-pnpm"],
@@ -515,6 +528,43 @@ function notListed(stdout, name) {
 		.some((field) => plainObject(project[field]) && Object.hasOwn(project[field], name))) ? "existing-stack" : true;
 }
 
+/** Shell-only pre-install `list -g --json` (after notListed): the grouped add
+ * replaces a Pi pnpm lists, so only one at the pin or older may be listed;
+ * "pnpm-pi-newer" otherwise, never a downgrade.
+ */
+function noNewerPi(stdout) {
+	for (const project of JSON.parse(stdout)) {
+		for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
+			const entry = plainObject(project[field]) && Object.hasOwn(project[field], PI_PACKAGE) ? project[field][PI_PACKAGE] : null;
+			if (entry === null) continue;
+			const version = entry?.version;
+			if (version !== PI_INSTALL_VERSION && (stable(version) === null || atLeast(version, PI_INSTALL_VERSION))) return "pnpm-pi-newer";
+		}
+	}
+	return true;
+}
+
+/** The version of the Pi the launcher runs from gentle-pi at `root`: Node's
+ * resolution from gentle-pi, nested in its node_modules first, then beside it
+ * (where pnpm 11 links its peer). Null when neither is a readable Pi package.
+ */
+export async function adjacentPiVersion(root, platform, fs) {
+	const path = platform === "win32" ? win32 : posix;
+	const nested = path.join(root, "node_modules", PI_PACKAGE, "package.json");
+	const beside = path.join(path.dirname(root), PI_PACKAGE, "package.json");
+	for (const file of [nested, beside]) {
+		const text = await fs.readText(file).catch(() => null);
+		if (text === null) continue;
+		try {
+			const manifest = JSON.parse(text);
+			return manifest?.name === PI_PACKAGE && typeof manifest.version === "string" ? manifest.version : null;
+		} catch {
+			return null;
+		}
+	}
+	return null;
+}
+
 /** Pre-install `list -g --json`: true when neither package is listed in any
  * project, "existing-stack" when one is, false when the shape is unknown.
  */
@@ -525,10 +575,11 @@ function noExistingStack(stdout) {
 }
 
 /** Installed gentle-pi root from `list -g --json`, confined under PNPM_HOME.
- * Exactly one listed project may own gentle-pi, and Pi must resolve beside it;
+ * Exactly one listed project may own gentle-pi, Pi must be listed beside it at
+ * the pin, and the Pi the launcher runs from that root must be the pin too;
  * other projects (such as the persisted npm and pnpm) are ignored.
  */
-async function verifiedPackageRoot(stdout, pnpmHome, platform, fs, shellVersion = requirements.shell, requirePi = true) {
+async function verifiedPackageRoot(stdout, pnpmHome, platform, fs, shellVersion = requirements.shell) {
 	const path = platform === "win32" ? win32 : posix;
 	const projects = JSON.parse(stdout);
 	if (!Array.isArray(projects)) return null;
@@ -537,10 +588,11 @@ async function verifiedPackageRoot(stdout, pnpmHome, platform, fs, shellVersion 
 	if (!plainObject(dependencies)) return null;
 	const pi = dependencies[PI_PACKAGE];
 	const shell = dependencies[SHELL_PACKAGE];
-	if ((requirePi && pi?.version !== PI_INSTALL_VERSION) || shell?.version !== shellVersion) return null;
+	if (pi?.version !== PI_INSTALL_VERSION || shell?.version !== shellVersion) return null;
 	if (typeof shell.path !== "string" || !path.isAbsolute(shell.path)) return null;
 	const [root, home] = [await fs.realpath(shell.path), await fs.realpath(pnpmHome)];
-	return contains(home, root, platform) ? root : null;
+	if (!contains(home, root, platform)) return null;
+	return (await adjacentPiVersion(root, platform, fs)) === PI_INSTALL_VERSION ? root : null;
 }
 
 /** A stack this pnpm installed whose setup may only be rerun (setup recovery):
@@ -784,7 +836,9 @@ export async function runStandardInstall(request, adapters) {
 			: shellOnly
 			? ["check-existing-shell", "global-list-unavailable", async () => {
 				const result = await list();
-				return succeeded(result) && notListed(String(result.stdout ?? ""), SHELL_PACKAGE);
+				if (!succeeded(result)) return false;
+				const verdict = notListed(String(result.stdout ?? ""), SHELL_PACKAGE);
+				return verdict === true ? noNewerPi(String(result.stdout ?? "")) : verdict;
 			}]
 			: recovering
 			? ["check-recoverable-stack", "global-list-unavailable", async () => {
@@ -827,21 +881,22 @@ export async function runStandardInstall(request, adapters) {
 	let packageRoot = null;
 	let persistentNode = null;
 	let npmPrefix = null;
+	// One add of only the missing managers (fixed versions only: never a blanket build approval).
+	const addOnly = ids.find((id) => ["persist-package-managers", "persist-npm", "persist-pnpm"].includes(id));
+	const addManagers = [addOnly, async () => succeeded(await runPnpm(["add", "-g", ...(addNpm ? [`npm@${persistencePins.npm}`] : []),
+		...(addPnpm ? [`pnpm@${persistencePins.pnpm}`] : [])], deadlines.install))];
 	const persistence = [
 		["persist-node", async () => succeeded(await runPnpm(["runtime", "set", "node", persistencePins.node, "-g"], deadlines.install))],
-		// Fixed versions only: never a blanket build approval.
-		["persist-package-managers", async () => succeeded(await runPnpm(["add", "-g", `npm@${persistencePins.npm}`,
-			`pnpm@${persistencePins.pnpm}`], deadlines.install))],
+		// npm, plus pnpm unless a persistent pnpm (never downgraded) is already there.
+		addManagers,
 		["verify-persistent-runtime", async () => (persistentNode = await persistentRuntime(child, platform, globalBin, adapters)) !== null],
 		["check-npm", async () => (await npmCheck()) === true],
 		["configure-npm-prefix", async () => (npmPrefix = await configureNpmPrefix({ node: persistentNode, cli: npmCli, child,
 			platform, globalBin, adapters, storePath: () => runPnpm(["store", "path"], deadlines.probe) })) !== null],
 	];
 	// A persistent Node is never replaced: one add of only the missing managers.
-	const addOnly = ids.find((id) => ["persist-package-managers", "persist-npm", "persist-pnpm"].includes(id));
 	const packageManagers = [
-		[addOnly, async () => succeeded(await runPnpm(["add", "-g", ...(addNpm ? [`npm@${persistencePins.npm}`] : []),
-			...(addPnpm ? [`pnpm@${persistencePins.pnpm}`] : [])], deadlines.install))],
+		addManagers,
 		...(addNpm ? [["check-npm", async () => (await npmCheck()) === true]] : []),
 		...(addPnpm ? [["verify-persistent-pnpm", () => persistentPnpm(child, platform, adapters.nodePath, globalBin, adapters)]] : []),
 	];
@@ -890,8 +945,8 @@ export async function runStandardInstall(request, adapters) {
 			return succeeded(result) && new RegExp(`^go version go${escapeRegExp(goAcquisition.version)} \\S+$`).test(String(result.stdout ?? "").trim());
 		}],
 	] : [];
-	const install = ["install-global", () => addGlobal([...(shellOnly ? [] : [`${PI_PACKAGE}@${PI_INSTALL_VERSION}`]),
-		`${SHELL_PACKAGE}@${requirements.shell}`, `--allow-build=${SHELL_PACKAGE}`], buildEnv())];
+	// Pi and gentle-pi in one group (piGroup), also when only Gentle Shell is missing.
+	const install = ["install-global", () => addGlobal([piGroup(`${SHELL_PACKAGE}@${requirements.shell}`), `--allow-build=${SHELL_PACKAGE}`], buildEnv())];
 	function mainSteps() {
 		const channel = adapters.mainChannel;
 		const ctx = { env, home };
@@ -909,12 +964,12 @@ export async function runStandardInstall(request, adapters) {
 			})],
 			["install-shell-main", withMainDetail(async () => {
 				shellCommit = await channel.resolveCommit(SHELL_REPOSITORY);
-				const tgz = await channel.packShell({ commit: shellCommit, ctx, run: runIn, pnpm, platform });
-				if (!(await addGlobal([tgz, `--allow-build=${SHELL_PACKAGE}`], buildEnv()))) return false;
+				const group = piGroup(await channel.packShell({ commit: shellCommit, ctx, run: runIn, pnpm, platform }));
+				if (group === null || !(await addGlobal([group, `--allow-build=${SHELL_PACKAGE}`], buildEnv()))) return false;
 				const result = await list();
 				if (!succeeded(result)) return false;
 				const root = await verifiedPackageRoot(String(result.stdout ?? ""), globalBin.pnpmHome, platform, adapters.fs,
-					mainVersion(requirements.shell, shellCommit), !shellOnly);
+					mainVersion(requirements.shell, shellCommit));
 				if (root === null) return false;
 				packageRoot = root;
 				return true;
@@ -934,7 +989,7 @@ export async function runStandardInstall(request, adapters) {
 		["verify-global-list", async () => {
 			const result = await list();
 			if (!succeeded(result)) return false;
-			packageRoot = await verifiedPackageRoot(String(result.stdout ?? ""), globalBin.pnpmHome, platform, adapters.fs, requirements.shell, !shellOnly);
+			packageRoot = await verifiedPackageRoot(String(result.stdout ?? ""), globalBin.pnpmHome, platform, adapters.fs);
 			return packageRoot !== null;
 		}],
 		["verify-shell-bin", () => adapters.fs.isFile(path.join(globalBin.path, platform === "win32" ? "gentle-shell.cmd" : "gentle-shell"))],
@@ -969,6 +1024,8 @@ export async function runStandardInstall(request, adapters) {
 				const expected = channel === "main" ? MAIN_VERSION.test(version)
 					: stable(version) !== null && (stable(installed.version) === null || atLeast(version, installed.version));
 				if (!expected || after.owner !== installed.owner || !path.isAbsolute(after.root)) return false;
+				// pnpm updates gentle-pi in one group with the installer's Pi (runUpgrade): that Pi is the one beside it.
+				if (after.owner === "pnpm" && (await adjacentPiVersion(after.root, platform, adapters.fs)) !== PI_INSTALL_VERSION) return false;
 				packageRoot = after.root;
 				return true;
 			}],

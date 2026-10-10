@@ -406,6 +406,10 @@ test("expectedSteps mirrors the runner sequence and every step has a label", () 
 	assert.deepEqual(wizard.expectedSteps(["setup-global-bin", "persist-node", "persist-package-managers", "configure-npm-prefix", "install-pi",
 		"install-shell", "setup-shell", "verify-readiness"]), ["check-global-bin", "check-existing-stack", "persist-node", "persist-package-managers",
 		"verify-persistent-runtime", "check-npm", "configure-npm-prefix", ...base, "persist-path"]);
+	// Next to a persistent pnpm (never downgraded), a bootstrap-only Node persists only npm with it.
+	assert.deepEqual(wizard.expectedSteps(["persist-node", "persist-npm", "configure-npm-prefix", "install-pi", "install-shell", "setup-shell",
+		"verify-readiness"]), ["check-global-bin", "check-existing-stack", "persist-node", "persist-npm", "verify-persistent-runtime", "check-npm",
+		"configure-npm-prefix", ...base]);
 	assert.deepEqual(wizard.expectedSteps(["persist-npm", "install-pi", "install-shell"]),
 		["check-global-bin", "check-existing-stack", "persist-npm", "check-npm", ...base]);
 	assert.deepEqual(wizard.expectedSteps(["persist-pnpm", "install-pi", "install-shell"]),

@@ -161,12 +161,15 @@ A clean target receives these intents in dependency order:
 3. Persist only what is missing. A bootstrap-only reusable Node gets the full
    group, always together: `persist-node` (`persist-runtime`, version
    24.21.0), `persist-package-managers` (`install-global`) and
-   `configure-npm-prefix` (`configure`). A persistent Node is never replaced:
+   `configure-npm-prefix` (`configure`). When pnpm is already persistent
+   (`inventory.pnpm.persistent !== false`, such as a newer pnpm 11 in
+   `$PNPM_HOME/bin`), `persist-npm` replaces `persist-package-managers`, so
+   that pnpm is never replaced or downgraded. A persistent Node is never replaced:
    it gets at most one intent, `persist-npm` (npm 11.19.0) when no usable
    npm resolves (on POSIX a working npm from any version manager is usable), `persist-pnpm` (pnpm 11.1.1) when pnpm is bootstrap-only, or
    `persist-package-managers` when both are missing.
-4. Install Pi globally, then `gentle-pi` globally (its existing postinstall owns
-   native installation). For an existing Shell with missing native binary, call
+4. Install Pi and `gentle-pi` globally in one pnpm group (its existing
+   postinstall owns native installation; see `install-global` below). For an existing Shell with missing native binary, call
    the existing installer instead.
 5. Run normal Shell setup and verify stack readiness. Verification is always
    included, even when all components can be reused.
@@ -299,6 +302,7 @@ No-process gates, all returning `blocked`:
    plan must contain `install-pi`, `install-shell`, `setup-shell` and
    `verify-readiness`, plus optional `setup-global-bin` and at most one exact
    persistence variant: `persist-node` + `persist-package-managers` +
+   `configure-npm-prefix`, `persist-node` + `persist-npm` +
    `configure-npm-prefix`, or `persist-package-managers` alone, or
    `persist-npm` alone, or `persist-pnpm` alone. The
    [setup recovery](#setup-recovery) plan is exactly `setup-shell` and
@@ -372,6 +376,10 @@ Pre-install checks, returning `blocked` on a false result or adapter error:
    caller's plan says. A failed, timed-out or unparseable listing, or an
    unexpected JSON shape, blocks as `global-list-unavailable`. A recovery runs
    `check-recoverable-stack` instead (see [Setup recovery](#setup-recovery)).
+   A shell-only installation runs `check-existing-shell`: pnpm must list no
+   gentle-pi, and a Pi it lists must be at `PI_INSTALL_VERSION` or older, since
+   `install-global` replaces it; a newer one blocks as `pnpm-pi-newer`
+   ([The Pi that Gentle Shell runs](#the-pi-that-gentle-shell-runs)).
 
 Mutating and verification steps, returning `failed` with `failedStep` and the
 `completed` step list. When the plan acquires the pinned Go, `acquire-go` and
@@ -380,15 +388,19 @@ Mutating and verification steps, returning `failed` with `failedStep` and the
 [runtime persistence](#runtime-persistence) steps run next:
 
 1. `install-global`: exactly one
-   `pnpm add -g @earendil-works/pi-coding-agent@1.0.0 gentle-pi@<package version> --allow-build=gentle-pi`.
-   Pi is gentle-pi's optional peer, so both resolve in one command. pnpm 11
-   silently skips global postinstall scripts by default; the package-scoped
-   approval runs only gentle-pi's postinstall, which provisions Gentle AI. No
-   blanket build approval is ever passed.
+   `pnpm add -g @earendil-works/pi-coding-agent@1.0.0,gentle-pi@<package version> --allow-build=gentle-pi`,
+   also when only Gentle Shell is missing. The comma makes Pi and gentle-pi one
+   pnpm global group ([The Pi that Gentle Shell runs](#the-pi-that-gentle-shell-runs)).
+   pnpm 11 silently skips global postinstall scripts by default; the
+   package-scoped approval runs only gentle-pi's postinstall, which provisions
+   Gentle AI. No blanket build approval is ever passed.
 2. `verify-global-list`: `pnpm list -g --depth 0 --json` must report exactly the
    two pinned versions in the single listed project that owns gentle-pi
    (other projects, such as the persisted npm and pnpm, are ignored), and
-   gentle-pi's absolute `path` must resolve inside PNPM_HOME.
+   gentle-pi's absolute `path` must resolve inside PNPM_HOME. The Pi the
+   launcher runs from that real path, as Node resolves it (gentle-pi's own
+   `node_modules` first, then beside gentle-pi), must be a
+   `@earendil-works/pi-coding-agent` package at exactly 1.0.0 too.
 3. `verify-shell-bin`: `$PNPM_HOME/bin/gentle-shell` (`gentle-shell.cmd` on
    Windows) exists.
 4. `verify-gentle-ai`: package-native integrity of the installed package. A
@@ -446,8 +458,10 @@ installation instead of blocking as an existing stack.
 Detection is the setup probe, with the same rule the runner applies
 (`recoverableStackRoot`): the global listing names Pi and gentle-pi exactly
 once each, both in the single project that owns gentle-pi, Pi at exactly
-1.0.0 and gentle-pi at exactly this package's version, and gentle-pi's path
-resolves (realpath) inside PNPM_HOME. Preflight also requires Pi, Shell and
+1.0.0 and gentle-pi at exactly this package's version, gentle-pi's path
+resolves (realpath) inside PNPM_HOME, and the Pi beside gentle-pi is 1.0.0
+(a stack an older installer added as two groups, whose adjacent Pi is pnpm's
+latest, is not recoverable). Preflight also requires Pi, Shell and
 Gentle AI to be `reusable`. Anything else (another version, a second listing,
 a path outside PNPM_HOME, Pi missing) keeps the setup probe unknown, so a
 foreign or other-version stack stays blocked exactly as before.
@@ -481,7 +495,9 @@ For a bootstrap-only Node, the full group runs these fixed steps:
    PNPM_HOME and links `node` into `$PNPM_HOME/bin`.
 2. `persist-package-managers`: `pnpm add -g npm@11.19.0 pnpm@11.1.1`, which
    adds the `npm`, `npx` and `pnpm` shims to `$PNPM_HOME/bin`. No build
-   approval of any kind is passed.
+   approval of any kind is passed. When pnpm is already persistent (a newer
+   pnpm 11 in `$PNPM_HOME/bin`, for example), the plan has `persist-npm`
+   instead: `pnpm add -g npm@11.19.0` only, so that pnpm is never downgraded.
 3. `verify-persistent-runtime`: in the child environment both `node` and `npm`
    must resolve (`exec.LookPath` order) from `$PNPM_HOME/bin`, the node must be
    spawnable (`.exe`/`.com` on Windows) and print `v24.21.0`.
@@ -530,7 +546,8 @@ Pi but never reinstalls or downgrades it, and nothing changes before consent.
 
 | Found | Plan |
 | --- | --- |
-| A compatible Pi (pnpm-global, or any `pi` on PATH whose `pi --version` reports a stable version ≥ the minimum) and no Gentle Shell | Install only Gentle Shell: `pnpm add -g gentle-pi@<version> --allow-build=gentle-pi`, after checking that pnpm lists no gentle-pi (`check-existing-shell`). Pi is left as it is. |
+| A compatible Pi (pnpm-global, or any `pi` on PATH whose `pi --version` reports a stable version ≥ the minimum) and no Gentle Shell | Install Gentle Shell with the installer's Pi in one group, `pnpm add -g @earendil-works/pi-coding-agent@1.0.0,gentle-pi@<version> --allow-build=gentle-pi`, after checking that pnpm lists no gentle-pi and no Pi newer than 1.0.0 (`check-existing-shell`). A Pi from elsewhere (npm, mise, a binary) is left as it is; a pnpm Pi at 1.0.0 or older is replaced by 1.0.0, and the plan says so. |
+| A Pi installed with pnpm and newer than `PI_INSTALL_VERSION`, when the plan would install Gentle Shell or update a pnpm-owned one | Blocked before consent (`pnpm-pi-newer`): pnpm's grouped install would replace it with the pin, and the installer never downgrades it. The guidance names the found version and the way out: remove it with `pnpm remove -g @earendil-works/pi-coding-agent`, then check again. An npm-owned Gentle Shell update or a current Gentle Shell is not blocked. |
 | A Gentle Shell that pnpm or npm owns | `update-shell-release` when it is older, unusable or a main build; `update-shell-main` on the main channel (needs Go). Then `setup-shell`. A missing Pi is installed first (`install-pi`). |
 | A current Gentle Shell that npm owns, on release | Nothing to do. |
 | A Pi older than the minimum that pnpm or npm owns | `update-pi` to `PI_INSTALL_VERSION` with that package manager (`pnpm add -g @earendil-works/pi-coding-agent@<version>` or `npm install -g …`), before any Gentle Shell step: ahead of `install-shell` or `update-shell-*`, or alone when Gentle Shell is current. The plan names the found and target versions and the manager. |
@@ -549,14 +566,17 @@ not detected yet: `gentle-shell upgrade` still runs npm by path). The update run
 the same code as `gentle-shell upgrade --channel <channel>`
 (`check-installed-shell`, `update-shell`), then `verify-updated-shell` requires
 the same owner and a stable version not older than before (release) or a
-`-main.<sha12>` version (main); release also re-runs `verify-gentle-ai`. An
+`-main.<sha12>` version (main), and for pnpm the Pi beside the updated
+gentle-pi at exactly `PI_INSTALL_VERSION`; release also re-runs `verify-gentle-ai`. An
 update never runs `pnpm setup`: the existing installation already has its PATH.
 
 An older Pi uses the same ownership rule with its own package name
 (`<npm root -g>/@earendil-works/pi-coding-agent` for npm, on every platform:
 Windows runs `npm root -g` and `npm install -g` through what `npm.cmd` runs and
 compares roots case-insensitively). Its probe reports
-`owner` only when Pi is older than the minimum, and the plan records the found
+`owner` only when Pi is older than the minimum (or, for a pnpm-global Pi,
+newer than `PI_INSTALL_VERSION`, which blocks as `pnpm-pi-newer` where the
+grouped install would replace it), and the plan records the found
 version and owner in `tools.pi`. Before any change, `check-installed-pi` finds
 Pi again and requires that same version and owner, a stable version below the
 minimum (so the update never downgrades), and for npm an `npm root -g` that
@@ -567,7 +587,9 @@ at `PI_INSTALL_VERSION` or newer, and for npm at the same root. A failure stops
 before any Gentle Shell step. With pnpm 11.1.1, `pnpm add -g` of a newer Pi
 replaces the existing global package in place (its isolated global directory is
 swapped), whether Pi was added alone or together with gentle-pi, so the next run
-sees a single Pi; `npm install -g` replaces it in npm's global root.
+sees a single Pi; `npm install -g` replaces it in npm's global root. The
+following `install-global` adds Pi again in gentle-pi's group, which replaces
+that Pi with the same version.
 
 An older Node.js or incompatible pnpm is never changed or removed, and once the
 bootstrap has its pinned copy the installer never runs it for installation
@@ -589,10 +611,56 @@ adds. Alone, `install-pi` is checked like a shell-only installation:
 `check-existing-pi` requires pnpm to list no Pi, `pnpm add -g` adds it, and
 `verify-installed-pi` requires one pnpm-global Pi at `PI_INSTALL_VERSION` or
 newer. The `pi` probe reads pnpm's global list before PATH, so the next run
-reuses the pnpm-global Pi and no longer looks at the other one. pnpm 11 also
-installs gentle-pi's optional Pi peer next to gentle-pi, and Gentle Shell
-prefers that adjacent Pi over any `pi` on PATH; a terminal's `pi` command may
-still run the older one when it comes first on PATH.
+reuses the pnpm-global Pi and no longer looks at the other one. Gentle Shell
+prefers the Pi beside gentle-pi over any `pi` on PATH
+([The Pi that Gentle Shell runs](#the-pi-that-gentle-shell-runs)); a
+terminal's `pi` command may still run the older one when it comes first on PATH.
+
+### The Pi that Gentle Shell runs
+
+The launcher runs the Pi that Node resolves from gentle-pi (gentle-pi's own
+`node_modules`, then beside it), and only without one the first `pi` on PATH.
+pnpm 11 installs every `pnpm add -g` argument in its own isolated global
+directory and auto-installs gentle-pi's optional peer Pi there at the latest
+version: verified with pnpm 11.1.1 in an isolated PNPM_HOME,
+`pnpm add -g @earendil-works/pi-coding-agent@1.0.0 gentle-pi@4.0.0` lists Pi
+1.0.0 while the Pi beside gentle-pi is 1.1.0. A comma-separated argument is one
+group: `pnpm add -g @earendil-works/pi-coding-agent@1.0.0,gentle-pi@4.0.0`
+puts both in one directory, so the Pi beside gentle-pi is 1.0.0 (a local
+tarball works the same way). `--config.auto-install-peers=false` instead leaves
+gentle-pi with no Pi beside it, so the launcher would run any `pi` on PATH,
+and `--config.overrides` is ignored for global installs.
+
+So every pnpm path adds gentle-pi in one group with Pi `PI_INSTALL_VERSION`:
+`install-global`, `install-shell-main` (`<pi>,<tgz>`; a package path with a
+comma is refused), and `gentle-shell upgrade` (and the wizard's update) with a
+pnpm-owned Gentle Shell. Each then verifies the Pi beside gentle-pi.
+
+pnpm replaces every existing global group that shares a package with the new
+one. A plain `pnpm add -g gentle-pi@<version>` after a grouped install
+therefore removes Pi and its `pi` command, which is why the upgrade groups Pi
+too; and a grouped add replaces a Pi the user installed with pnpm. A pnpm Pi
+newer than the pin is never downgraded: the wizard blocks before consent
+(`pnpm-pi-newer`), the runner blocks if pnpm lists one when it starts, and
+`gentle-shell upgrade` refuses with `upgrade-pi-newer` (exit code 1) before
+building or replacing anything. Keeping a newer pnpm Pi next to a
+pnpm-installed Gentle Shell is not supported; remove it with
+`pnpm remove -g @earendil-works/pi-coding-agent` and Gentle Shell installs its
+own. User decision (2026-10-10): option B, "B (la que recomiendo)": group on
+every pnpm path and block or refuse instead of downgrading a newer pnpm Pi.
+
+### Documented decisions
+
+- `check-npm` failing after `persist-npm` (a reported case) no longer occurs in
+  that setup: on POSIX a working user npm (mise, Volta, asdf and others) is
+  accepted, so `persist-npm` is not planned for it. The failure itself cannot
+  be root-caused without the reporter's `PNPM_HOME`, `pnpm store path` and
+  `readlink -f $PNPM_HOME/bin/npm`, so nothing else changes until that evidence
+  exists.
+- A pnpm 12 in `$PNPM_HOME/bin` keeps blocking before consent (it is never
+  replaced or downgraded): the runner's argv is verified for pnpm 11, and an
+  update would run that pnpm 12 with it. This changes only after pnpm 12 is
+  proven empirically.
 
 ### Main channel
 
@@ -623,8 +691,11 @@ publishes main builds, so main is built on this computer
      a `D:\…` archive path as a remote host and fails with `Cannot connect to D:
      resolve failed`), sets its version to `<version>-main.<sha12>`, removes `prepack` and `prepare`
      (which would run the full test suite), packs it with `pnpm pack` into
-     `<config home>/main/packages/`, runs `pnpm add -g <tgz> --allow-build=gentle-pi`
-     and requires `pnpm list -g` to report that exact version under PNPM_HOME.
+     `<config home>/main/packages/`, runs
+     `pnpm add -g @earendil-works/pi-coding-agent@1.0.0,<tgz> --allow-build=gentle-pi`
+     (one group with the installer's Pi; a path with a comma is refused) and
+     requires `pnpm list -g` to report that exact version under PNPM_HOME, with
+     Pi 1.0.0 beside it.
      Installing `github:` or codeload URLs directly is not used: pnpm runs
      `prepack` for both.
   3. `record-channel`: writes `{"schema":"gentle-shell.channel/v1","channel":"main",
@@ -968,7 +1039,9 @@ With that entry available, the fixed sequence is:
    command is a regular cmd-shim file (as pnpm writes in `$PNPM_HOME` or
    `$PNPM_HOME/bin` when it installs or updates itself), the search starts from
    its `# cmd-shim-target=` path or, without one, the single
-   `"$basedir/<target>" "$@"` it runs. That path only locates the evidence;
+   `"$basedir/<target>" "$@"` it runs. A shim is a script (`#!`) read whole,
+   up to 64 KiB, so a target named after the first 4 KiB is still found; a
+   larger script fails closed. That path only locates the evidence;
    `pnpm --version` must still match it. A standalone pnpm (a Mach-O or ELF
    executable, directly or as that shim target, as mise, asdf and pnpm's own
    installer with `@pnpm/exe` provide) embeds its Node runtime: it skips the

@@ -169,10 +169,16 @@ function head(path, size) {
 // symlink. pnpm 11 names its target in a `# cmd-shim-target=` comment; older
 // shims only run the single `"$basedir/<target>" "$@"` next to the shim. The
 // target is a starting point for the evidence search, not proof: the command
-// itself still has to print the version that evidence names.
+// itself still has to print the version that evidence names. A shim is a
+// script read whole, up to 64 KiB; a larger one fails closed. Anything else,
+// such as a native pnpm, is not a shim.
+const SHIM_LIMIT = 64 * 1024;
 function shimTarget(command) {
 	if (!regular(command)) return null;
-	const text = head(command, 4096).toString("utf8");
+	const bytes = head(command, SHIM_LIMIT + 1);
+	if (bytes.subarray(0, 2).toString("latin1") !== "#!") return null;
+	if (bytes.length > SHIM_LIMIT) throw new Error("Existing pnpm compatibility is unknown: shim larger than 64 KiB");
+	const text = bytes.toString("utf8");
 	const match = /^# cmd-shim-target=(\/[^\r\n]+)$/m.exec(text);
 	if (match) return stat(match[1]) ? match[1] : null;
 	const targets = new Set([...text.matchAll(/"\$basedir\/([^"$`\\]+)"[ \t]+"\$@"/g)]

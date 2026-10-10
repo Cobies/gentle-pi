@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { access, lstat, readFile, realpath, stat } from "node:fs/promises";
 import { posix, win32 } from "node:path";
 import { gentleAiBinaryPath } from "../runtime/gentle-ai-binary.mjs";
-import { pnpmGlobalBin, requirements } from "./installer-preflight.mjs";
+import { PI_INSTALL_VERSION, pnpmGlobalBin, requirements } from "./installer-preflight.mjs";
 import { installOwner } from "./main-channel.mjs";
 import {
 	PI_PACKAGE,
@@ -390,10 +390,15 @@ export function createProbes({ platform, env, run, fs, home, verifyGentleAi = pa
 			return { available: true, version, usable: true, compatible, persistent: false, ...(replaced ? { found } : {}) };
 		},
 		// Only a Pi older than the minimum reports its owner (pnpm or npm): the one the installer updates.
+		// A pnpm-global Pi newer than the installer's pin reports pnpm too: installing Gentle Shell with
+		// pnpm adds the pinned Pi in gentle-pi's global group, which would replace it.
 		async pi() {
 			const pi = await globalPackage(PI_PACKAGE, "pi");
 			const older = (version) => !MAIN_BUILD.test(version) && !atLeast(version, requirements.pi);
-			if (pi.state === "present") return { available: true, version: pi.version, usable: true, ...(older(pi.version) ? { owner: "pnpm" } : {}) };
+			const newer = (version) => !MAIN_BUILD.test(version) && version !== PI_INSTALL_VERSION && atLeast(version, PI_INSTALL_VERSION);
+			if (pi.state === "present") {
+				return { available: true, version: pi.version, usable: true, ...(older(pi.version) || newer(pi.version) ? { owner: "pnpm" } : {}) };
+			}
 			if (pi.state === "absent" || !pi.outsidePnpm) return pi.state === "absent" ? absent() : unknown();
 			// Another installation of Pi: reused as long as it reports a stable version.
 			const command = await lookPath("pi", user, platform, fs);

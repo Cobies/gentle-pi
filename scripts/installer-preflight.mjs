@@ -27,8 +27,9 @@ export const requirements = Object.freeze({
 export const PI_INSTALL_VERSION = "1.0.0";
 
 /** Runtime persisted under PNPM_HOME. Bootstrap-only Node: `pnpm runtime set
- * node <node> -g`, then `pnpm add -g npm@<npm> pnpm@<pnpm>`. Persistent Node:
- * one `pnpm add -g` of only the missing npm and/or bootstrap-only pnpm.
+ * node <node> -g`, then `pnpm add -g npm@<npm> pnpm@<pnpm>`, or only npm when
+ * pnpm is already persistent (never downgraded). Persistent Node: one
+ * `pnpm add -g` of only the missing npm and/or bootstrap-only pnpm.
  * npm 11.19.0 is the npm bundled with Node 24.21.0.
  */
 export const persistencePins = Object.freeze({ node: "24.21.0", npm: "11.19.0", pnpm: requirements.pnpm });
@@ -256,6 +257,15 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 		tools.pnpmHome = { status: "private", path: home.path, default: home.rejected.path, finding };
 	}
 	const missingShell = tools.shell.status === "unavailable";
+	// pnpm 11 adds gentle-pi with the installer's Pi in one global group (so the Pi
+	// beside gentle-pi, which the launcher runs, is PI_INSTALL_VERSION), and that
+	// group replaces a Pi pnpm already installed. A pnpm Pi newer than the pin is
+	// never downgraded: installing Gentle Shell, or updating a pnpm-owned one, blocks.
+	const groupsPi = missingShell || (update !== null && shellSeen.owner === "pnpm");
+	const piParts = piSeen?.owner === "pnpm" ? versionParts(piSeen.version) : null;
+	if (groupsPi && piParts !== null && compareVersions(piParts, versionParts(PI_INSTALL_VERSION)) > 0) {
+		blockers.push({ code: "pnpm-pi-newer", tool: "pi" });
+	}
 	// Setup recovery: the setup probe proved the pinned stack this pnpm installed
 	// (an earlier run stopped in setup), so only the public setup is rerun.
 	const recovering = inventory.setup?.available === true && inventory.setup.recoverable === true &&
@@ -316,13 +326,15 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 	// never persists: the earlier run did that before installing the stack.
 	const node = inventory.node;
 	const persistable = tools.node.status === "reusable" && !recovering;
+	// A persistent pnpm, such as a newer pnpm 11 in $PNPM_HOME/bin, is never replaced.
+	const pnpm = inventory.pnpm?.persistent === false;
 	if (persistable && node.persistent === false) {
 		action("persist-node", "persist-runtime", "node", persistencePins.node);
-		action("persist-package-managers", "install-global", "package-managers");
+		if (pnpm) action("persist-package-managers", "install-global", "package-managers");
+		else action("persist-npm", "install-global", "npm", persistencePins.npm);
 		action("configure-npm-prefix", "configure", "npm-prefix");
 	} else if (persistable) {
 		const npm = node.npm === false;
-		const pnpm = inventory.pnpm?.persistent === false;
 		if (npm && pnpm) action("persist-package-managers", "install-global", "package-managers");
 		else if (npm) action("persist-npm", "install-global", "npm", persistencePins.npm);
 		else if (pnpm) action("persist-pnpm", "install-global", "pnpm", persistencePins.pnpm);
