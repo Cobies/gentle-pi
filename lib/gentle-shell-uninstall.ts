@@ -1,4 +1,5 @@
 import { lstatSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isolatedDir, launcherConfigPath, parseRawLauncherConfig, provisionedEntry, userPiHome } from "./gentle-shell-launcher.ts";
 
@@ -25,6 +26,10 @@ export const SHARED_CONFIG_FILES: readonly string[] = Object.freeze([
 ]);
 
 const HOME_OWNERSHIP_MARKER = ".gentle-shell-home";
+// scripts/installer-downloads.mjs marks each pinned Go version folder with it.
+const GO_MARKER = ".gentle-shell-go";
+const GO_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)(\.(0|[1-9]\d*))?$/;
+const COMMIT = /^[0-9a-f]{40}$/;
 const PACKAGE = "gentle-pi";
 
 export interface SelfUninstallOptions {
@@ -76,16 +81,32 @@ interface Removal {
 	kind: "dir" | "file";
 	/** Remove the parent directory too when this leaves it empty. */
 	pruneParent?: boolean;
+	/** Evidence that Gentle Shell made it; without it the path is kept with this reason. */
+	evidence?: { made: (path: string) => boolean; otherwise: string };
+}
+
+interface Guard {
+	path: string;
+	label: string;
+	/** Whether lying inside `path` is refused too (being it or containing it always is). */
+	inside: boolean;
+}
+
+interface NotTouched {
+	path?: string;
+	label: string;
 }
 
 interface Plan {
 	refusals: string[];
+	/** A removal would reach a protected path: the removal list is not offered at all. */
+	pathRefused: boolean;
 	own: Removal[];
 	kept: string[];
 	shared: Removal[];
 	configHome: string;
 	owner?: PackageManagerOwner;
-	notTouched: string[];
+	notTouched: NotTouched[];
 	manual: string[];
 }
 
@@ -144,6 +165,56 @@ function settingDirectory(env: Record<string, string | undefined>, name: string,
 	return isAbsolute(value) ? value : undefined;
 }
 
+function entries(path: string): string[] {
+	try {
+		return readdirSync(path);
+	} catch {
+		return ["\0unreadable"];
+	}
+}
+
+/** Only what the main channel writes (scripts/main-channel.mjs): gentle-ai/<commit>/gentle-ai[.exe],
+ * packages/gentle-pi-*.tgz, and the .build and .source work folders. */
+function mainChannelLayout(main: string): boolean {
+	return entries(main).every((name) => {
+		const path = join(main, name);
+		if (inspect(path, "dir") !== "ok") return false;
+		if (name === ".build" || name === ".source") return true;
+		if (name === "packages") return entries(path).every((file) => /^gentle-pi-.+\.tgz$/.test(file) && inspect(join(path, file), "file") === "ok");
+		if (name !== "gentle-ai") return false;
+		return entries(path).every((commit) => COMMIT.test(commit) && inspect(join(path, commit), "dir") === "ok"
+			&& entries(join(path, commit)).every((file) => ["gentle-ai", "gentle-ai.exe"].includes(file) && inspect(join(path, commit, file), "file") === "ok"));
+	});
+}
+
+/** Only pinned-Go version folders, each carrying the installer's marker. */
+function pinnedGoOnly(go: string): boolean {
+	return entries(go).every((name) => GO_VERSION.test(name) && inspect(join(go, name), "dir") === "ok" && inspect(join(go, name, GO_MARKER), "file") === "ok");
+}
+
+/** How `real` collides with a guard: it is it, contains it, or (for guards that say so) lies inside it. */
+function collision(real: string, guards: readonly Guard[], platform: string): string | undefined {
+	for (const guard of guards) {
+		const target = canonical(guard.path);
+		const relation = comparable(real, platform) === comparable(target, platform) ? "is"
+			: within(real, target, platform) ? "contains"
+			: guard.inside && within(target, real, platform) ? "lies inside" : undefined;
+		if (relation) return `${relation} ${guard.path} (${guard.label})`;
+	}
+	return undefined;
+}
+
+/** A `.pi` directory (a project's `.pi`, `.pi/gentle-ai`, or the user's `~/.pi`) is never removed or emptied. */
+function piDirectoryCollision(real: string, platform: string, allowedInside: string | undefined): string | undefined {
+	const segments = real.split(/[\\/]+/).filter((segment) => segment !== "");
+	const isPi = (segment: string | undefined) => segment !== undefined && comparable(segment, platform) === ".pi";
+	const exempt = allowedInside !== undefined && comparable(real, platform) === comparable(allowedInside, platform);
+	if (!exempt && isPi(segments.at(-1))) return "is a .pi directory";
+	if (!exempt && segments.slice(0, -1).some(isPi)) return "lies inside a .pi directory";
+	if (inspect(join(real, ".pi"), "dir") !== "missing") return `contains a .pi directory (${join(real, ".pi")})`;
+	return undefined;
+}
+
 /** Whether the main-channel override in `dev-binary.json` points at a build under `<config home>/main/gentle-ai`. */
 function mainChannelRegistration(path: string, configHome: string, platform: string): boolean {
 	try {
@@ -158,31 +229,61 @@ function mainChannelRegistration(path: string, configHome: string, platform: str
 
 async function planSelfUninstall(input: SelfUninstallInput, configHome: string, isolated: string): Promise<Plan> {
 	const { env, homedir, platform } = input;
-	const plan: Plan = { refusals: [], own: [], kept: [], shared: [], configHome, notTouched: [], manual: [] };
+	const plan: Plan = { refusals: [], pathRefused: false, own: [], kept: [], shared: [], configHome, notTouched: [], manual: [] };
 	const configPath = launcherConfigPath(homedir);
+	const shellDirectory = dirname(configPath);
 	const launcherConfig = parseRawLauncherConfig(readText(configPath));
 	const piHome = userPiHome(env, homedir);
+	const gentleAiState = join(homedir, ".gentle-ai");
 	const isolatedReal = canonical(isolated);
 
-	const protectedPaths: [string, string][] = [
-		[homedir, "your home directory"],
-		[join(homedir, ".pi", "agent"), "Pi's default home"],
-		[piHome, "your Pi home"],
-		[configHome, "the Gentle AI config home"],
+	// Every place a removal starts from is checked at its real path, so a symbolic
+	// link (or a symlinked ancestor) never leads it somewhere protected.
+	const guards: Guard[] = [
+		{ path: homedir, label: "your home directory", inside: false },
+		{ path: join(homedir, ".pi", "agent"), label: "Pi's default home", inside: true },
+		...["PI_CODING_AGENT_DIR", "GENTLE_SHELL_USER_PI_HOME"].flatMap((name) => {
+			const value = env[name];
+			return value ? [{ path: value, label: "your Pi home", inside: true }] : [];
+		}),
+		{ path: gentleAiState, label: "Gentle AI's state", inside: true },
 	];
-	for (const [path, label] of protectedPaths) {
-		if (within(isolatedReal, canonical(path), platform)) {
-			plan.refusals.push(`The isolated home ${isolated} is or contains ${path} (${label}); refusing to remove anything.`);
-		}
+	const defaultConfigHome = canonical(join(homedir, ".pi", "gentle-ai"));
+	const candidates = [
+		{
+			who: env.GENTLE_SHELL_HOME ? `GENTLE_SHELL_HOME points at ${isolated}` : `The isolated home ${isolated}`,
+			path: isolated,
+			guards: [...guards, { path: configHome, label: "the Gentle AI config home", inside: true }],
+			allowedInsidePi: undefined,
+		},
+		{
+			who: env.GENTLE_PI_CONFIG_HOME ? `GENTLE_PI_CONFIG_HOME points at ${configHome}` : `The config home ${configHome}`,
+			path: configHome,
+			guards,
+			// Its default location, ~/.pi/gentle-ai, is the one .pi path it may be.
+			allowedInsidePi: defaultConfigHome,
+		},
+		{ who: `The launcher folder ${shellDirectory}`, path: shellDirectory, guards, allowedInsidePi: undefined },
+	];
+	for (const candidate of candidates) {
+		const real = canonical(candidate.path);
+		const reason = collision(real, candidate.guards, platform) ?? piDirectoryCollision(real, platform, candidate.allowedInsidePi);
+		if (reason === undefined) continue;
+		const really = comparable(real, platform) === comparable(resolve(candidate.path), platform) ? "" : ` (really ${real})`;
+		plan.refusals.push(`${candidate.who}${really}, which ${reason}; refusing to remove anything.`);
 	}
 
 	const consider = (removal: Removal) => {
 		const state = inspect(removal.path, removal.kind);
-		if (state === "ok") plan.own.push(removal);
+		if (state === "ok" && removal.evidence && !removal.evidence.made(removal.path)) plan.kept.push(`${removal.path}: ${removal.evidence.otherwise}`);
+		else if (state === "ok") plan.own.push(removal);
 		else if (state === "symlink") plan.kept.push(`${removal.path}: a symbolic link, not followed`);
 		else if (state === "other") plan.kept.push(`${removal.path}: not a ${removal.kind === "dir" ? "directory" : "regular file"}`);
 	};
-	consider({ path: join(configHome, "main"), label: "main-channel builds", kind: "dir" });
+	consider({
+		path: join(configHome, "main"), label: "main-channel builds", kind: "dir",
+		evidence: { made: mainChannelLayout, otherwise: "not Gentle Shell's main-channel layout" },
+	});
 	consider({ path: join(configHome, "channel.json"), label: "recorded update channel", kind: "file" });
 	const devBinary = join(configHome, "dev-binary.json");
 	if (inspect(devBinary, "file") !== "ok" || mainChannelRegistration(devBinary, configHome, platform)) {
@@ -190,7 +291,10 @@ async function planSelfUninstall(input: SelfUninstallInput, configHome: string, 
 	} else {
 		plan.kept.push(`${devBinary}: points at a binary you registered yourself`);
 	}
-	consider({ path: join(configHome, "tools", "go"), label: "Go the installer downloaded for builds", kind: "dir", pruneParent: true });
+	consider({
+		path: join(configHome, "tools", "go"), label: "Go the installer downloaded for builds", kind: "dir", pruneParent: true,
+		evidence: { made: pinnedGoOnly, otherwise: `not only the installer's pinned Go (version folders marked ${GO_MARKER})` },
+	});
 
 	// The default isolated home is Gentle Shell's by location; a GENTLE_SHELL_HOME
 	// directory only with the launcher's ownership marker or setup record.
@@ -207,7 +311,7 @@ async function planSelfUninstall(input: SelfUninstallInput, configHome: string, 
 	}
 
 	const seen = new Set([comparable(isolatedReal, platform), comparable(canonical(piHome), platform)]);
-	plan.notTouched.push(`${piHome}  (your Pi home)`);
+	plan.notTouched.push({ path: piHome, label: "your Pi home" });
 	const customHomes = [typeof launcherConfig.home === "string" && !["link", "isolated", ""].includes(launcherConfig.home) ? launcherConfig.home : undefined];
 	const provisioned = launcherConfig.provisioned;
 	if (typeof provisioned === "object" && provisioned !== null && !Array.isArray(provisioned)) customHomes.push(...Object.keys(provisioned));
@@ -216,9 +320,24 @@ async function planSelfUninstall(input: SelfUninstallInput, configHome: string, 
 		const key = comparable(canonical(home), platform);
 		if (seen.has(key)) continue;
 		seen.add(key);
-		plan.notTouched.push(`${home}  (custom --home home)`);
+		plan.notTouched.push({ path: home, label: "custom --home home" });
 	}
-	plan.notTouched.push(`${join(homedir, ".gentle-ai")}  (Gentle AI's own state)`, "Each project's .pi/gentle-ai folder");
+	plan.notTouched.push({ path: gentleAiState, label: "Gentle AI's own state" }, { label: "Each project's .pi/gentle-ai folder" });
+
+	// Nothing is both removed and not touched: a removal that is, holds or lies
+	// inside a path listed as not touched refuses the whole run.
+	if (plan.refusals.length === 0) {
+		for (const removal of [...plan.own, ...plan.shared]) {
+			const real = canonical(removal.path);
+			for (const kept of plan.notTouched) {
+				if (kept.path === undefined) continue;
+				const target = canonical(kept.path);
+				if (!within(real, target, platform) && !within(target, real, platform)) continue;
+				plan.refusals.push(`${removal.path} would be removed, but it overlaps ${kept.path} (${kept.label}), which is not touched; refusing to remove anything.`);
+			}
+		}
+	}
+	plan.pathRefused = plan.refusals.length > 0;
 
 	plan.manual.push(
 		"Pi: pnpm remove -g @earendil-works/pi-coding-agent (or npm uninstall -g @earendil-works/pi-coding-agent)",
@@ -246,11 +365,12 @@ function removeArgv(owner: PackageManagerOwner): string[] {
 function printPlan(plan: Plan, options: SelfUninstallOptions, interactive: boolean, out: (line: string) => void) {
 	out("Gentle Shell self-uninstall plan");
 	out("Remove Gentle Shell data:");
-	if (plan.own.length === 0) out("  (nothing found)");
-	for (const removal of plan.own) out(`  ${removal.path}  (${removal.label})`);
+	if (plan.pathRefused) out("  (refused, see below)");
+	else if (plan.own.length === 0) out("  (nothing found)");
+	for (const removal of plan.pathRefused ? [] : plan.own) out(`  ${removal.path}  (${removal.label})`);
 	out(`Remove the ${PACKAGE} package:`);
 	out(plan.owner ? `  ${plan.owner.name} ${removeArgv(plan.owner).join(" ")}` : "  (refused, see below)");
-	if (plan.shared.length > 0) {
+	if (plan.shared.length > 0 && !plan.pathRefused) {
 		const disposition = options.includeShared
 			? "removed (--include-shared)"
 			: options.yes || !interactive ? "kept; pass --include-shared to remove it" : "kept unless you accept when asked";
@@ -262,7 +382,7 @@ function printPlan(plan: Plan, options: SelfUninstallOptions, interactive: boole
 		for (const line of plan.kept) out(`  ${line}`);
 	}
 	out("Not touched:");
-	for (const line of plan.notTouched) out(`  ${line}`);
+	for (const kept of plan.notTouched) out(kept.path === undefined ? `  ${kept.label}` : `  ${kept.path}  (${kept.label})`);
 	out("The installer may also have added these; remove them yourself if nothing else uses them:");
 	for (const line of plan.manual) out(`  ${line}`);
 }
@@ -279,6 +399,30 @@ function remove(removal: Removal) {
 
 function removeIfEmpty(directory: string) {
 	if (inspect(directory, "dir") === "ok" && readdirSync(directory).length === 0) rmdirSync(directory);
+}
+
+/**
+ * Asks one question on `input` and returns the typed line. End of input (Ctrl-D,
+ * a closed stdin) or Ctrl-C answers "", which every question reads as No.
+ */
+export function askLine(question: string, streams: { input: NodeJS.ReadableStream; output: NodeJS.WritableStream }): Promise<string> {
+	const input = streams.input as NodeJS.ReadableStream & { readableEnded?: boolean; destroyed?: boolean };
+	if (input.readableEnded === true || input.destroyed === true) return Promise.resolve("");
+	return new Promise((resolveAnswer) => {
+		let settled = false;
+		const prompt = createInterface({ input: streams.input, output: streams.output });
+		prompt.once("close", () => {
+			if (settled) return;
+			settled = true;
+			resolveAnswer("");
+		});
+		prompt.question(question, (answer) => {
+			if (settled) return;
+			settled = true;
+			prompt.close();
+			resolveAnswer(answer);
+		});
+	});
 }
 
 function isYes(answer: string): boolean {

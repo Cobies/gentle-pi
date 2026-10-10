@@ -20,12 +20,17 @@ In this order:
 
 1. **Gentle Shell's own data**, each only when it is a real directory or file
    (never a symbolic link):
-   - `<config home>/main/`: main-channel builds.
+   - `<config home>/main/`: main-channel builds, only when it holds nothing but
+     what the main channel writes (`gentle-ai/<commit>/gentle-ai[.exe]`,
+     `packages/gentle-pi-*.tgz`, `.build`, `.source`); otherwise it is listed as
+     kept.
    - `<config home>/channel.json`: the recorded update channel.
    - `<config home>/dev-binary.json`, only when it points at a main-channel build
      under `<config home>/main/gentle-ai`. A dev binary you registered yourself
      is kept.
-   - `<config home>/tools/go`: the Go the installer downloaded for builds.
+   - `<config home>/tools/go`: the Go the installer downloaded for builds, only
+     when every entry is a pinned-Go version folder carrying the installer's
+     `.gentle-shell-go` marker; otherwise it is listed as kept.
    - The isolated home: `GENTLE_SHELL_HOME`, or `~/.gentle-shell/agent`. It holds
      the sign-ins, chats and settings of Gentle Shell sessions. A
      `GENTLE_SHELL_HOME` directory is removed only when Gentle Shell created it
@@ -48,7 +53,7 @@ default: `profiles.json`, `profiles.export.json`, `banner.json`,
 `double-esc-cancel.json`, `runtime-guardrails.json` and `persona.json`.
 
 - In a terminal, after you confirm the plan, a separate question asks whether
-  to remove them; the default is No.
+  to remove them; the default is No, and so is end of input (Ctrl-D).
 - With `--yes`, they are kept unless you also pass `--include-shared`.
 - `--include-shared` removes them without the separate question.
 
@@ -70,10 +75,20 @@ Only those exact files are removed; anything else in the config home stays.
 
 ## Refusals and exit codes
 
-It refuses, before removing anything, when:
+It refuses, before removing anything, when one of the places it removes from —
+the isolated home, the config home or `~/.gentle-shell` — checked at its real
+path (after following symbolic links, including linked parent folders):
 
-- the isolated home is, or contains, your home directory, Pi's default home,
-  your Pi home or the config home;
+- is or contains your home directory;
+- is, contains or lies inside your Pi home (`~/.pi/agent`, `PI_CODING_AGENT_DIR`
+  or `GENTLE_SHELL_USER_PI_HOME`) or Gentle AI's state in `~/.gentle-ai`;
+- is, contains or lies inside a `.pi` directory, such as a project's `.pi` or
+  `.pi/gentle-ai` (containing means a `.pi` directly inside it). The default
+  config home, `~/.pi/gentle-ai`, is the only `.pi` location allowed;
+- for the isolated home and the config home: is, contains or lies inside the
+  other;
+- would remove a path that is, holds or lies inside a custom `--home` home or
+  another path the plan lists as not touched;
 - `GENTLE_SHELL_HOME` or `GENTLE_PI_CONFIG_HOME` is not an absolute path;
 - neither pnpm nor npm owns the installation (an `npm link` of a source checkout,
   for example), or the owning package manager is not on `PATH`. Remove that
@@ -82,8 +97,11 @@ It refuses, before removing anything, when:
 | Exit code | Meaning |
 | --- | --- |
 | 0 | Removed, or `--dry-run` printed the plan. |
-| 1 | Refused, cancelled, or a removal failed. A refusal exits 1 even with `--dry-run`, since the real run would refuse too. |
+| 1 | Refused, cancelled, or a removal failed. A refusal exits 1 even with `--dry-run`, since the real run would refuse too. End of input (Ctrl-D or a closed stdin) at a question cancels. |
 | 2 | Usage error, including no terminal to confirm in without `--yes`. |
+
+A refused plan lists no Gentle Shell data to remove, so no path ever appears both
+as removed and as not touched.
 
 When a removal fails, it stops there: the `gentle-pi` package and everything
 after it are kept, so `gentle-shell self-uninstall` is still there to run again.

@@ -2,14 +2,16 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
-import { runSelfUninstall, SHARED_CONFIG_FILES } from "../lib/gentle-shell-uninstall.ts";
+import { askLine, runSelfUninstall, SHARED_CONFIG_FILES } from "../lib/gentle-shell-uninstall.ts";
 
 const posixOnly = { skip: process.platform === "win32" };
 const SHA = "1f9d5e6423e37f7d2316859045f379ba9b5d8c3a";
 
 type Owner = { name: "pnpm" | "npm"; command: string };
 type Options = {
+	ask?: (question: string) => Promise<string>;
 	owner?: Owner | Error;
 	env?: Record<string, string>;
 	interactive?: boolean;
@@ -43,6 +45,7 @@ function world() {
 	write(paths.channel, JSON.stringify({ schema: "gentle-shell.channel/v1", channel: "main", shellCommit: SHA, gentleAiCommit: SHA }));
 	write(paths.devBinary, JSON.stringify({ schema: "gentle-pi.dev-binary/v1", path: join(paths.main, "gentle-ai", SHA, "gentle-ai") }));
 	write(join(paths.go, "1.25.10", "go", "bin", "go"), "go");
+	write(join(paths.go, "1.25.10", ".gentle-shell-go"), "https://go.dev/dl/go1.25.10.darwin-arm64.tar.gz\n");
 	write(join(isolated, "settings.json"));
 	write(join(isolated, ".gentle-shell-home"));
 	write(paths.launcherConfig, JSON.stringify({ home: "isolated" }));
@@ -71,10 +74,10 @@ function world() {
 				calls.push({ command, argv, ownDataLeft: ownLeft(), sharedLeft: existsSync(join(config, "profiles.json")), shellLeft: existsSync(shell) });
 				return { code: options.runCode ?? 0 };
 			},
-			ask: async (question: string) => {
+			ask: options.ask ?? (async (question: string) => {
 				questions.push(question);
 				return answers.shift() ?? "";
-			},
+			}),
 			out: (line: string) => out.push(line),
 			err: (line: string) => err.push(line),
 		});
@@ -88,6 +91,23 @@ function untouched(w: World) {
 	assert.deepEqual(w.ownLeft().sort(), Object.values(w.paths).sort());
 	assert.equal(existsSync(join(w.config, "profiles.json")), true);
 	assert.deepEqual(w.calls, []);
+}
+
+/** The indented lines of one plan section, such as "Remove Gentle Shell data:". */
+function section(out: string[], heading: string): string[] {
+	const start = out.findIndex((line) => line.startsWith(heading));
+	if (start < 0) return [];
+	const end = out.findIndex((line, index) => index > start && !line.startsWith("  "));
+	return out.slice(start + 1, end < 0 ? undefined : end);
+}
+
+/** A refusal: exit 1, a named reason, nothing removed and no path both removed and not touched. */
+async function refused(w: World, env: Record<string, string>, reason: RegExp) {
+	assert.equal(await w.uninstall(["--yes"], { env }), 1, JSON.stringify(env));
+	assert.match(w.err.join("\n"), reason, JSON.stringify(env));
+	assert.match(w.err.join("\n"), /Nothing was removed\./);
+	assert.deepEqual(w.calls, []);
+	assert.deepEqual(section(w.out, "Remove Gentle Shell data:"), ["  (refused, see below)"]);
 }
 
 test("unknown self-uninstall arguments are a usage error that removes nothing", async () => {
@@ -365,6 +385,177 @@ test("~/.gentle-shell is kept when it still holds other files", async () => {
 		assert.equal(await w.uninstall(["--yes"]), 0);
 		assert.equal(readFileSync(join(w.shell, "notes.txt"), "utf8"), "mine");
 	} finally { w.cleanup(); }
+});
+
+test("a config home that is, contains or lies inside the user's Pi home is refused", async () => {
+	const w = world();
+	try {
+		write(join(w.piHome, "main", "sessions.txt"), "mine");
+		await refused(w, { GENTLE_PI_CONFIG_HOME: w.piHome }, /GENTLE_PI_CONFIG_HOME .*Pi's default home/);
+		assert.equal(readFileSync(join(w.piHome, "main", "sessions.txt"), "utf8"), "mine");
+		untouched(w);
+	} finally { w.cleanup(); }
+	const v = world();
+	try {
+		const piDir = join(v.root, "pi", "agent");
+		write(join(piDir, "settings.json"));
+		await refused(v, { PI_CODING_AGENT_DIR: piDir, GENTLE_PI_CONFIG_HOME: join(piDir, "cfg") }, /your Pi home/);
+		await refused(v, { GENTLE_SHELL_USER_PI_HOME: piDir, GENTLE_PI_CONFIG_HOME: join(v.root, "pi") }, /your Pi home/);
+		untouched(v);
+	} finally { v.cleanup(); }
+});
+
+test("a config home that is $HOME never removes main/, tools/ or channel.json from it", async () => {
+	const w = world();
+	try {
+		write(join(w.home, "main", "myproject", "src.txt"), "code");
+		write(join(w.home, "tools", "go", "1.25.10", ".gentle-shell-go"), "x");
+		write(join(w.home, "channel.json"), "{}");
+		await refused(w, { GENTLE_PI_CONFIG_HOME: w.home }, /GENTLE_PI_CONFIG_HOME .*your home directory/);
+		for (const path of [join("main", "myproject", "src.txt"), join("tools", "go"), "channel.json"]) assert.equal(existsSync(join(w.home, path)), true, path);
+		untouched(w);
+	} finally { w.cleanup(); }
+});
+
+test("a config home reached through a symbolic link is checked at its real path", posixOnly, async () => {
+	const w = world();
+	try {
+		write(join(w.home, "main", "gentle-ai", SHA, "gentle-ai"), "binary");
+		const link = join(w.home, "cfglink");
+		symlinkSync(w.home, link);
+		await refused(w, { GENTLE_PI_CONFIG_HOME: link }, /GENTLE_PI_CONFIG_HOME .*your home directory/);
+		assert.equal(existsSync(join(w.home, "main", "gentle-ai", SHA, "gentle-ai")), true);
+		untouched(w);
+	} finally { w.cleanup(); }
+});
+
+test("a ~/.gentle-shell reached through a symbolic link to $HOME is refused", posixOnly, async () => {
+	const w = world();
+	try {
+		rmSync(w.shell, { recursive: true });
+		symlinkSync(w.home, w.shell);
+		write(join(w.home, "agent", ".gentle-shell-home"));
+		write(join(w.home, "config.json"), JSON.stringify({ home: "isolated" }));
+		assert.equal(await w.uninstall(["--yes"]), 1);
+		assert.match(w.err.join("\n"), /your home directory/);
+		assert.deepEqual(w.calls, []);
+		for (const path of ["agent", "config.json"]) assert.equal(existsSync(join(w.home, path)), true, path);
+	} finally { w.cleanup(); }
+});
+
+test("Gentle AI's state and any .pi directory are protected for the isolated home and the config home", async () => {
+	const cases = (w: World) => {
+		const repo = join(w.root, "repo");
+		return [
+			[{ GENTLE_SHELL_HOME: join(w.home, ".gentle-ai") }, /Gentle AI's state/],
+			[{ GENTLE_SHELL_HOME: join(w.home, ".gentle-ai", "agent") }, /Gentle AI's state/],
+			[{ GENTLE_SHELL_HOME: join(repo, ".pi") }, /a \.pi directory/],
+			[{ GENTLE_SHELL_HOME: join(repo, ".pi", "gentle-ai") }, /a \.pi directory/],
+			[{ GENTLE_SHELL_HOME: repo }, /a \.pi directory/],
+			[{ GENTLE_PI_CONFIG_HOME: join(w.home, ".gentle-ai") }, /Gentle AI's state/],
+			[{ GENTLE_PI_CONFIG_HOME: join(repo, ".pi", "gentle-ai") }, /a \.pi directory/],
+			[{ GENTLE_PI_CONFIG_HOME: join(repo, ".pi") }, /a \.pi directory/],
+			[{ GENTLE_PI_CONFIG_HOME: repo }, /a \.pi directory/],
+		] as const;
+	};
+	for (let index = 0; index < 9; index += 1) {
+		const w = world();
+		try {
+			const repo = join(w.root, "repo");
+			const state = join(w.home, ".gentle-ai", "state.json");
+			write(state, "{}");
+			write(join(w.home, ".gentle-ai", ".gentle-shell-home"));
+			write(join(w.home, ".gentle-ai", "agent", ".gentle-shell-home"));
+			for (const dir of [repo, join(repo, ".pi"), join(repo, ".pi", "gentle-ai")]) write(join(dir, ".gentle-shell-home"));
+			write(join(repo, ".pi", "gentle-ai", "main", "gentle-ai", SHA, "gentle-ai"), "binary");
+			const [env, reason] = cases(w)[index];
+			await refused(w, env, reason);
+			assert.equal(existsSync(state), true);
+			assert.equal(existsSync(join(repo, ".pi", "gentle-ai", "main")), true);
+			untouched(w);
+		} finally { w.cleanup(); }
+	}
+});
+
+test("a custom --home home that overlaps what would be removed is refused", async () => {
+	const w = world();
+	try {
+		const custom = join(w.isolated, "work");
+		write(join(custom, "settings.json"));
+		write(w.paths.launcherConfig, JSON.stringify({ home: custom }));
+		await refused(w, {}, /custom --home home/);
+		assert.equal(existsSync(join(custom, "settings.json")), true);
+	} finally { w.cleanup(); }
+});
+
+test("main/ outside Gentle Shell's known layout is listed as not touched", async () => {
+	for (const extra of [join("myproject", "src.txt"), join("gentle-ai", "not-a-commit", "gentle-ai"), join("gentle-ai", SHA, "notes.txt"), join("packages", "notes.txt")]) {
+		const w = world();
+		try {
+			write(join(w.paths.main, extra), "mine");
+			assert.equal(await w.uninstall(["--yes"]), 0, extra);
+			assert.equal(readFileSync(join(w.paths.main, extra), "utf8"), "mine", extra);
+			assert.ok(section(w.out, "Kept:").some((line) => line.includes(`${w.paths.main}: not Gentle Shell's main-channel layout`)), extra);
+			assert.equal(existsSync(w.paths.channel), false);
+		} finally { w.cleanup(); }
+	}
+});
+
+test("main/ in Gentle Shell's known layout is removed", async () => {
+	const w = world();
+	try {
+		write(join(w.paths.main, "packages", "gentle-pi-4.1.0-main.1f9d5e6423e3.tgz"), "tgz");
+		write(join(w.paths.main, ".build", "gocache", "x"), "x");
+		write(join(w.paths.main, ".source", "src", "package.json"), "{}");
+		assert.equal(await w.uninstall(["--yes"]), 0);
+		assert.equal(existsSync(w.paths.main), false);
+	} finally { w.cleanup(); }
+});
+
+test("tools/go with anything but marked pinned-Go version folders is listed as not touched", async () => {
+	for (const extra of [join("1.24.0", "go", "bin", "go"), join(".stage-abc", "go"), "notes.txt"]) {
+		const w = world();
+		try {
+			write(join(w.paths.go, extra), "mine");
+			assert.equal(await w.uninstall(["--yes"]), 0, extra);
+			assert.equal(existsSync(join(w.paths.go, extra)), true, extra);
+			assert.equal(existsSync(join(w.paths.go, "1.25.10")), true, extra);
+			assert.ok(section(w.out, "Kept:").some((line) => line.includes(`${w.paths.go}: not only the installer's pinned Go`)), extra);
+		} finally { w.cleanup(); }
+	}
+});
+
+test("end of input at a confirmation prompt cancels and removes nothing", async () => {
+	for (const answers of [[], ["y"]]) {
+		const w = world();
+		try {
+			const input = new PassThrough();
+			const output = new PassThrough();
+			output.resume();
+			for (const answer of answers) input.write(`${answer}\n`);
+			input.end();
+			const ask = (question: string) => askLine(question, { input, output });
+			const code = await w.uninstall([], { interactive: true, ask });
+			if (answers.length === 0) {
+				assert.equal(code, 1);
+				assert.match(w.out.join("\n"), /Cancelled; nothing was removed\./);
+				untouched(w);
+			} else {
+				// Confirmed, then end of input at the shared-configuration question keeps it.
+				assert.equal(code, 0);
+				assert.equal(existsSync(join(w.config, "profiles.json")), true);
+			}
+		} finally { w.cleanup(); }
+	}
+});
+
+test("askLine returns the typed line", async () => {
+	const input = new PassThrough();
+	const output = new PassThrough();
+	output.resume();
+	input.write("yes\n");
+	assert.equal(await askLine("Remove? ", { input, output }), "yes");
+	input.end();
 });
 
 test("a failed removal stops before the package is removed", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
