@@ -72,18 +72,16 @@ export const actionDescriptions = Object.freeze({
 	"acquire-go": "Download the installer's pinned Go from go.dev and verify it, only to build Gentle AI.",
 	"verify-go": "Check that the downloaded Go runs and reports the pinned version.",
 	"install-pi": "Install the Pi coding agent globally with pnpm.",
-	"install-shell": `Install Gentle Shell (gentle-pi) globally with pnpm, together with Pi ${PI_INSTALL_VERSION} in one step, so Gentle Shell runs exactly that Pi. ` +
-		`A Pi that pnpm already installed globally is replaced by Pi ${PI_INSTALL_VERSION}; any other Pi is left unchanged.`,
+	"install-shell": `Install Gentle Shell (gentle-pi) globally with pnpm. pnpm may put a newer Pi than ${PI_INSTALL_VERSION} next to it ` +
+		`(at least Pi ${requirements.pi}), and Gentle Shell runs that Pi.`,
 	"provision-native": "Provision the package-native Gentle AI binary with the existing installer.",
 	"setup-shell": "Run the normal `gentle-shell setup`.",
 	"verify-readiness": "Verify that the installed stack is ready.",
 	"build-gentle-ai-main": "Build Gentle AI from the latest commit of its `main` branch with Go, verified by Go's checksum database, and use it instead of the pinned release binary.",
 	"install-shell-main": "Install Gentle Shell from the latest commit of its `main` branch with pnpm, replacing the release package.",
 	"record-channel": "Remember the `main` channel, so `gentle-shell upgrade` keeps following `main`.",
-	"update-shell-release": "Update Gentle Shell to the latest release with the package manager that installed it (pnpm or npm). " +
-		`With pnpm, Pi ${PI_INSTALL_VERSION} is installed with it in one step, so Gentle Shell runs exactly that Pi.`,
-	"update-shell-main": "Update Gentle Shell and Gentle AI to the latest commits of `main`, built on this computer, with the package manager that installed Gentle Shell. " +
-		`With pnpm, Pi ${PI_INSTALL_VERSION} is installed with it in one step, so Gentle Shell runs exactly that Pi.`,
+	"update-shell-release": "Update Gentle Shell to the latest release with the package manager that installed it (pnpm or npm).",
+	"update-shell-main": "Update Gentle Shell and Gentle AI to the latest commits of `main`, built on this computer, with the package manager that installed Gentle Shell.",
 	"update-pi": "Update Pi with the package manager that installed it (pnpm or npm).",
 });
 
@@ -106,8 +104,6 @@ export const guidance = Object.freeze({
 		"global-list-unavailable": "pnpm could not list global packages. Check that `pnpm list -g` works, then run the installer again.",
 		"existing-stack": "Pi or Gentle Shell is already installed globally. Nothing was changed; use `gentle-shell upgrade` instead.",
 		"existing-stack-unverified": "The installed Pi and Gentle Shell changed after the plan was made, or are no longer the versions this installer set up. Nothing was changed; run the installer again to check this computer again.",
-		"pnpm-pi-newer": `pnpm lists a Pi newer than Pi ${PI_INSTALL_VERSION}, the version Gentle Shell runs, and installing Gentle Shell with pnpm would replace it, so nothing was changed. ` +
-			"Remove it with `pnpm remove -g @earendil-works/pi-coding-agent`, then run the installer again.",
 	}),
 	failed: Object.freeze({
 		"prepare-pnpm-home": "The private pnpm folder (%USERPROFILE%\\.pnpm) could not be created, or kept, with access for you, SYSTEM and Administrators only, or it changed after the plan was made. Nothing was installed. " +
@@ -146,8 +142,6 @@ export const guidance = Object.freeze({
 			"Make sure `go version` works in a terminal, or choose the release channel, then select Check again.",
 		"untrusted-pnpm-home": "Another account can change the pnpm home folder (PNPM_HOME), where pnpm installs and runs programs, so nothing was installed. " +
 			"Remove that account's write access, or set PNPM_HOME to a private folder such as %USERPROFILE%\\.pnpm, then select Check again.",
-		"pnpm-pi-newer": `A Pi installed globally with pnpm is newer than Pi ${PI_INSTALL_VERSION}, the version Gentle Shell runs, and pnpm would replace it, so nothing was changed. ` +
-			"Remove it with `pnpm remove -g @earendil-works/pi-coding-agent`, then select Check again.",
 	}),
 	outcomes: Object.freeze({
 		ready: "Gentle Shell is installed. Run `gentle-shell` in a terminal.",
@@ -298,14 +292,6 @@ function pnpmHomeGuidance(home) {
  * anything else keeps the fixed guidance. */
 function blockerGuidance(blocker, inventory, plan) {
 	const fixed = guidance.blockers[blocker.code] ?? guidance.fallback;
-	// The pnpm Pi the grouped install would replace, by the version the probe read.
-	if (blocker.code === "pnpm-pi-newer" && STABLE.test(inventory?.pi?.version ?? "")) {
-		const found = inventory.pi.version;
-		return `Pi ${found} is installed globally with pnpm and is newer than Pi ${PI_INSTALL_VERSION}, the version Gentle Shell runs. ` +
-			`pnpm installs Gentle Shell together with its Pi in one step, which would replace your Pi ${found} with ${PI_INSTALL_VERSION}, ` +
-			"so nothing was changed: a newer pnpm Pi next to a pnpm-installed Gentle Shell is not supported. " +
-			"To continue, remove your Pi with `pnpm remove -g @earendil-works/pi-coding-agent` (Gentle Shell then installs its own), then select Check again.";
-	}
 	if (blocker.code === "untrusted-pnpm-home") return pnpmHomeGuidance(inventory?.pnpmHome);
 	if (blocker.tool === "pnpmHome" && blocker.code === "unknown-tool") {
 		return "The permissions of the pnpm home folder (PNPM_HOME) could not be checked, so nothing was installed. " +
@@ -447,6 +433,10 @@ function outcomeView(result) {
 		}
 	} else {
 		view.guidance = guidance.outcomes[result.outcome];
+		// The Pi Gentle Shell runs, when pnpm put one other than the installer's next to it.
+		if (typeof result.piVersion === "string" && STABLE.test(result.piVersion) && result.piVersion.replace(/^v/, "") !== PI_INSTALL_VERSION) {
+			view.guidance += ` Gentle Shell runs Pi ${result.piVersion.replace(/^v/, "")}, which pnpm installed next to it.`;
+		}
 		if (result.action === "open-new-terminal") view.action = "open-new-terminal";
 		if (["configured", "unchanged"].includes(result.npmPrefix)) view.npmPrefix = result.npmPrefix;
 	}

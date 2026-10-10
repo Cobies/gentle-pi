@@ -234,26 +234,14 @@ test("an existing compatible Pi from any installation is reused and only Gentle 
 	}
 });
 
-test("a pnpm Pi newer than the installer's pin blocks before consent wherever pnpm would add Gentle Shell with the pinned Pi", () => {
-	const newer = (version = "1.1.0") => ({ ...tool(version), owner: "pnpm" });
-	const blocker = [{ code: "pnpm-pi-newer", tool: "pi" }];
-	// Installing Gentle Shell, or updating a pnpm-owned one, adds the pinned Pi in gentle-pi's group, which replaces it.
-	for (const version of ["1.0.1", "1.1.0", "2.0.0"]) {
-		const plan = planPreflight({ ...installed(), pi: newer(version), shell: absent, gentleAi: absent, setup: false });
-		assert.deepEqual(plan.blockers, blocker, version);
-		assert.deepEqual(plan.actions, []);
-	}
-	for (const channel of ["release", "main"]) {
-		const update = planPreflight({ ...installed(), pi: newer(), shell: owned("3.9.0"), go: tool("1.26.0"), gentleAi: unchecked, setup: unchecked }, { channel });
-		assert.deepEqual(update.blockers, blocker, channel);
-	}
-	// npm updates its own Shell without touching pnpm's Pi; a current Shell needs nothing; a Pi from elsewhere is not replaced.
-	assert.deepEqual(planPreflight({ ...installed(), pi: newer(), shell: owned("3.9.0", "npm"), gentleAi: unchecked, setup: unchecked }).blockers, []);
-	assert.deepEqual(planPreflight({ ...installed(), pi: newer() }).blockers, []);
-	const external = planPreflight({ ...installed(), pi: { ...tool("1.1.0"), external: true }, shell: absent, gentleAi: absent, setup: false });
-	assert.deepEqual([external.blockers, updateIds(external)], [[], ["install-shell", "setup-shell", "verify-readiness"]]);
-	// A pnpm Pi at the pin is replaced by the same version.
-	assert.deepEqual(planPreflight({ ...installed(), pi: tool(PI_INSTALL_VERSION), shell: absent, gentleAi: absent, setup: false }).blockers, []);
+test("a pnpm Pi newer than the installer's pin never blocks: Gentle Shell is added or updated beside it", () => {
+	const newer = { ...tool("1.1.0") };
+	const install = planPreflight({ ...installed(), pi: newer, shell: absent, gentleAi: absent, setup: false });
+	assert.deepEqual([install.blockers, updateIds(install)], [[], ["install-shell", "setup-shell", "verify-readiness"]]);
+	const update = planPreflight({ ...installed(), pi: newer, shell: owned("3.9.0"), gentleAi: unchecked, setup: unchecked });
+	assert.deepEqual([update.blockers, updateIds(update)], [[], ["update-shell-release", "setup-shell", "verify-readiness"]]);
+	// Even a probe that reported an owner is not a blocker: only an older owned Pi is updated.
+	assert.deepEqual(planPreflight({ ...installed(), pi: { ...newer, owner: "pnpm" }, shell: absent, gentleAi: absent, setup: false }).blockers, []);
 });
 
 // An older Pi that pnpm or npm owns is updated to the version the installer installs.

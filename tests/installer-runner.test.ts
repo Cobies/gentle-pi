@@ -88,8 +88,9 @@ type Layout = { platform: string; node: string; entry: string; npmCli: string; s
 
 const npmPackage = JSON.stringify({ name: "npm", version: "11.19.0" });
 const pnpmPackage = JSON.stringify({ name: "pnpm", version: "11.1.1" });
-// pnpm 11 links gentle-pi's optional peer Pi beside gentle-pi in its own global
-// group; the launcher resolves that Pi (a nested node_modules first) from gentle-pi.
+// pnpm 11 links gentle-pi's optional peer Pi beside gentle-pi in gentle-pi's own
+// global group, at the latest version unless one is already there; the launcher
+// resolves that Pi (a nested node_modules first) from gentle-pi.
 const piPackage = (version = PI_INSTALL_VERSION) => JSON.stringify({ name: "@earendil-works/pi-coding-agent", version });
 const besidePi = (root: string, sep = "/") => `${root.slice(0, root.lastIndexOf(sep))}${sep}@earendil-works${sep}pi-coding-agent${sep}package.json`;
 const nestedPi = (root: string) => `${root}/node_modules/@earendil-works/pi-coding-agent/package.json`;
@@ -225,8 +226,7 @@ function harness({ env = {}, results = {}, files = [] as string[], integrity = {
 	return { adapters, calls, logs, pnpmCalls, integrityCalls };
 }
 
-// One pnpm 11 global group: the Pi beside gentle-pi is the installer's pin.
-const INSTALL = `add -g @earendil-works/pi-coding-agent@${PI_INSTALL_VERSION},gentle-pi@${requirements.shell} --allow-build=gentle-pi`;
+const INSTALL = `add -g @earendil-works/pi-coding-agent@${PI_INSTALL_VERSION} gentle-pi@${requirements.shell} --allow-build=gentle-pi`;
 const PM_ADD = "add -g npm@11.19.0 pnpm@11.1.1";
 const NPM_ADD = "add -g npm@11.19.0";
 const PNPM_ADD = "add -g pnpm@11.1.1";
@@ -1397,7 +1397,7 @@ function mainChannel() {
 		},
 	};
 }
-const MAIN_ADD = `add -g @earendil-works/pi-coding-agent@${PI_INSTALL_VERSION},${MAIN_TGZ} --allow-build=gentle-pi`;
+const MAIN_ADD = `add -g ${MAIN_TGZ} --allow-build=gentle-pi`;
 function mainHarness(mainListing = listing(PI_INSTALL_VERSION, MAIN_VERSION, MAIN_ROOT), extra: { texts?: Record<string, string>; results?: object } = {}) {
 	const h = harness({ files: ["/usr/bin/go"], realpaths: { [MAIN_ROOT]: MAIN_ROOT },
 		results: { [LIST]: [emptyList, { code: 0, stdout: listing() }, { code: 0, stdout: mainListing }],
@@ -1506,7 +1506,7 @@ test("a failed main step reports the main channel's error and its cause, the hom
 	const add = mainHarness(undefined, { results: { [LIST]: [emptyList, { code: 0, stdout: listing() }], add: [{ code: 0 }, { code: 1, stdout: PNPM_ADD_POSTINSTALL }] } });
 	const added = await runStandardInstall({ plan: mainPlan(), consent: true }, add.adapters);
 	assert.deepEqual([added.failedStep, added.detail], ["install-shell-main", ".../gentle-pi postinstall:   root cause Error: go: open ~/x: The directory name is invalid."]);
-	assert.equal(add.calls.filter((call) => call.stderrTail === 4096 && call.args.includes(`${PI_PACKAGE_NAME}@${PI_INSTALL_VERSION},${MAIN_TGZ}`)).length, 1);
+	assert.equal(add.calls.filter((call) => call.stderrTail === 4096 && call.args.includes(MAIN_TGZ)).length, 1);
 	// Any other error keeps its text out of the result.
 	const plain = mainHarness();
 	plain.adapters.mainChannel.buildGentleAi = async () => { throw new Error(`EACCES ${HOME}/.pi`); };
@@ -1546,21 +1546,20 @@ function existingPlan(change: object, channel = "release") {
 		pi: tool("1.2.0"), shell: absent, gentleAi: absent, go: tool("1.26.0"),
 		globalBin: { available: true, path: BIN, writable: true, onPath: true }, setup: false, ...change }, { channel });
 }
-// Adding only Gentle Shell still adds the installer's Pi in its group.
-const SHELL_ONLY_ADD = INSTALL;
+const SHELL_ONLY_ADD = `add -g gentle-pi@${requirements.shell} --allow-build=gentle-pi`;
 const NPM_SHELL_ROOT = "/usr/local/lib/node_modules/gentle-pi";
 
-test("with a compatible Pi from elsewhere, Gentle Shell is added with the installer's Pi and that Pi is left as it is", async () => {
-	// A Pi that pnpm does not list (npm, mise, a binary): pnpm adds its own pinned Pi in gentle-pi's group.
-	const h = harness({ results: { [LIST]: [emptyList, { code: 0, stdout: listing() }], [SHELL_ONLY_ADD]: { code: 0 } } });
-	const result = await runStandardInstall({ plan: existingPlan({ pi: { ...tool("1.2.0"), external: true } }), consent: true }, h.adapters);
-	assert.equal(result.outcome, "ready");
-	assert.deepEqual(h.pnpmCalls(), ["bin -g", LIST, SHELL_ONLY_ADD, LIST]);
-	assert.deepEqual(result.completed, ["check-npm", "check-global-bin", "check-existing-shell", "install-global",
-		"verify-global-list", "verify-shell-bin", "verify-gentle-ai", "shell-setup"]);
-	// Nothing else touches Pi: no separate Pi add, update or npm command.
-	assert.equal(h.pnpmCalls().filter((call) => call.startsWith("add")).length, 1);
-	assert.equal(h.calls.some((call) => call.args.includes("install")), false);
+test("with a compatible Pi already installed, only Gentle Shell is added and Pi is left as it is", async () => {
+	// A pnpm Pi newer than PI_INSTALL_VERSION is kept too: gentle-pi gets its own pnpm group, nothing is replaced.
+	for (const version of ["1.2.0", PI_INSTALL_VERSION]) {
+		const h = harness({ results: { [LIST]: [piOnlyList(version), { code: 0, stdout: listing(version) }], [SHELL_ONLY_ADD]: { code: 0 } } });
+		const result = await runStandardInstall({ plan: existingPlan({ pi: tool(version) }), consent: true }, h.adapters);
+		assert.equal(result.outcome, "ready", version);
+		assert.deepEqual(h.pnpmCalls(), ["bin -g", LIST, SHELL_ONLY_ADD, LIST]);
+		assert.deepEqual(result.completed, ["check-npm", "check-global-bin", "check-existing-shell", "install-global",
+			"verify-global-list", "verify-shell-bin", "verify-gentle-ai", "shell-setup"]);
+		assert.equal(h.calls.some((call) => call.args.includes(`${PI_PACKAGE_NAME}@${PI_INSTALL_VERSION}`)), false);
+	}
 });
 
 test("adding only Gentle Shell still refuses a gentle-pi that pnpm already lists", async () => {
@@ -1570,26 +1569,36 @@ test("adding only Gentle Shell still refuses a gentle-pi that pnpm already lists
 	assert.equal(h.calls.some((call) => call.args[1] === "add"), false);
 });
 
-// --- The Pi that Gentle Shell runs: pnpm 11 resolves gentle-pi's optional peer Pi inside
-// gentle-pi's own global group, so the installer's Pi is added in that group (`a,b`).
-const GROUPED_ADD = ["add", "-g", `${PI_PACKAGE_NAME}@${PI_INSTALL_VERSION},gentle-pi@${requirements.shell}`, "--allow-build=gentle-pi"];
-
-test("Pi and gentle-pi are added as one pnpm global group, so the Pi next to gentle-pi is the pin", async () => {
+// --- The Pi that Gentle Shell runs: pnpm 11 installs every `add -g` argument as its own
+// group, so gentle-pi may get a newer Pi beside it than PI_INSTALL_VERSION (at least the minimum).
+test("Pi and gentle-pi are added as separate pnpm groups, so a later `pi update` keeps gentle-pi", async () => {
+	const separate = ["add", "-g", `${PI_PACKAGE_NAME}@${PI_INSTALL_VERSION}`, `gentle-pi@${requirements.shell}`, "--allow-build=gentle-pi"];
 	const h = harness();
 	const result = await runStandardInstall({ plan: plan(), consent: true }, h.adapters);
 	assert.equal(result.outcome, "ready");
-	assert.deepEqual(h.calls.filter((call) => call.args[1] === "add").map((call) => call.args.slice(1)), [GROUPED_ADD]);
+	assert.deepEqual(h.calls.filter((call) => call.args[1] === "add").map((call) => call.args.slice(1)), [separate]);
+	assert.equal(h.calls.some((call) => call.args.some((arg) => arg.includes(","))), false);
 	const w = harness({ layout: windowsLayout });
 	assert.equal((await runStandardInstall({ plan: plan("win32"), consent: true }, w.adapters)).outcome, "ready");
-	assert.deepEqual(w.calls.filter((call) => call.args[1] === "add").map((call) => call.args.slice(1)), [GROUPED_ADD]);
+	assert.deepEqual(w.calls.filter((call) => call.args[1] === "add").map((call) => call.args.slice(1)), [separate]);
 });
 
-test("verify-global-list requires the Pi the launcher runs, beside gentle-pi, to be exactly the pin", async () => {
+test("verify-global-list accepts the Pi the launcher runs beside gentle-pi at the minimum or newer, and reports one other than the pin", async () => {
+	// pnpm's latest peer beside gentle-pi (or nested in it): Gentle Shell runs it, and the outcome says which.
+	for (const texts of [{ [besidePi(PACKAGE_ROOT)]: piPackage("1.1.0") }, { [nestedPi(PACKAGE_ROOT)]: piPackage("1.1.0") },
+		{ [besidePi(PACKAGE_ROOT)]: piPackage(requirements.pi) }]) {
+		const h = harness({ texts });
+		const result = await runStandardInstall({ plan: plan(), consent: true }, h.adapters);
+		assert.equal(result.outcome, "ready", JSON.stringify(texts));
+		assert.equal(result.piVersion, Object.values(texts)[0].includes("1.1.0") ? "1.1.0" : requirements.pi);
+	}
+	// The pin itself adds nothing to the outcome.
+	assert.equal("piVersion" in (await runStandardInstall({ plan: plan(), consent: true }, harness().adapters)), false);
 	const wrong = [
-		// pnpm auto-installed its latest peer while `list -g` still reports the pin.
-		{ [besidePi(PACKAGE_ROOT)]: piPackage("1.1.0") },
-		// A Pi nested in gentle-pi resolves first.
-		{ [nestedPi(PACKAGE_ROOT)]: piPackage("1.1.0") },
+		{ [besidePi(PACKAGE_ROOT)]: piPackage("0.99.0") },
+		// A Pi nested in gentle-pi resolves first, even below the minimum.
+		{ [nestedPi(PACKAGE_ROOT)]: piPackage("0.99.0"), [besidePi(PACKAGE_ROOT)]: piPackage("1.1.0") },
+		{ [besidePi(PACKAGE_ROOT)]: piPackage("1.2.0-beta.1") },
 		{ [besidePi(PACKAGE_ROOT)]: JSON.stringify({ name: "not-pi", version: PI_INSTALL_VERSION }) },
 		{ [besidePi(PACKAGE_ROOT)]: "not json" },
 	];
@@ -1605,62 +1614,31 @@ test("verify-global-list requires the Pi the launcher runs, beside gentle-pi, to
 		results: { [LIST]: [emptyList, { code: 0, stdout: listing(PI_INSTALL_VERSION, requirements.shell, bare) }] } });
 	const failed = await runStandardInstall({ plan: plan(), consent: true }, missing.adapters);
 	assert.deepEqual([failed.outcome, failed.failedStep], ["failed", "verify-global-list"]);
-	// The same Pi nested at the pin is accepted.
-	const nested = harness({ texts: { [nestedPi(PACKAGE_ROOT)]: piPackage() } });
-	assert.equal((await runStandardInstall({ plan: plan(), consent: true }, nested.adapters)).outcome, "ready");
 });
 
-test("adding only Gentle Shell adds the installer's Pi in its group; a pnpm Pi newer than the pin blocks before any change", async () => {
-	// A Pi from elsewhere (not listed by pnpm), or a pnpm Pi at the pin or older: one grouped add.
-	for (const before of [emptyList, piOnlyList(PI_INSTALL_VERSION), piOnlyList("0.99.5")]) {
-		const h = harness({ results: { [LIST]: [before, { code: 0, stdout: listing() }] } });
-		const result = await runStandardInstall({ plan: existingPlan({}), consent: true }, h.adapters);
-		assert.equal(result.outcome, "ready", before.stdout);
-		assert.deepEqual(result.completed, ["check-npm", "check-global-bin", "check-existing-shell", "install-global",
-			"verify-global-list", "verify-shell-bin", "verify-gentle-ai", "shell-setup"]);
-		assert.deepEqual(h.calls.filter((call) => call.args[1] === "add").map((call) => call.args.slice(1)), [GROUPED_ADD]);
-	}
-	// The grouped add would replace a newer pnpm Pi with the pin: never a downgrade.
-	for (const version of ["1.0.1", "1.1.0", "2.0.0"]) {
-		const h = harness({ results: { [LIST]: piOnlyList(version) } });
-		const result = await runStandardInstall({ plan: existingPlan({}), consent: true }, h.adapters);
-		assert.deepEqual([result.outcome, result.reason], ["blocked", "pnpm-pi-newer"], version);
-		assert.deepEqual(result.completed, ["check-npm", "check-global-bin"]);
-		assert.equal(h.calls.some((call) => call.args[1] === "add"), false);
-	}
-	// Afterwards pnpm must list the pinned Pi, beside gentle-pi too.
-	const stale = harness({ results: { [LIST]: [emptyList, { code: 0, stdout: listing("1.2.0") }] } });
-	const failed = await runStandardInstall({ plan: existingPlan({}), consent: true }, stale.adapters);
-	assert.deepEqual([failed.outcome, failed.failedStep], ["failed", "verify-global-list"]);
-});
-
-test("the main Shell is added in one group with the installer's Pi; a package path with a comma is never split", async () => {
-	const h = mainHarness();
+test("the main Shell is added alone and its adjacent Pi is verified like the release one", async () => {
+	const h = mainHarness(undefined, { texts: { [besidePi(MAIN_ROOT)]: piPackage("1.1.0") } });
 	const result = await runStandardInstall({ plan: mainPlan(), consent: true }, h.adapters);
 	assert.equal(result.outcome, "ready");
+	assert.equal(result.piVersion, "1.1.0");
 	assert.deepEqual(h.calls.filter((call) => call.args[1] === "add").map((call) => call.args.slice(1)),
-		[GROUPED_ADD, ["add", "-g", `${PI_PACKAGE_NAME}@${PI_INSTALL_VERSION},${MAIN_TGZ}`, "--allow-build=gentle-pi"]]);
-	// The main Shell's adjacent Pi is verified like the release one.
-	const latest = mainHarness(undefined, { texts: { [besidePi(MAIN_ROOT)]: piPackage("1.1.0") } });
-	const failed = await runStandardInstall({ plan: mainPlan(), consent: true }, latest.adapters);
+		[INSTALL.split(" "), MAIN_ADD.split(" ")]);
+	const below = mainHarness(undefined, { texts: { [besidePi(MAIN_ROOT)]: piPackage("0.99.0") } });
+	const failed = await runStandardInstall({ plan: mainPlan(), consent: true }, below.adapters);
 	assert.deepEqual([failed.outcome, failed.failedStep], ["failed", "install-shell-main"]);
-	const comma = mainHarness();
-	comma.adapters.mainChannel.packShell = async () => `${HOME}/a,b/gentle-pi-${MAIN_VERSION}.tgz`;
-	const refused = await runStandardInstall({ plan: mainPlan(), consent: true }, comma.adapters);
-	assert.deepEqual([refused.outcome, refused.failedStep], ["failed", "install-shell-main"]);
-	assert.equal(comma.calls.filter((call) => call.args[1] === "add").length, 1);
 });
 
-test("a pnpm-owned Gentle Shell update is verified with the pinned Pi beside it; an npm-owned one is not", async () => {
+test("a pnpm-owned Gentle Shell update is verified with a Pi at the minimum or newer beside it; an npm-owned one is not", async () => {
 	const OLD_ROOT = `${PNPM_HOME}/global/v11/old/node_modules/gentle-pi`;
 	const fixed = existingPlan({ shell: { available: true, version: "3.9.0", usable: true, global: true, owner: "pnpm" },
 		gentleAi: { available: null }, setup: { available: null } });
 	const located = [{ root: OLD_ROOT, version: "3.9.0", owner: "pnpm" }, { root: PACKAGE_ROOT, version: requirements.shell, owner: "pnpm" }];
-	const h = updateHarness({ located });
+	const h = updateHarness({ located, texts: { [besidePi(PACKAGE_ROOT)]: piPackage("1.1.0") } });
 	const result = await runStandardInstall({ plan: fixed, consent: true }, h.adapters);
 	assert.equal(result.outcome, "ready");
+	assert.equal(result.piVersion, "1.1.0");
 	assert.deepEqual(result.completed.slice(3, 5), ["update-shell", "verify-updated-shell"]);
-	for (const texts of [{ [besidePi(PACKAGE_ROOT)]: piPackage("1.1.0") }, { [nestedPi(PACKAGE_ROOT)]: piPackage("0.99.1") }]) {
+	for (const texts of [{ [besidePi(PACKAGE_ROOT)]: piPackage("0.99.0") }, { [nestedPi(PACKAGE_ROOT)]: piPackage("0.99.0") }]) {
 		const wrong = updateHarness({ located, texts });
 		const failed = await runStandardInstall({ plan: fixed, consent: true }, wrong.adapters);
 		assert.deepEqual([failed.outcome, failed.failedStep], ["failed", "verify-updated-shell"]);
@@ -1672,8 +1650,10 @@ test("a pnpm-owned Gentle Shell update is verified with the pinned Pi beside it;
 	assert.equal(npmResult.outcome, "ready");
 });
 
-test("a setup recovery needs the pinned Pi beside gentle-pi too", async () => {
-	const h = harness({ results: installedList, texts: { [besidePi(PACKAGE_ROOT)]: piPackage("1.1.0") } });
+test("a setup recovery accepts a newer Pi beside gentle-pi but not one below the minimum", async () => {
+	const newer = harness({ results: installedList, texts: { [besidePi(PACKAGE_ROOT)]: piPackage("1.1.0") } });
+	assert.equal((await runStandardInstall({ plan: recoveryPlan(), consent: true }, newer.adapters)).outcome, "ready");
+	const h = harness({ results: installedList, texts: { [besidePi(PACKAGE_ROOT)]: piPackage("0.99.0") } });
 	const result = await runStandardInstall({ plan: recoveryPlan(), consent: true }, h.adapters);
 	assert.deepEqual([result.outcome, result.reason], ["blocked", "existing-stack-unverified"]);
 	assert.equal(h.calls.some((call) => call.args[0] === SHELL_ENTRY), false);

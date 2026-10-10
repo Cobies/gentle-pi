@@ -466,8 +466,9 @@ test("setup is recoverable only for the pinned Pi and Shell owned by one pnpm pr
 	// A root that resolves outside PNPM_HOME through a symlink is not this pnpm's install.
 	assert.deepEqual(await setup(listing({ [PI]: pi, "gentle-pi": shell }), { realpaths: { [SHELL_ROOT]: "/elsewhere/gentle-pi" } }),
 		{ available: null });
-	// The Pi beside gentle-pi, which the launcher runs, must be the pin as well (an older installer's ungrouped stack is not).
-	for (const texts of [besidePi("1.1.0"), { [BESIDE_PI]: "not json" }, { [`${PNPM_HOME}/elsewhere`]: "" }]) {
+	// The Pi beside gentle-pi, which the launcher runs, may be pnpm's newer peer, but never below the minimum, unreadable or missing.
+	assert.deepEqual(await setup(listing({ [PI]: pi, "gentle-pi": shell }), { texts: besidePi("1.1.0") }), recoverable);
+	for (const texts of [besidePi("0.99.0"), { [BESIDE_PI]: "not json" }, { [`${PNPM_HOME}/elsewhere`]: "" }]) {
 		assert.deepEqual(await setup(listing({ [PI]: pi, "gentle-pi": shell }), { texts }), { available: null }, JSON.stringify(texts));
 	}
 });
@@ -558,11 +559,11 @@ test("an older pnpm-global Pi reports pnpm as its owner, and locatePi finds its 
 	assert.equal(await twice.probes.locatePi(), null);
 });
 
-test("a pnpm-global Pi newer than the installer's pin reports pnpm as its owner: the grouped install would replace it", async () => {
+test("a pnpm-global Pi newer than the installer's pin reports no owner: it is reused as it is", async () => {
 	for (const version of ["1.0.1", "1.1.0", "2.0.0"]) {
 		const newer = probes({ files: [TOOLS_PNPM], dirs: [HOME, PI_ROOT], results: { [`${TOOLS_PNPM} ${LIST}`]: { code: 0,
 			stdout: listing({ [PI_PACKAGE]: { version, path: PI_ROOT } }) } } });
-		assert.deepEqual(await newer.probes.pi(), { available: true, version, usable: true, owner: "pnpm" }, version);
+		assert.deepEqual(await newer.probes.pi(), { available: true, version, usable: true }, version);
 	}
 	// A newer Pi from elsewhere is reused as it is: pnpm does not own it.
 	assert.deepEqual(await outsidePi("1.1.0").probes.pi(), { available: true, version: "1.1.0", usable: true, external: true });

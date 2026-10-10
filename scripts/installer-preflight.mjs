@@ -257,15 +257,6 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 		tools.pnpmHome = { status: "private", path: home.path, default: home.rejected.path, finding };
 	}
 	const missingShell = tools.shell.status === "unavailable";
-	// pnpm 11 adds gentle-pi with the installer's Pi in one global group (so the Pi
-	// beside gentle-pi, which the launcher runs, is PI_INSTALL_VERSION), and that
-	// group replaces a Pi pnpm already installed. A pnpm Pi newer than the pin is
-	// never downgraded: installing Gentle Shell, or updating a pnpm-owned one, blocks.
-	const groupsPi = missingShell || (update !== null && shellSeen.owner === "pnpm");
-	const piParts = piSeen?.owner === "pnpm" ? versionParts(piSeen.version) : null;
-	if (groupsPi && piParts !== null && compareVersions(piParts, versionParts(PI_INSTALL_VERSION)) > 0) {
-		blockers.push({ code: "pnpm-pi-newer", tool: "pi" });
-	}
 	// Setup recovery: the setup probe proved the pinned stack this pnpm installed
 	// (an earlier run stopped in setup), so only the public setup is rerun.
 	const recovering = inventory.setup?.available === true && inventory.setup.recoverable === true &&

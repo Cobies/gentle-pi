@@ -14,7 +14,7 @@
 import { dirname, isAbsolute, join, posix, relative, win32 } from "node:path";
 import { gentleAiDevBinaryRegistrationPath, registerGentleAiDevBinary, unregisterGentleAiDevBinary } from "../runtime/gentle-ai-binary.mjs";
 import { installedGo } from "./installer-downloads.mjs";
-import { PI_INSTALL_VERSION, pnpmGlobalBin, requirements } from "./installer-preflight.mjs";
+import { pnpmGlobalBin, requirements } from "./installer-preflight.mjs";
 
 export const SHELL_REPOSITORY = "Gentleman-Programming/gentle-shell";
 export const GENTLE_AI_REPOSITORY = "Gentleman-Programming/gentle-ai";
@@ -307,46 +307,8 @@ async function ownerManager({ ctx, platform, packageRoot, fs, which, run }) {
 	return { name, command };
 }
 
-const PI_PACKAGE = "@earendil-works/pi-coding-agent";
-
-/** pnpm 11 updates gentle-pi in one global group with the installer's Pi
- * (installGlobal), which replaces a Pi pnpm already installed. Before anything
- * changes, a Pi pnpm lists at a version newer than PI_INSTALL_VERSION (or one it
- * cannot compare) refuses, never downgraded; so does a list pnpm cannot produce.
- */
-async function refuseNewerPnpmPi(manager, run) {
-	if (manager.name !== "pnpm") return;
-	const result = await run(manager.command, ["list", "-g", "--depth", "0", "--json"], { deadlineMs: deadlines.version });
-	let projects = null;
-	try {
-		projects = succeeded(result) ? JSON.parse(String(result.stdout ?? "")) : null;
-	} catch {
-		projects = null;
-	}
-	if (!Array.isArray(projects)) throw new MainChannelError("upgrade-list-unavailable", "pnpm could not list its global packages; check that `pnpm list -g` works");
-	for (const project of projects) {
-		for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
-			const version = project?.[field]?.[PI_PACKAGE]?.version;
-			if (project?.[field]?.[PI_PACKAGE] === undefined || version === PI_INSTALL_VERSION) continue;
-			if (typeof version === "string" && STABLE.test(version) && older(version, PI_INSTALL_VERSION)) continue;
-			throw new MainChannelError("upgrade-pi-newer", `Pi ${version}, installed globally with pnpm, is newer than Pi ${PI_INSTALL_VERSION}, the version Gentle Shell runs, ` +
-				"and pnpm updates Gentle Shell together with its Pi, which would replace it. Nothing was changed; " +
-				`remove it with \`pnpm remove -g ${PI_PACKAGE}\`, then run \`gentle-shell upgrade\` again.`);
-		}
-	}
-}
-
-/** npm installs `spec` alone. pnpm 11 adds it in one global group with the
- * installer's Pi (`pnpm add -g <pi>,<spec>`), so the Pi beside gentle-pi, the one
- * the launcher runs, is PI_INSTALL_VERSION instead of the latest Pi. A spec with
- * a comma, which pnpm would split, is refused.
- */
 async function installGlobal(manager, spec, run) {
-	let argv = ["install", "-g", spec];
-	if (manager.name === "pnpm") {
-		if (spec.includes(",")) throw new MainChannelError("upgrade-install-failed", `pnpm cannot install ${spec}: its path contains a comma`);
-		argv = ["add", "-g", `${PI_PACKAGE}@${PI_INSTALL_VERSION},${spec}`, "--allow-build=gentle-pi"];
-	}
+	const argv = manager.name === "pnpm" ? ["add", "-g", spec, "--allow-build=gentle-pi"] : ["install", "-g", spec];
 	if (!succeeded(await run(manager.command, argv, { deadlineMs: INSTALL_DEADLINE }))) {
 		throw new MainChannelError("upgrade-install-failed", `${manager.name} could not install ${spec}`);
 	}
@@ -397,9 +359,7 @@ export async function runUpgrade({ args, ctx, platform, arch = process.arch, pac
 			out(`gentle-shell ${currentVersion} is already the latest release.`);
 			return 0;
 		}
-		const manager = await ownerManager({ ctx, platform, packageRoot, fs, which, run });
-		await refuseNewerPnpmPi(manager, run);
-		await installGlobal(manager, `gentle-pi@${latest}`, run);
+		await installGlobal(await ownerManager({ ctx, platform, packageRoot, fs, which, run }), `gentle-pi@${latest}`, run);
 		await removeMainOverride(ctx, fs);
 		await writeChannel(ctx, { channel: "release" }, fs);
 		out(`Updated gentle-shell ${currentVersion} to ${latest} (release).`);
@@ -420,14 +380,9 @@ export async function runUpgrade({ args, ctx, platform, arch = process.arch, pac
 		out(`gentle-shell is already at the latest main: ${summary}.`);
 		return 0;
 	}
-	// The Shell's owner and its pnpm Pi are checked before anything is built or replaced.
-	const manager = shellCurrent ? null : await ownerManager({ ctx, platform, packageRoot, fs, which, run });
-	if (manager?.name === "pnpm") {
-		if (configHome(ctx).includes(",")) throw new MainChannelError("upgrade-install-failed", `the main package folder ${configHome(ctx)} contains a comma, which pnpm would split`);
-		await refuseNewerPnpmPi(manager, run);
-	}
 	if (!aiCurrent) await buildMainGentleAi({ commit: gentleAiCommit, ctx, platform, goPath: await mainGo({ userGo, pinnedGo, run }), run, fs });
 	if (!shellCurrent) {
+		const manager = await ownerManager({ ctx, platform, packageRoot, fs, which, run });
 		const tgz = await packMainShell({ commit: shellCommit, ctx, fetch, run, pnpm: { command: pnpmPath, prefix: [] }, fs, platform });
 		await installGlobal(manager, tgz, run);
 	}

@@ -445,34 +445,41 @@ test("/api/plan explains a Pi whose version cannot be read", async () => {
 	}
 });
 
-test("/api/plan blocks before consent when pnpm would replace a newer pnpm Pi, naming it and the way out", async () => {
-	const { host, port, login, runs } = await start({ collect: async () => collected({ pi: { available: true, version: "1.1.0", usable: true, owner: "pnpm" } }) });
+test("/api/plan says that pnpm may put a newer Pi next to Gentle Shell, at least the minimum", async () => {
+	// A newer Pi installed with pnpm never blocks: it is kept as it is.
+	const { host, port, login } = await start({ collect: async () => collected({ pi: { available: true, version: "1.1.0", usable: true } }) });
 	try {
 		const view = await plan(port, await login());
-		assert.deepEqual(view.actions, []);
-		assert.deepEqual(view.blockers.map((blocker: { code: string; tool: string }) => [blocker.code, blocker.tool]), [["pnpm-pi-newer", "pi"]]);
-		assert.equal(view.blockers[0].guidance,
-			`Pi 1.1.0 is installed globally with pnpm and is newer than Pi ${PI_INSTALL_VERSION}, the version Gentle Shell runs. ` +
-			`pnpm installs Gentle Shell together with its Pi in one step, which would replace your Pi 1.1.0 with ${PI_INSTALL_VERSION}, ` +
-			"so nothing was changed: a newer pnpm Pi next to a pnpm-installed Gentle Shell is not supported. " +
-			"To continue, remove your Pi with `pnpm remove -g @earendil-works/pi-coding-agent` (Gentle Shell then installs its own), then select Check again.");
-		assert.deepEqual(runs, []);
+		assert.deepEqual(view.blockers, []);
+		assert.equal(view.actions.find((action: { id: string }) => action.id === "install-shell").description,
+			`Install Gentle Shell (gentle-pi) globally with pnpm. pnpm may put a newer Pi than ${PI_INSTALL_VERSION} next to it ` +
+			`(at least Pi ${requirements.pi}), and Gentle Shell runs that Pi.`);
 	} finally {
 		await host.close("test");
 	}
-	// The runner's own check, when pnpm's list changed after the plan, explains the same way out.
-	assert.match(guidance.blocked["pnpm-pi-newer"], /newer than Pi 1\.0\.0.*`pnpm remove -g @earendil-works\/pi-coding-agent`/);
 });
 
-test("/api/plan says that Gentle Shell is installed with the pinned Pi in one pnpm step", async () => {
-	const { host, port, login } = await start({ collect: async () => collected({ pi: { available: true, version: "1.0.4", usable: true, external: true } }) });
-	try {
-		const view = await plan(port, await login());
-		assert.equal(view.actions.find((action: { id: string }) => action.id === "install-shell").description,
-			`Install Gentle Shell (gentle-pi) globally with pnpm, together with Pi ${PI_INSTALL_VERSION} in one step, so Gentle Shell runs exactly that Pi. ` +
-			`A Pi that pnpm already installed globally is replaced by Pi ${PI_INSTALL_VERSION}; any other Pi is left unchanged.`);
-	} finally {
-		await host.close("test");
+test("the outcome says which Pi Gentle Shell runs only when it is not the installer's Pi", async () => {
+	const cases: [object, string][] = [
+		[{ outcome: "ready", completed: [], piVersion: "1.1.0" }, `${guidance.outcomes.ready} Gentle Shell runs Pi 1.1.0, which pnpm installed next to it.`],
+		[{ outcome: "terminal-action-required", action: "open-new-terminal", completed: [], piVersion: "1.1.0" },
+			`${guidance.outcomes["terminal-action-required"]} Gentle Shell runs Pi 1.1.0, which pnpm installed next to it.`],
+		[{ outcome: "ready", completed: [] }, guidance.outcomes.ready],
+		[{ outcome: "ready", completed: [], piVersion: PI_INSTALL_VERSION }, guidance.outcomes.ready],
+		[{ outcome: "ready", completed: [], piVersion: "1.1.0 <script>" }, guidance.outcomes.ready],
+	];
+	for (const [result, expected] of cases) {
+		const { host, port, login } = await start({ runInstall: async () => result as never });
+		try {
+			const cookie = await login();
+			const { planId } = await plan(port, cookie);
+			assert.equal((await post(port, "/api/install", cookie, { planId, consent: true })).status, 202);
+			await waitFor(() => host.outcome() !== null);
+			assert.equal(host.outcome()?.guidance, expected, JSON.stringify(result));
+			assert.equal("piVersion" in (host.outcome() ?? {}), false);
+		} finally {
+			await host.close("test");
+		}
 	}
 });
 
@@ -484,14 +491,12 @@ test("/api/plan describes updating an existing Gentle Shell on either channel", 
 		const cookie = await login();
 		const release = await plan(port, cookie);
 		assert.deepEqual(release.actions.map((action: { id: string; description: string }) => [action.id, action.description]), [
-			["update-shell-release", "Update Gentle Shell to the latest release with the package manager that installed it (pnpm or npm). " +
-				`With pnpm, Pi ${PI_INSTALL_VERSION} is installed with it in one step, so Gentle Shell runs exactly that Pi.`],
+			["update-shell-release", "Update Gentle Shell to the latest release with the package manager that installed it (pnpm or npm)."],
 			["setup-shell", release.actions[1].description],
 			["verify-readiness", "Verify that the installed stack is ready."]]);
 		const main = JSON.parse((await send(port, { path: "/api/plan?channel=main", headers: { cookie, ...API } })).body);
 		assert.equal(main.actions[0].description,
-			"Update Gentle Shell and Gentle AI to the latest commits of `main`, built on this computer, with the package manager that installed Gentle Shell. " +
-			`With pnpm, Pi ${PI_INSTALL_VERSION} is installed with it in one step, so Gentle Shell runs exactly that Pi.`);
+			"Update Gentle Shell and Gentle AI to the latest commits of `main`, built on this computer, with the package manager that installed Gentle Shell.");
 	} finally {
 		await host.close("test");
 	}
