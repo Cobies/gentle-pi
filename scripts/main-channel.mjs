@@ -28,8 +28,8 @@ const deadlines = Object.freeze({ build: 15 * MINUTE, version: 30_000, extract: 
 const MAX_SOURCE_BYTES = 100 * 1024 * 1024;
 
 export class MainChannelError extends Error {
-	constructor(code, message) {
-		super(`${code}: ${message}`);
+	constructor(code, message, cause) {
+		super(`${code}: ${message}`, cause === undefined ? undefined : { cause });
 		this.name = "MainChannelError";
 		this.code = code;
 	}
@@ -101,6 +101,18 @@ function succeeded(result) {
 	return result?.code === 0 && result.timedOut !== true && result.signal == null;
 }
 
+/** The failed command's bounded stderr tail as an error cause, or undefined when it printed nothing. */
+function stderrCause(result) {
+	const tail = typeof result?.stderrTail === "string" ? result.stderrTail.trim() : "";
+	return tail.length > 0 ? new Error(tail) : undefined;
+}
+
+/** On Windows, System32's bsdtar by absolute path: an MSYS tar earlier on PATH (Git for
+ * Windows' usr\bin) reads a drive-letter archive path such as `D:\...` as a remote host. */
+function tarCommand(platform) {
+	return platform === "win32" ? win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
+}
+
 function sealedGoEnvironment(goPath, buildDirectory, platform) {
 	const temporary = join(buildDirectory, "tmp");
 	const base = {
@@ -127,8 +139,8 @@ export async function buildMainGentleAi({ commit, ctx, platform, goPath, run, fs
 	const env = sealedGoEnvironment(goPath, buildDirectory, platform);
 	for (const path of [env.GOBIN, env.GOPATH, env.GOMODCACHE, env.GOCACHE, join(buildDirectory, "tmp")]) await fs.mkdir(path, { recursive: true });
 	try {
-		const install = await run(goPath, ["install", `${GENTLE_AI_MAIN_PACKAGE}@${commit}`], { env, cwd: buildDirectory, deadlineMs: deadlines.build });
-		if (!succeeded(install)) throw new MainChannelError("main-gentle-ai-build-failed", `go install ${GENTLE_AI_MAIN_PACKAGE}@${commit} failed`);
+		const install = await run(goPath, ["install", `${GENTLE_AI_MAIN_PACKAGE}@${commit}`], { env, cwd: buildDirectory, deadlineMs: deadlines.build, stderrTail: 4096 });
+		if (!succeeded(install)) throw new MainChannelError("main-gentle-ai-build-failed", `go install ${GENTLE_AI_MAIN_PACKAGE}@${commit} failed`, stderrCause(install));
 		await fs.mkdir(directory, { recursive: true });
 		const binaryPath = join(directory, executable);
 		await fs.copyFile(join(env.GOBIN, executable), binaryPath);
@@ -148,7 +160,7 @@ export async function buildMainGentleAi({ commit, ctx, platform, goPath, run, fs
 }
 
 /** Packs Gentle Shell from `commit` as `<version>-main.<sha12>` without running `prepack`. */
-export async function packMainShell({ commit, ctx, fetch, run, pnpm, fs }) {
+export async function packMainShell({ commit, ctx, fetch, run, pnpm, fs, platform = process.platform }) {
 	if (!SHA.test(commit)) throw new MainChannelError("main-shell-pack-failed", "the Gentle Shell commit is not an exact SHA");
 	const packages = join(configHome(ctx), "main", "packages");
 	const work = join(configHome(ctx), "main", ".source");
@@ -169,8 +181,9 @@ export async function packMainShell({ commit, ctx, fetch, run, pnpm, fs }) {
 		const archive = join(work, "source.tgz");
 		await fs.writeFile(archive, bytes);
 		const source = join(work, "src");
-		if (!succeeded(await run("tar", ["-xzf", archive, "-C", source, "--strip-components=1"], { deadlineMs: deadlines.extract }))) {
-			throw new MainChannelError("main-shell-pack-failed", "the Gentle Shell source archive could not be extracted");
+		const extract = await run(tarCommand(platform), ["-xzf", archive, "-C", source, "--strip-components=1"], { deadlineMs: deadlines.extract, stderrTail: 4096 });
+		if (!succeeded(extract)) {
+			throw new MainChannelError("main-shell-pack-failed", "the Gentle Shell source archive could not be extracted", stderrCause(extract));
 		}
 		const manifestPath = join(source, "package.json");
 		const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
@@ -200,7 +213,7 @@ export function mainChannelAdapter({ fetch = globalThis.fetch, fs }) {
 	return {
 		resolveCommit: (repository) => resolveMainCommit(repository, { fetch }),
 		buildGentleAi: ({ commit, goPath, platform, ctx, run }) => buildMainGentleAi({ commit, ctx, platform, goPath, run, fs }),
-		packShell: ({ commit, ctx, run, pnpm }) => packMainShell({ commit, ctx, fetch, run, pnpm, fs }),
+		packShell: ({ commit, ctx, run, pnpm, platform }) => packMainShell({ commit, ctx, fetch, run, pnpm, fs, platform }),
 		writeChannel: (ctx, state) => writeChannel(ctx, state, fs),
 	};
 }
@@ -370,7 +383,7 @@ export async function runUpgrade({ args, ctx, platform, arch = process.arch, pac
 	if (!aiCurrent) await buildMainGentleAi({ commit: gentleAiCommit, ctx, platform, goPath: await mainGo({ userGo, pinnedGo, run }), run, fs });
 	if (!shellCurrent) {
 		const manager = await ownerManager({ ctx, platform, packageRoot, fs, which, run });
-		const tgz = await packMainShell({ commit: shellCommit, ctx, fetch, run, pnpm: { command: pnpmPath, prefix: [] }, fs });
+		const tgz = await packMainShell({ commit: shellCommit, ctx, fetch, run, pnpm: { command: pnpmPath, prefix: [] }, fs, platform });
 		await installGlobal(manager, tgz, run);
 	}
 	await writeChannel(ctx, { channel: "main", shellCommit, gentleAiCommit }, fs);

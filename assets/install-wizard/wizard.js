@@ -235,7 +235,9 @@ export function progressModel(steps, entries, { running = false, outcome = null 
 	};
 }
 
-const detailCommands = new Map([["shell-setup", "gentle-shell setup"], ["persist-path", "pnpm setup"], ["acquire-go", "the Go download"]]);
+const detailCommands = new Map([["shell-setup", "gentle-shell setup"], ["persist-path", "pnpm setup"], ["acquire-go", "the Go download"],
+	["install-global", "pnpm add -g"], ["install-shell-main", "the Gentle Shell main install"], ["build-gentle-ai-main", "the Gentle AI main build"],
+	["update-shell", "the Gentle Shell update"]]);
 
 /** Final screen model for every runner outcome. Guidance always comes from the host. */
 export function outcomeModel(outcome) {
