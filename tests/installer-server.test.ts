@@ -1178,3 +1178,51 @@ test("onRedeemed runs once, only for a valid code, and a throwing hook never bre
 		await host.close("test");
 	}
 });
+
+// S6: the Windows PNPM_HOME decision reaches the plan copy before consent.
+const W_DEFAULT = "C:\\Users\\m\\AppData\\Local\\pnpm";
+const W_PRIVATE = "C:\\Users\\m\\.pnpm";
+const weak = { check: "target-acl-mask", at: "C:\\Users\\m\\AppData\\Local", sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" };
+async function windowsView(pnpmHome: object, changes: Record<string, unknown> = {}) {
+	const { host, port, login } = await start({ collect: async () => collected({ platform: "win32", go: { available: true, version: "1.26.0", usable: true },
+		globalBin: { available: true, path: `${W_PRIVATE}\\bin`, writable: true, onPath: false }, pnpmHome, ...changes }) });
+	try {
+		return await plan(port, await login());
+	} finally {
+		await host.close("test");
+	}
+}
+const names = (text: string, parts: string[]) => { for (const part of parts) assert.ok(text.includes(part), `${part} in: ${text}`); };
+
+test("/api/plan says before consent that a private PNPM_HOME replaces a default another account can change", async () => {
+	const view = await windowsView({ available: true, path: W_PRIVATE, source: "private", rejected: { path: W_DEFAULT, ...weak } });
+	assert.deepEqual(view.blockers, []);
+	assert.equal(view.profileChange.changesProfile, true);
+	names(view.profileChange.description, [W_DEFAULT, weak.at, "S-1-5-21-1-2-3-1002 (PC\\other)", "0x001301BF", W_PRIVATE, "`pnpm setup`",
+		`PNPM_HOME=${W_PRIVATE}`, `${W_PRIVATE}\\bin`, "new terminals", "only you, SYSTEM and Administrators"]);
+	assert.equal(view.persistence.pnpmHome, W_PRIVATE);
+	// A passing default keeps the existing copy.
+	const plain = await windowsView({ available: true, path: W_DEFAULT, source: "default" });
+	assert.doesNotMatch(plain.profileChange.description, /private/);
+});
+
+test("/api/plan names the folder, principal, rights and remedy when PNPM_HOME is not private", async () => {
+	const cases = [
+		[{ available: true, path: W_DEFAULT, source: "default", untrusted: weak, installed: true }, [W_DEFAULT, "already holds files", "never moves or deletes", "%USERPROFILE%\\.pnpm"]],
+		[{ available: true, path: "D:\\pnpm", source: "user", untrusted: { ...weak, at: "D:\\pnpm" } }, ["PNPM_HOME is set to D:\\pnpm", "%USERPROFILE%\\.pnpm"]],
+		[{ available: true, path: W_DEFAULT, source: "default", untrusted: weak, private: { path: W_PRIVATE, foreign: true } }, [W_PRIVATE, "did not create"]],
+		[{ available: true, path: W_DEFAULT, source: "default", untrusted: weak, private: { path: W_PRIVATE, untrusted: { check: "target-owner", at: "C:\\Users\\m", sid: "S-1-5-21-9" } } },
+			[W_PRIVATE, "C:\\Users\\m is owned by S-1-5-21-9"]],
+	] as const;
+	for (const [pnpmHome, parts] of cases) {
+		const view = await windowsView(pnpmHome);
+		assert.deepEqual(view.actions, []);
+		assert.deepEqual(view.blockers.map((blocker: { code: string; tool: string }) => [blocker.code, blocker.tool]), [["untrusted-pnpm-home", "pnpmHome"]]);
+		names(view.blockers[0].guidance, [...parts, "S-1-5-21-1-2-3-1002 (PC\\other)", "0x001301BF"]);
+	}
+	const failed = await windowsView({ available: null, failed: true });
+	assert.deepEqual(failed.blockers.map((blocker: { code: string; tool: string }) => [blocker.code, blocker.tool]), [["unknown-tool", "pnpmHome"]]);
+	assert.match(failed.blockers[0].guidance, /PNPM_HOME/);
+	assert.ok(guidance.blocked["pnpm-home-changed"].length > 20);
+	assert.ok(guidance.failed["prepare-pnpm-home"].includes("%USERPROFILE%\\.pnpm"));
+});

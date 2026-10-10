@@ -112,7 +112,9 @@ caller-provided functions; adapter implementations require review.
   value; otherwise pnpm's documented default (`$XDG_DATA_HOME/pnpm` or
   `~/.local/share/pnpm` on Linux, `~/Library/pnpm` on macOS,
   `%LOCALAPPDATA%\pnpm` on Windows). A relative PNPM_HOME or missing home is
-  unknown, not guessed.
+  unknown, not guessed. On Windows the wizard first checks that folder's
+  permissions and may use `%USERPROFILE%\.pnpm` instead or block
+  ([Windows PNPM_HOME](#windows-pnpm_home)).
 - `setup` is a boolean evidence of normal Shell setup readiness. Unknown setup
   on an existing stack blocks; a missing Shell/native binary needs normal setup.
 
@@ -317,7 +319,8 @@ No-process gates, all returning `blocked`:
    from source (`go-required`). A recovery or a Pi-only update runs no
    postinstall, so it needs no Go.
 4. `pnpmGlobalBin` resolves PNPM_HOME (`pnpm-home-unknown` otherwise) and
-   `nodePath` is absolute.
+   `nodePath` is absolute. A Windows plan with a private PNPM_HOME must name
+   that same folder (`pnpm-home-changed` otherwise).
 5. pnpm comes from the bootstrap handoff `GENTLE_INSTALL_PNPM_NODE` +
    `GENTLE_INSTALL_PNPM_ENTRY` (both absolute), or on POSIX from a `pnpm`
    executable on PATH. Windows requires the handoff because a `.cmd` shim cannot
@@ -325,7 +328,10 @@ No-process gates, all returning `blocked`:
    reused arrives alone as the absolute `.exe` in `GENTLE_INSTALL_PNPM_COMMAND`.
 
 Every child process receives the user's environment plus `PNPM_HOME` and
-`$PNPM_HOME/bin` first on PATH.
+`$PNPM_HOME/bin` first on PATH. With a private Windows PNPM_HOME, the children
+also get `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` under it
+(unless the user set them), and the first step, `prepare-pnpm-home`, claims
+that folder before any command ([Windows PNPM_HOME](#windows-pnpm_home)).
 
 Pre-install checks, returning `blocked` on a false result or adapter error:
 
@@ -1247,6 +1253,85 @@ whose wrapper, Node, entry, metadata or `pnpm.exe` fails the reparse, owner or
 ACL walk is never run: like an untrusted user Node in `bootstrap.cmd`, it is
 left as it is, and the pinned pnpm is acquired into the private directory. A
 `policy` denial, unknown evidence and every other check still stop.
+
+### Windows PNPM_HOME
+
+The bootstrap's private directory only holds the temporary tools. The wizard
+then installs Node.js, npm, pnpm, Pi and Gentle Shell under PNPM_HOME and runs
+them from `$PNPM_HOME\bin`. On the tester's profile that folder,
+`%LOCALAPPDATA%\pnpm`, sat below the same `%LOCALAPPDATA%` another account
+could modify. So before any probe the wizard walks PNPM_HOME with the same
+checks as the tools directory: reparse points, trusted owners and the
+`acl-mask` masks, up to the drive root. It walks the folder and its `bin` when
+they exist, or the nearest existing ancestor when the folder does not exist
+yet (held to the strict depth-0 mask).
+
+| PNPM_HOME | Walk | Result |
+|-----------|------|--------|
+| Set by the user | Passes | Used as before. |
+| Set by the user | Fails | Blocked: `untrusted-pnpm-home`. |
+| Not set: `%LOCALAPPDATA%\pnpm` | Passes | Used as before; the plan is unchanged. |
+| Not set: `%LOCALAPPDATA%\pnpm` | Fails, and nothing is installed there | `%USERPROFILE%\.pnpm` is used, if it passes the walk too. |
+| Not set: `%LOCALAPPDATA%\pnpm` | Fails, and something is installed there | Blocked: `untrusted-pnpm-home`. |
+| Any | The walk cannot finish (policy, PowerShell) | Blocked: `unknown-tool` for `pnpmHome`. |
+
+"Nothing is installed" has one exact meaning: `%LOCALAPPDATA%\pnpm` does not
+exist, or it is a real directory (not a link) with no entries at all. Any
+entry, even an empty `store` folder or a pnpm config file, counts as an
+installation. The installer never moves, deletes or adopts it.
+
+`%USERPROFILE%\.pnpm` is accepted only when it passes the walk and is absent,
+empty, or marked as created by this flow: it holds a regular
+`.gentle-shell-pnpm-home` file with the exact text
+`gentle-pi private pnpm home`. A non-empty folder without that marker is
+foreign and blocks, and so does one that fails the walk.
+
+The plan says all of this before consent: the default folder, the account
+(SID, and its name when it resolves) and the rights that failed, the private
+folder, and that `pnpm setup` will save `PNPM_HOME=%USERPROFILE%\.pnpm` and
+add `%USERPROFILE%\.pnpm\bin` to the user PATH for new terminals. A blocker
+names the same folder, account and rights, plus the remedy: remove that
+account's write access, or set PNPM_HOME to a private folder such as
+`%USERPROFILE%\.pnpm` and reinstall the global pnpm packages there.
+
+After consent the runner's first step, `prepare-pnpm-home`, claims the private
+folder before any pnpm command could create it with inherited permissions. It
+uses the bootstrap claim's exact statements: owner set to the user, a
+protected DACL with FullControl only for the user, SYSTEM and Administrators,
+then a readback of the protection, the owner and every ACE. An empty existing
+folder gets the same DACL; a marked one is kept as it is. Then the marker is
+written and the folder is walked again. Any failure stops the installation
+before any command (`prepare-pnpm-home`).
+
+`pnpm setup` persists the folder. pnpm 11.1.1's `setup` reads its home from
+the `PNPM_HOME` environment variable (`getDataDir`) and, on Windows, writes it
+to `HKCU\Environment` as `PNPM_HOME`, then puts `%PNPM_HOME%\bin` first in the
+user Path (`addDirToWindowsEnvPath`). The runner gives `pnpm setup` the
+private PNPM_HOME, and runs it even for an update, which otherwise keeps the
+PATH its installation already uses. A registry `PNPM_HOME` that already holds
+another value makes `pnpm setup` fail with `ERR_PNPM_BAD_ENV_FOUND` instead of
+overwriting it. The native Windows tests check the decision, the claim and the
+probe. No test runs `pnpm setup` against a real user registry: the registry
+write is pnpm's own behavior, read from the pnpm 11.1.1 package source.
+
+pnpm also keeps its global config (`%LOCALAPPDATA%\pnpm\config`), cache
+(`%LOCALAPPDATA%\pnpm-cache`) and state (`%LOCALAPPDATA%\pnpm-state`) under
+`%LOCALAPPDATA%`. For exact versions, pnpm 11.1.1 resolves from cached registry
+metadata without asking the registry. With a private PNPM_HOME, the installer's
+own children therefore get `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and
+`XDG_STATE_HOME` under it, unless the user set them. They are never persisted:
+`pnpm setup` still saves only PNPM_HOME and the user Path.
+
+Residual risk: after the installation, the user's own pnpm commands, and
+Gentle Shell's later `gentle-shell upgrade`, still use pnpm's default config
+and cache folders under `%LOCALAPPDATA%` unless the user configures them. The
+installer protects its own run and the binaries it persists; it does not make
+the rest of a writable `%LOCALAPPDATA%` safe.
+
+A pnpm whose storage fails the walk is never run anywhere. That includes the
+wizard probe's `--version` of the user's own pnpm next to the bootstrap's:
+its shim and what the shim runs are walked first, and any failure counts as
+not usable.
 
 ### Target-versus-ancestor ACL boundary
 

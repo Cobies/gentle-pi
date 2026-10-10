@@ -85,6 +85,7 @@ const probeNames = ["node", "pnpm", "pi", "shell", "gentleAi", "go", "globalBin"
  * { available: true, recoverable: true } for the pinned stack this pnpm installed
  * whose setup did not finish (only its setup is then planned).
  * Version values are exact stable versions, not raw arbitrary command output.
+ * On Windows the wizard adds pnpmHome, its PNPM_HOME decision (windowsPnpmHome).
  */
 export async function collectInventory({ platform, arch, probes = {} }) {
 	const inventory = { platform, arch };
@@ -100,6 +101,9 @@ export async function collectInventory({ platform, arch, probes = {} }) {
 }
 
 const MAIN_BUILD = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-main\.[0-9a-f]{12}$/;
+function plainRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 function versionParts(version) {
 	if (typeof version !== "string" || !/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) return null;
 	const parts = version.replace(/^v/, "").split(".").map(Number);
@@ -225,6 +229,20 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 	const binKnown = bin?.available === true && typeof bin.path === "string" && bin.path.trim().length > 0 &&
 		bin.writable === true && typeof bin.onPath === "boolean";
 	record("globalBin", bin?.available === false ? "unavailable" : binKnown ? (bin.onPath ? "reusable" : "needs-setup") : "unknown");
+	// Windows only: the PNPM_HOME decision the wizard made before probing (S6,
+	// windowsPnpmHome). A passing user or default folder changes nothing here; a
+	// private one is recorded for the runner and the plan copy; an untrusted one, or
+	// a walk that could not finish, blocks.
+	const home = platform === "win32" && plainRecord(inventory.pnpmHome) ? inventory.pnpmHome : null;
+	if (home?.failed === true) blockers.push({ code: "unknown-tool", tool: "pnpmHome" });
+	else if (home?.available === true && plainRecord(home.untrusted) && typeof home.path === "string") {
+		tools.pnpmHome = { status: "untrusted", path: home.path, source: home.source === "user" ? "user" : "default" };
+		blockers.push({ code: "untrusted-pnpm-home", tool: "pnpmHome" });
+	} else if (home?.available === true && home.source === "private" && typeof home.path === "string" && typeof home.rejected?.path === "string") {
+		const finding = Object.fromEntries(["check", "at", "sid", "account", "rights"]
+			.filter((key) => typeof home.rejected[key] === "string").map((key) => [key, home.rejected[key]]));
+		tools.pnpmHome = { status: "private", path: home.path, default: home.rejected.path, finding };
+	}
 	const missingShell = tools.shell.status === "unavailable";
 	// Setup recovery: the setup probe proved the pinned stack this pnpm installed
 	// (an earlier run stopped in setup), so only the public setup is rerun.

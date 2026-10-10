@@ -10,6 +10,7 @@ import { acquireGo } from "../scripts/installer-downloads.mjs";
 import { goFirstEnvironment, lookPath, packageNativeGentleAi, pnpmInvocation, runStandardInstall } from "../scripts/installer-runner.mjs";
 import { createInstallerServer } from "../scripts/installer-server.mjs";
 import { configHome, mainChannelAdapter, runUpgrade } from "../scripts/main-channel.mjs";
+import { ensureWindowsPnpmHome, windowsWizardEnvironment } from "../scripts/installer-windows.mjs";
 
 // Browser installation wizard entry, started by the bootstrap with no argv.
 // Thin wiring only: real probes and adapters, the standard runner and the
@@ -126,6 +127,11 @@ async function main() {
 	// The redirect file is removed once the code is redeemed, or when the host closes.
 	let redeemed = false;
 	let redirect = null;
+	// Windows: the PNPM_HOME decision (S6) is made before any probe, on every
+	// preflight. The server re-collects right before an installation, so the
+	// installation uses the decision its consented plan was checked against.
+	let wizard = { env, pnpmHome: null };
+	const decide = () => (wizard = platform === "win32" ? windowsWizardEnvironment({ env }) : { env, pnpmHome: null });
 	const host = createInstallerServer({
 		onRedeemed: () => {
 			redeemed = true;
@@ -133,12 +139,15 @@ async function main() {
 		},
 		assetsDir: fileURLToPath(new URL("../assets/install-wizard/", import.meta.url)),
 		collectPlan: async (channel) => {
+			const { env: wizardEnv, pnpmHome } = decide();
 			// Fresh probes every time: createProbes caches its global package listing.
-			const inventory = await collectInventory({ platform, arch, probes: createProbes({ platform, env, run, fs }) });
+			const inventory = await collectInventory({ platform, arch, probes: createProbes({ platform, env: wizardEnv, run, fs, pnpmHome }) });
+			if (pnpmHome) inventory.pnpmHome = pnpmHome;
 			return { inventory, plan: planPreflight(inventory, { channel }) };
 		},
 		runInstall: async (request, log) => {
-			const runnerEnv = await runnerEnvironment({ platform, env, fs });
+			const { env: wizardEnv, pnpmHome } = wizard;
+			const runnerEnv = await runnerEnvironment({ platform, env: wizardEnv, fs });
 			const ctx = { env: runnerEnv, home: runnerEnv.HOME ?? env.HOME ?? env.USERPROFILE };
 			return runStandardInstall(request, {
 			platform,
@@ -147,9 +156,11 @@ async function main() {
 			run,
 			fs,
 			// An existing Gentle Shell: fresh probes find it, `gentle-shell upgrade`'s logic updates it.
-			locateShell: () => createProbes({ platform, env, run, fs }).locateShell(),
+			locateShell: () => createProbes({ platform, env: wizardEnv, run, fs, pnpmHome }).locateShell(),
 			// An older Pi: fresh probes find it before its update and confirm it afterwards.
-			locatePi: () => createProbes({ platform, env, run, fs }).locatePi(),
+			locatePi: () => createProbes({ platform, env: wizardEnv, run, fs, pnpmHome }).locatePi(),
+			// Only a plan with a private Windows PNPM_HOME: claimed, then walked again.
+			preparePnpmHome: (home) => ensureWindowsPnpmHome(home, runnerEnv),
 			// Only a plan that needs Go and found it missing or older: verified go.dev
 			// bytes under <config home>/tools/go, used by path or child PATH only.
 			acquireGo: () => acquireGo({ root: join(configHome(ctx), "tools", "go"), platform, arch }),

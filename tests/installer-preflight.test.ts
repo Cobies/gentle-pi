@@ -542,3 +542,47 @@ test("an older Go is left as it is: the pinned Go is acquired alongside, and a s
 	const ready = planPreflight({ ...installed("darwin"), go: absent }, { channel: "main" });
 	assert.deepEqual(ready.actions.map((action: { id: string }) => action.id), ["verify-readiness"]);
 });
+
+// S6: the Windows PNPM_HOME decision (windowsPnpmHome) the wizard records before
+// any probe. A passing default leaves the plan exactly as before.
+const W_DEFAULT = "C:\\Users\\m\\AppData\\Local\\pnpm";
+const W_PRIVATE = "C:\\Users\\m\\.pnpm";
+const weakFinding = { check: "target-acl-mask", at: "C:\\Users\\m\\AppData\\Local", sid: "S-1-5-21-1-2-3-1002", account: "PC\\other", rights: "0x001301BF" };
+test("a Windows PNPM_HOME that passes the walk leaves the plan unchanged; POSIX ignores the record", () => {
+	for (const pnpmHome of [{ available: true, path: W_DEFAULT, source: "default" }, { available: true, path: "D:\\pnpm", source: "user" }]) {
+		for (const inventory of [clean("win32"), installed("win32")]) assert.deepEqual(planPreflight({ ...inventory, pnpmHome }), planPreflight(inventory));
+	}
+	const untrusted = { available: true, path: "/home/u/.local/share/pnpm", source: "user", untrusted: weakFinding };
+	assert.deepEqual(planPreflight({ ...clean("linux"), pnpmHome: untrusted }), planPreflight(clean("linux")));
+	assert.deepEqual(planPreflight({ ...clean("win32"), pnpmHome: { available: null } }), planPreflight(clean("win32")), "no decision recorded");
+});
+
+test("a private Windows PNPM_HOME is recorded with the default it replaces and why, and its PATH is set up", () => {
+	const pnpmHome = { available: true, path: W_PRIVATE, source: "private", rejected: { path: W_DEFAULT, ...weakFinding } };
+	const plan = planPreflight({ ...clean("win32"), pnpmHome });
+	assert.deepEqual(plan.blockers, []);
+	assert.deepEqual(plan.tools.pnpmHome, { status: "private", path: W_PRIVATE, default: W_DEFAULT, finding: weakFinding });
+	assert.deepEqual(plan.actions, planPreflight(clean("win32")).actions);
+	assert.ok(plan.actions.some((action: { id: string }) => action.id === "setup-global-bin"));
+	// Only known string fields reach the plan.
+	const odd = planPreflight({ ...clean("win32"), pnpmHome: { ...pnpmHome, rejected: { path: W_DEFAULT, check: "target-owner", at: W_DEFAULT, sid: 7, extra: "x" } } });
+	assert.deepEqual(odd.tools.pnpmHome.finding, { check: "target-owner", at: W_DEFAULT });
+});
+
+test("an untrusted Windows PNPM_HOME, or one that could not be checked, blocks before any action", () => {
+	const cases = [
+		[{ available: true, path: W_DEFAULT, source: "default", untrusted: weakFinding, installed: true }, "untrusted-pnpm-home"],
+		[{ available: true, path: "D:\\pnpm", source: "user", untrusted: weakFinding }, "untrusted-pnpm-home"],
+		[{ available: true, path: W_DEFAULT, source: "default", untrusted: weakFinding, private: { path: W_PRIVATE, foreign: true } }, "untrusted-pnpm-home"],
+		[{ available: null, failed: true }, "unknown-tool"],
+	] as const;
+	for (const [pnpmHome, code] of cases) {
+		for (const inventory of [clean("win32"), installed("win32")]) {
+			const plan = planPreflight({ ...inventory, pnpmHome });
+			assert.deepEqual(plan.blockers.filter((blocker: { tool: string }) => blocker.tool === "pnpmHome"), [{ code, tool: "pnpmHome" }], JSON.stringify(pnpmHome));
+			assert.deepEqual(plan.actions, []);
+			assert.equal(plan.ready, false);
+		}
+	}
+	assert.equal(planPreflight({ ...clean("win32"), pnpmHome: cases[0][0] }).tools.pnpmHome.status, "untrusted");
+});
