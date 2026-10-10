@@ -161,6 +161,7 @@ try {
 } catch { if ($_.Exception.Message -cmatch '^(policy|(target|parent|ancestor)-(reparse|owner|acl-mask))$') { 'unsafe:' + $_.Exception.Message } else { throw } }
 `;
 const storageChecks = /^(?:policy|(?:target|parent|ancestor)-(?:reparse|owner|acl-mask))$/;
+const untrustedStorage = /^(?:target|parent|ancestor)-(?:reparse|owner|acl-mask)$/;
 /** Only exact `safe` passes. A fixed rejection code is kept as `check`; any other
  * output is rejected without carrying its text.
  */
@@ -281,14 +282,18 @@ function proveCli(node, entry, metadata, env, processAdapter) {
  * `pnpm setup`, @pnpm/exe, pnpm 12, a Volta or mise shim), directly or as a
  * shim's target; a package.json beside that exe must report its version.
  * One whose stable version is of another major or older than the pin is left as
- * it is: the verified pnpm is acquired instead. Unknown evidence still refuses.
+ * it is: the verified pnpm is acquired instead. So is one whose wrapper, Node,
+ * entry, metadata or exe fails the reparse/owner/ACL walk (a %LOCALAPPDATA%
+ * another principal may write): it never runs, like an untrusted user Node in
+ * bootstrap.cmd. Policy denials and unknown evidence still refuse.
  */
 export async function ensureWindowsPnpm({ tools, env, node = process.execPath, adapters = {}, onStep = () => {} }) {
 	const processAdapter = adapters.process ?? windowsProcessCheck;
 	const storage = adapters.storage ?? verifyWindowsStorage;
 	onStep("pnpm-discovery");
 	const existing = (adapters.findCommand ?? findWindowsCommand)(env);
-	if (existing) {
+	// Only storage checks carry a role code; everything else keeps stopping.
+	if (existing) try {
 		onStep("wrapper-storage");
 		storage(existing, env);
 		onStep("wrapper");
@@ -348,6 +353,8 @@ export async function ensureWindowsPnpm({ tools, env, node = process.execPath, a
 				return { acquired: false, env, command: exe, prefix: [] };
 			}
 		}
+	} catch (error) {
+		if (!untrustedStorage.test(error?.check ?? "")) throw error;
 	}
 	onStep("tools-check");
 	storage(tools, env);

@@ -1088,9 +1088,9 @@ Windows bootstrap end to end still lacks native acceptance evidence.
 | Step | Windows contract |
 | --- | --- |
 | Entry | Small CMD entry invokes fixed stock Windows PowerShell commands with no profile. Paths are environment data, not interpolated PowerShell source. Delayed CMD expansion is disabled. |
-| Storage | Claim a new random-named prerequisite directory below LOCALAPPDATA, never reuse an existing destination. Verify each path component's reparse attributes, owner and role-specific ACL rights. Protect the claimed directory's DACL for the invoking SID, SYSTEM and Administrators, and read it back. |
+| Storage | Claim a new random-named prerequisite directory directly below `%LOCALAPPDATA%`, or below `%USERPROFILE%` when `%LOCALAPPDATA%` fails `acl-mask` or `home-owner` (see [claim candidates](#claim-candidates-and-owners)); never reuse an existing destination. Verify each path component's reparse attributes, owner and role-specific ACL rights. Set the claimed directory's owner to the invoking SID, protect its DACL for the invoking SID, SYSTEM and Administrators, and read both back. |
 | Node | Reuse a proven stable existing Node ≥24.3.0 and the repository minimum. Otherwise (missing, an older stable version, or a Node whose storage fails the reparse/owner/ACL walk, which therefore never runs) leave it as it is and acquire only the fixed official Node 24.21.0 Windows x64/arm64 ZIP, with no redirects and bounded transport, verify SHA256 before opening the archive, validate the whole namespace and extract only regular `node.exe`. |
-| pnpm | Reuse only a [known shim](#windows-command-shims) of pnpm's own JS entry, with package identity, bin target, stable CLI version, compatible engine and global add/bin help evidence, preserving its sibling-Node preference or proving its inherited cwd/PATH/PATHEXT Node selection; or a native `pnpm.exe` (pnpm's installer and `pnpm setup`, `pnpm self-update`, @pnpm/exe, pnpm 12, a Volta or mise shim), directly or as a known shim's target, whose `--version` is stable and equals a `package.json` beside it, with the same global help evidence. Never execute a shim via cmd.exe. Unknown wrappers block without replacement. One whose stable version is of another major or older than 11.1.1 is left as it is, and pnpm is acquired as when missing. |
+| pnpm | A pnpm whose wrapper, Node, entry, metadata or exe fails the reparse/owner/ACL walk never runs: it is left as it is and pnpm is acquired as when missing. Reuse only a [known shim](#windows-command-shims) of pnpm's own JS entry, with package identity, bin target, stable CLI version, compatible engine and global add/bin help evidence, preserving its sibling-Node preference or proving its inherited cwd/PATH/PATHEXT Node selection; or a native `pnpm.exe` (pnpm's installer and `pnpm setup`, `pnpm self-update`, @pnpm/exe, pnpm 12, a Volta or mise shim), directly or as a known shim's target, whose `--version` is stable and equals a `package.json` beside it, with the same global help evidence. Never execute a shim via cmd.exe. Unknown wrappers block without replacement. One whose stable version is of another major or older than 11.1.1 is left as it is, and pnpm is acquired as when missing. |
 | Missing pnpm | Shared pnpm 11.1.1 URL/SRI and raw `>=22.13` engine identity are unchanged. Parse bounded gzip/USTAR bytes, reject unsupported extensions, links and unsafe Windows namespaces before no-clobber publication. Return a direct Node + JS-entry invocation; do not fabricate a wrapper. |
 | Handoff | Existing Node helper starts the fixed wizard entry `bin/gentle-shell-install.mjs`. Only child PATH is refreshed. No persistent PATH, global installation, product root or companion installation is created here. |
 
@@ -1156,6 +1156,67 @@ kill. Valid output followed by a hang is a failure. Production never kills
 process groups or unrelated processes. Forked descendants retaining stdio are
 outside the guarantee; the interactive wizard has no total deadline.
 
+### Claim candidates and owners
+
+The claim tries at most two bases, in this order:
+
+1. `%LOCALAPPDATA%`, with the CMD's random `.gentle-shell-bootstrap-tools.*` name.
+2. `%USERPROFILE%`, with its own random name. It is tried only when the first
+   candidate fails `acl-mask` or `home-owner`. Any other rejection stops at once.
+
+A beta tester's profile showed why. Another principal had Modify rights
+(`0x1301bf`) on `%LOCALAPPDATA%` and on `AppData`, so the claim failed
+`acl-mask`. That rejection is right: a folder another principal can write is
+never used to run binaries, and it is never relaxed. `%USERPROFILE%` does not
+sit below `AppData`, so it can still be a clean base.
+
+Each candidate gets every check: the exact-parent rule (`path-mismatch`), the
+base owner (`home-owner`) and the whole ancestor walk up to the drive root
+(`ancestor-reparse`, `ancestor-owner`, `acl-mask`). Nothing is created until one
+candidate passes them all. The `acl-mask` masks, the reparse checks, the
+collision check, the random name and the no-UNC rule are the same for both.
+When the fallback is claimed, the stage exits 2 and CMD switches
+`GENTLE_BOOTSTRAP_TOOLS` to it before it records ownership. Every later stage,
+the failure cleanup and the success cleanup use that one path.
+
+The base may be owned by the invoking SID, SYSTEM (`S-1-5-18`) or
+BUILTIN\Administrators (`S-1-5-32-544`). The tester's profile was owned by
+SYSTEM. Both principals are already trusted for every ancestor and keep
+FullControl in the private DACL, so neither gains anything new.
+TrustedInstaller, which ancestors may still have as owner, and any other SID
+fail `home-owner`.
+
+An Administrators member's new folders may default to BUILTIN\Administrators as
+owner. The claim never relies on that default. It writes the invoking SID as
+owner together with the protected DACL, then reads back the protection, the
+owner (`private-owner`) and every ACE.
+
+When no candidate passes, the first line is unchanged and still ends with
+`Reason: <code>`, the code of the check that stopped the claim. One more line
+follows for each candidate tried, with its folder and code. For `acl-mask` the
+line also names the folder holding the ACE, the principal (SID, and the account
+name when it resolves) and the rights it was allowed. For `home-owner` it names
+the owner. For example:
+
+```text
+Bootstrap: private storage ACL/reparse/ownership claim failed or policy denied it. Reason: acl-mask
+Bootstrap: storage candidate C:\Users\me\AppData\Local: acl-mask at C:\Users\me\AppData\Local: S-1-5-21-…-1002 (PC\other) allowed 0x001301BF
+Bootstrap: storage candidate C:\Users\me: acl-mask at C:\Users: S-1-5-21-…-1002 (PC\other) allowed 0x00100002
+```
+
+A failure after the walk (`collision`, `protected-dacl`, `private-owner`,
+`private-ace`, or an unexpected step) adds a line naming the chosen directory.
+
+The Node helper accepts the same location. Its storage check walks the tools
+directory under `%USERPROFILE%` with the same masks and owners, so the
+tester's layout passes and a writable ancestor still rejects it.
+
+The helper also stops failing on the user's own pnpm in such a profile. A pnpm
+whose wrapper, Node, entry, metadata or `pnpm.exe` fails the reparse, owner or
+ACL walk is never run: like an untrusted user Node in `bootstrap.cmd`, it is
+left as it is, and the pinned pnpm is acquired into the private directory. A
+`policy` denial, unknown evidence and every other check still stop.
+
 ### Target-versus-ancestor ACL boundary
 
 For untrusted SIDs, the fixed predicates allow ReadAndExecute plus Synchronize
@@ -1182,7 +1243,7 @@ Failure cleanup targets only the directory claimed by the actual attempt;
 collisions and unrelated storage are not removed. Prerequisite tools remain
 available to children while the wizard runs. After the helper exits 0, a final
 stage removes the claimed root only when its full path is a direct child of
-`%LOCALAPPDATA%` named `.gentle-shell-bootstrap-tools.*`, neither it nor its
+`%LOCALAPPDATA%` or `%USERPROFILE%` named `.gentle-shell-bootstrap-tools.*`, neither it nor its
 `.bootstrap-owned` marker is a reparse point, and the marker holds the exact
 text. It uses `[IO.Directory]::Delete(path, true)`, which does not recurse
 through reparse points, instead of Windows PowerShell 5.1 `Remove-Item`. A
@@ -1199,17 +1260,19 @@ administrator, nor eliminate same-principal time-of-check/time-of-use races.
 
 A rejected storage claim keeps its user-facing message and appends one fixed
 code naming the failed check, for example `... policy denied it. Reason: home-owner`.
-The code never contains a path, SID or exception text. Intentional rejections
+The code never contains a path, SID or exception text. The lines after it name
+each candidate folder and, for `acl-mask`, the principal and its rights (see
+[claim candidates](#claim-candidates-and-owners)). Intentional rejections
 report their own code:
 
 | Code | Rejected check |
 |------|----------------|
 | `policy` | PowerShell is not in FullLanguage mode. |
-| `path-mismatch` | `%LOCALAPPDATA%` is not rooted, the target is UNC, or the target's parent is not exactly `%LOCALAPPDATA%`. |
-| `home-owner` | `%LOCALAPPDATA%` is not owned by the invoking SID. |
+| `path-mismatch` | The candidate base (`%LOCALAPPDATA%` or `%USERPROFILE%`) is not rooted, the target is UNC, or the target's parent is not exactly that base. |
+| `home-owner` | The candidate base is not owned by the invoking SID, SYSTEM or Administrators. On `%LOCALAPPDATA%` it leads to the `%USERPROFILE%` candidate. |
 | `ancestor-reparse` | An ancestor is not a directory or is a reparse point. |
 | `ancestor-owner` | An ancestor owner is not the invoking SID, SYSTEM, Administrators or TrustedInstaller. |
-| `acl-mask` | An untrusted effective allow ACE exceeds the depth's allowed rights mask. |
+| `acl-mask` | An untrusted effective allow ACE exceeds the depth's allowed rights mask. On `%LOCALAPPDATA%` it leads to the `%USERPROFILE%` candidate. |
 | `collision` | The random destination already exists; it is never reused or changed. |
 | `protected-dacl` | The readback DACL is not protected from inheritance. |
 | `private-owner` | The readback owner is not the invoking SID. |
@@ -1223,7 +1286,7 @@ never pose as an intentional rejection:
 |------|------------------|
 | `unexpected-policy` | Language mode and identity lookup. |
 | `unexpected-path-mismatch` | Path normalization. |
-| `unexpected-home-owner` | Reading the `%LOCALAPPDATA%` owner. |
+| `unexpected-home-owner` | Reading the candidate base's owner. |
 | `unexpected-ancestor-walk` | Reading an ancestor's attributes or ACL. |
 | `unexpected-create` | Creating the new directory, including a destination that appeared after the collision check. |
 | `unexpected-private-acl` | Writing or reading back the private DACL. |
@@ -1307,8 +1370,11 @@ Codes: `native-unavailable`, `bundle-missing`, `prerequisite`, `unsafe-path`,
 `pnpm-engine`, `pnpm-version`, `pnpm-capability`, `process-failed`,
 `interpreter`, `unsafe-tools`, `pnpm-conflict`, `archive`, `pnpm-pin`,
 `pnpm-entry`, `acquisition`, `wizard-missing`, `wizard-start` and
-`wizard-exit`. For example, `parent-owner (wrapper-storage)` means the
-directory holding `pnpm.cmd` has an untrusted owner. The helper's storage check
+`wizard-exit`. For example, `parent-owner (tools-check)` means the
+directory holding the claimed tools directory has an untrusted owner. A walk
+code on the user's own pnpm (`wrapper-storage`, `node-storage`,
+`entry-storage`, `metadata-storage`, `exe-storage`) is not a failure: that
+pnpm is never run and the pinned one is acquired. The helper's storage check
 prints `unsafe:<code>` for a walk rejection and still accepts only exact `safe`;
 any other PowerShell exception exits nonzero and reports `unexpected-<step>`.
 
@@ -1389,16 +1455,18 @@ names.
 
 An earlier CI run reported `home-owner` for every native claim. The actual
 cause was this module-load failure, reported as the step that was running;
-`unexpected-<step>` now separates the two. The `home-owner` check requires
-`%LOCALAPPDATA%` to be owned by the invoking SID itself, not by a trusted
-group. A real `%LOCALAPPDATA%` created by the User Profile Service is owned by
-the user. Elevated members of Administrators on Windows Server may create new
-directories owned by BUILTIN\Administrators, depending on the default-owner
-policy. The native fixtures therefore set the invoking SID as owner of the
-fixture root and of every fixture directory used as `LOCALAPPDATA`, read the
-owner back, and fail loudly before any production stage runs. Production is
-unchanged: a real user whose `%LOCALAPPDATA%` is owned by Administrators fails
-closed with `home-owner` and no storage is claimed.
+`unexpected-<step>` now separates the two. The `home-owner` check first
+required the base to be owned by the invoking SID itself. A real
+`%LOCALAPPDATA%` created by the User Profile Service is owned by the user, but
+a beta tester's profile was owned by SYSTEM, and elevated members of
+Administrators may create new directories owned by BUILTIN\Administrators,
+depending on the default-owner policy. The check now also accepts SYSTEM and
+Administrators as the base owner (see
+[claim candidates](#claim-candidates-and-owners)); any other owner, including
+TrustedInstaller, still fails closed with `home-owner`. The native fixtures
+still set the invoking SID as owner of the fixture root, read it back and fail
+loudly before any production stage runs. The candidate tests also hand one
+fixture base to Administrators on purpose.
 
 ### Implemented fixtures versus missing execution evidence
 
