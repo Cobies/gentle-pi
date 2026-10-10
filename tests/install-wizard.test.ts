@@ -448,6 +448,14 @@ test("expectedSteps runs the pinned Go acquisition after the pre-install checks 
 	assert.deepEqual(wizard.expectedSteps([...go, "install-pi", "install-shell", "setup-shell", "verify-readiness", ...mainIds]),
 		["check-npm", "check-global-bin", "check-existing-stack", ...go, "install-global", "verify-global-list", "verify-shell-bin",
 			"verify-gentle-ai", ...mainIds, "shell-setup"]);
+	// Like the runner, the pinned Go comes before the runtime is persisted.
+	assert.deepEqual(wizard.expectedSteps(["setup-global-bin", ...go, "persist-node", "persist-package-managers", "configure-npm-prefix",
+		"install-pi", "install-shell", "setup-shell", "verify-readiness", ...mainIds]),
+		["check-global-bin", "check-existing-stack", ...go, "persist-node", "persist-package-managers", "verify-persistent-runtime", "check-npm",
+			"configure-npm-prefix", "install-global", "verify-global-list", "verify-shell-bin", "verify-gentle-ai", ...mainIds, "shell-setup", "persist-path"]);
+	assert.deepEqual(wizard.expectedSteps([...go, "persist-pnpm", "install-pi", "install-shell", "setup-shell", "verify-readiness"]),
+		["check-npm", "check-global-bin", "check-existing-stack", ...go, "persist-pnpm", "verify-persistent-pnpm", "install-global",
+			"verify-global-list", "verify-shell-bin", "verify-gentle-ai", "shell-setup"]);
 	assert.deepEqual(wizard.expectedSteps([...go, "update-shell-main", "setup-shell", "verify-readiness"]),
 		["check-npm", "check-global-bin", "check-installed-shell", ...go, "update-shell", "verify-updated-shell", "shell-setup"]);
 	for (const id of go) assert.notEqual(wizard.stepLabel(id), id, `label for ${id}`);

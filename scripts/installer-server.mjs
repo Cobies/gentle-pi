@@ -143,8 +143,9 @@ export const guidance = Object.freeze({
 	}),
 	// A failed shell-setup whose detail shows GitHub's anonymous API limit.
 	setupRateLimit: "`gentle-shell setup` could not finish because GitHub's limit for anonymous API requests was reached on this network. Wait up to an hour, then run the installer again.",
-	// A failed persist-path whose detail shows pnpm could not tell the shell (POSIX SHELL missing or unsupported).
+	// A failed acquire-go whose detail names a Go folder the installer did not publish.
 	goDestinationConflict: `A Go folder from an earlier, interrupted installer run is in the way, and the installer never replaces a folder it cannot prove it published. Remove that folder (shown below), then run the installer again. Nothing was installed.`,
+	// A failed persist-path whose detail shows pnpm could not tell the shell (POSIX SHELL missing or unsupported).
 	persistPathShell: "`pnpm setup` could not tell which shell profile to edit because the SHELL environment variable is missing or names an unsupported shell. Open a regular terminal and run the installer again, or add `$PNPM_HOME/bin` to your PATH yourself.",
 	fallback: "The installation stopped for an unexpected reason. Nothing else will run; check the terminal and run the installer again.",
 });

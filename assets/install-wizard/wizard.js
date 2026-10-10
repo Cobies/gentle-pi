@@ -128,7 +128,8 @@ export function expectedSteps(actionIds) {
 	// An npm that is about to be installed is checked after it is added.
 	// With Pi already installed, only Gentle Shell is added, so only it must be absent.
 	const shellOnly = ids.has("install-shell") && !ids.has("install-pi");
-	const steps = [...(addNpm ? [] : ["check-npm"]), "check-global-bin", shellOnly ? "check-existing-shell" : "check-existing-stack", ...piCheck];
+	// The pinned Go comes right after the checks, before anything is persisted.
+	const steps = [...(addNpm ? [] : ["check-npm"]), "check-global-bin", shellOnly ? "check-existing-shell" : "check-existing-stack", ...piCheck, ...go];
 	if (ids.has("persist-node")) {
 		steps.push("persist-node", "persist-package-managers", "verify-persistent-runtime", "check-npm", "configure-npm-prefix");
 	} else if (addNpm || addPnpm) {
@@ -137,7 +138,7 @@ export function expectedSteps(actionIds) {
 		if (addNpm) steps.push("check-npm");
 		if (addPnpm) steps.push("verify-persistent-pnpm");
 	}
-	steps.push(...go, ...piSteps, "install-global", "verify-global-list", "verify-shell-bin", "verify-gentle-ai", "shell-setup");
+	steps.push(...piSteps, "install-global", "verify-global-list", "verify-shell-bin", "verify-gentle-ai", "shell-setup");
 	if (ids.has("setup-global-bin")) steps.push("persist-path");
 	return withMain(ids, steps);
 }

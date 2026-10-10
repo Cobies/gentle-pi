@@ -152,21 +152,21 @@ this inventory, **not that verification has executed**.
 A clean target receives these intents in dependency order:
 
 1. Acquire and verify Node, then pnpm; prepare the usable global-bin environment.
-   Persist only what is missing. A bootstrap-only reusable Node gets the full
+2. When a build needs Go (the main channel, or a Windows Gentle Shell install or
+   update whose postinstall may build Gentle AI) and Go is missing or older,
+   `acquire-go` and `verify-go` come next, before every persistence and install
+   step, so a failed Go download leaves the computer as it was.
+3. Persist only what is missing. A bootstrap-only reusable Node gets the full
    group, always together: `persist-node` (`persist-runtime`, version
    24.21.0), `persist-package-managers` (`install-global`) and
    `configure-npm-prefix` (`configure`). A persistent Node is never replaced:
    it gets at most one intent, `persist-npm` (npm 11.19.0) when no usable
    npm resolves (on POSIX a working npm from any version manager is usable), `persist-pnpm` (pnpm 11.1.1) when pnpm is bootstrap-only, or
    `persist-package-managers` when both are missing.
-2. When a build needs Go (the main channel, or a Windows Gentle Shell install or
-   update whose postinstall may build Gentle AI) and Go is missing or older,
-   `acquire-go` and `verify-go` come before every persistence and install step,
-   so a failed Go download leaves the computer as it was.
-3. Install Pi globally, then `gentle-pi` globally (its existing postinstall owns
+4. Install Pi globally, then `gentle-pi` globally (its existing postinstall owns
    native installation). For an existing Shell with missing native binary, call
    the existing installer instead.
-4. Run normal Shell setup and verify stack readiness. Verification is always
+5. Run normal Shell setup and verify stack readiness. Verification is always
    included, even when all components can be reused.
 
 A recoverable setup (the pinned stack is installed, Gentle AI is verified and
@@ -366,9 +366,10 @@ Pre-install checks, returning `blocked` on a false result or adapter error:
    `check-recoverable-stack` instead (see [Setup recovery](#setup-recovery)).
 
 Mutating and verification steps, returning `failed` with `failedStep` and the
-`completed` step list. When the plan contains a persistence variant, its
-[runtime persistence](#runtime-persistence) steps run first, after
-`check-global-bin` and `check-existing-stack`:
+`completed` step list. When the plan acquires the pinned Go, `acquire-go` and
+`verify-go` run first, after `check-global-bin` and `check-existing-stack`
+([Pinned Go](#pinned-go)). When it contains a persistence variant, its
+[runtime persistence](#runtime-persistence) steps run next:
 
 1. `install-global`: exactly one
    `pnpm add -g @earendil-works/pi-coding-agent@1.0.0 gentle-pi@<package version> --allow-build=gentle-pi`.
