@@ -1179,15 +1179,25 @@ async function maybeAutoProvisionHome(home, runtime, { homeHadContentBeforeBoots
 	}
 }
 
-// `gentle-shell upgrade`: runs before any Pi runtime check, since it may replace this package.
-async function handleUpgradeCommand(commandArgs) {
-	const { MainChannelError, runUpgrade } = await import("../scripts/main-channel.mjs");
+// The adapters `upgrade` and `self-uninstall` run npm and pnpm with: { fs, which, run, invocation? }.
+async function packageManagerAdapters() {
 	const { hostAdapters } = await import("../scripts/installer-probes.mjs");
 	const { upgradeInvocation } = await import("../scripts/installer-runner.mjs");
 	const { run, fs: probeFs } = hostAdapters();
-	const which = async (name) => findOnPath(name) ?? null;
 	// Windows: npm and pnpm are .cmd shims; run what they run, never through cmd.exe.
 	const invocation = upgradeInvocation({ platform: process.platform, env: process.env, run, fs: probeFs });
+	return {
+		fs: await import("node:fs/promises"),
+		which: async (name) => findOnPath(name) ?? null,
+		...(invocation ? { invocation } : {}),
+		run: (command, argv, options = {}) => run(command, argv, { env: options.env ?? process.env, cwd: options.cwd, deadlineMs: options.deadlineMs ?? 20 * 60_000 }),
+	};
+}
+
+// `gentle-shell upgrade`: runs before any Pi runtime check, since it may replace this package.
+async function handleUpgradeCommand(commandArgs) {
+	const { MainChannelError, runUpgrade } = await import("../scripts/main-channel.mjs");
+	const managers = await packageManagerAdapters();
 	try {
 		process.exitCode = await runUpgrade({
 			args: commandArgs,
@@ -1195,19 +1205,34 @@ async function handleUpgradeCommand(commandArgs) {
 			platform: process.platform,
 			packageRoot,
 			currentVersion: ownPackageVersion(),
-			adapters: {
-				fetch: globalThis.fetch,
-				fs: await import("node:fs/promises"),
-				which,
-				...(invocation ? { invocation } : {}),
-				run: (command, argv, options = {}) => run(command, argv, { env: options.env ?? process.env, cwd: options.cwd, deadlineMs: options.deadlineMs ?? 20 * 60_000 }),
-			},
+			adapters: { fetch: globalThis.fetch, ...managers },
 			out: (line) => process.stdout.write(`${line}\n`),
 		});
 	} catch (error) {
 		if (error instanceof MainChannelError) fail(`gentle-shell upgrade: ${error.message}`, error.code === "upgrade-usage" ? 2 : 1);
 		throw error;
 	}
+}
+
+// `gentle-shell self-uninstall`: like upgrade, runs before any Pi runtime check,
+// so it also works when pi is missing.
+async function handleSelfUninstallCommand(commandArgs) {
+	const { askLine, runSelfUninstall } = await import("../runtime/gentle-shell-uninstall.mjs");
+	const { ownerManager } = await import("../scripts/main-channel.mjs");
+	const managers = await packageManagerAdapters();
+	const ctx = { env: process.env, home: homedir() };
+	process.exitCode = await runSelfUninstall({
+		args: commandArgs,
+		env: process.env,
+		homedir: homedir(),
+		platform: process.platform,
+		interactive: process.stdin.isTTY === true,
+		resolveOwner: () => ownerManager({ ctx, platform: process.platform, packageRoot, adapters: managers, command: "uninstall" }),
+		run: (command, argv) => managers.run(command, argv),
+		ask: (question) => askLine(question, { input: process.stdin, output: process.stdout }),
+		out: (line) => process.stdout.write(`${line}\n`),
+		err: (line) => process.stderr.write(`${line}\n`),
+	});
 }
 
 async function main() {
@@ -1223,6 +1248,10 @@ async function main() {
 	}
 	if (args.command === "upgrade") {
 		await handleUpgradeCommand(args.commandArgs);
+		return;
+	}
+	if (args.command === "self-uninstall") {
+		await handleSelfUninstallCommand(args.commandArgs);
 		return;
 	}
 
