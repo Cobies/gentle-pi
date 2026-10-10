@@ -1,8 +1,8 @@
 import { isSessionChangeEvidence, type SessionChangeEvidence } from "./session-changes.ts";
 import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { DefaultPackageManager, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { DefaultPackageManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { tmpdir, userInfo } from "node:os";
+import { join, resolve } from "node:path";
 import type { Duplex, Readable, Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { withoutInteractiveHost } from "./rpc-host.ts";
@@ -283,9 +283,14 @@ const WEB_TOOL_NAMES = ["web_enable", "web_search", "source_check", "fetch_conte
 function requestedWebPackagePaths(request: TaskRequest): string[] {
 	if (!WEB_TOOL_NAMES.every(name => request.agent.tools.includes(name))) return [];
 	try {
+		let agentDir = request.env.PI_CODING_AGENT_DIR;
+		if (!agentDir || /^~(?:$|[/\\])/.test(agentDir)) {
+			const home = (process.platform === "win32" ? request.env.USERPROFILE : request.env.HOME) || userInfo().homedir;
+			agentDir = agentDir ? agentDir.replace(/^~/, home) : join(home, ".pi", "agent");
+		}
 		const manager = new DefaultPackageManager({
 			cwd: request.cwd,
-			agentDir: request.env?.PI_CODING_AGENT_DIR ?? getAgentDir(),
+			agentDir,
 			settingsManager: SettingsManager.inMemory(),
 		});
 		const installed = manager.getInstalledPath("npm:pi-web-access", "user");
@@ -298,7 +303,14 @@ function requestedWebPackagePaths(request: TaskRequest): string[] {
 
 export function childArguments(request: TaskRequest, instructionsPath?: string): string[] {
 	const args = ["--mode", "rpc", "--session-dir", request.sessionDir];
-	const extensionPaths = [...new Set([...(request.extensionPaths ?? []), ...requestedWebPackagePaths(request)])];
+	const extensionPaths = [...new Set(request.extensionPaths ?? [])];
+	for (const packagePath of requestedWebPackagePaths(request)) {
+		const injected = extensionPaths.some(path => {
+			try { return realpathSync(resolve(request.cwd, path)) === packagePath; }
+			catch { return false; }
+		});
+		if (!injected) extensionPaths.push(packagePath);
+	}
 	args.push(...childPackageExtensionArgs({ noExtensions: request.noExtensions === true, extensionPaths }));
 	if (request.resumeSessionPath) args.push("--session", request.resumeSessionPath);
 	if (request.model) args.push("--model", request.thinking ? `${formatModelRef(request.model)}:${request.thinking}` : formatModelRef(request.model));

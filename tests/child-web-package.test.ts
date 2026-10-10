@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -39,6 +39,7 @@ function paths(args: string[]): string[] {
 test("requested direct web loads only the installed package alongside the frozen owned bootstrap", () => {
 	const f = fixture();
 	try {
+		f.request.env.HOME = f.request.env.USERPROFILE = join(f.root, "other-home");
 		const args = childArguments(f.request);
 		assert.deepEqual(paths(args), [...f.request.extensionPaths!, f.packageRoot]);
 		assert.ok(args.includes("--no-extensions"), "do not enable ambient plugins to obtain web access");
@@ -63,6 +64,38 @@ test("already injected web package is not added twice", () => {
 		const request = { ...f.request, extensionPaths: [...f.request.extensionPaths!, f.packageRoot] };
 		assert.deepEqual(paths(childArguments(request)), request.extensionPaths);
 	} finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a symlink to the injected web package is not loaded again", () => {
+	const f = fixture();
+	try {
+		const alias = join(f.root, "web-alias");
+		symlinkSync(f.packageRoot, alias, "junction");
+		for (const path of [alias, "web-alias"]) {
+			const request = { ...f.request, extensionPaths: [...f.request.extensionPaths!, path] };
+			assert.deepEqual(paths(childArguments(request)), request.extensionPaths);
+		}
+	} finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("web lookup uses the child's home instead of the parent agent directory", () => {
+	const f = fixture();
+	const parentAgentDir = process.env.PI_CODING_AGENT_DIR;
+	try {
+		process.env.PI_CODING_AGENT_DIR = join(f.root, "parent-agent");
+		const home = join(f.root, "child-home");
+		const packageRoot = join(home, ".pi", "agent", "npm", "node_modules", "pi-web-access");
+		mkdirSync(packageRoot, { recursive: true });
+		const homeEnv = process.platform === "win32" ? { USERPROFILE: home } : { HOME: home };
+		for (const override of [undefined, "", "~/.pi/agent"]) {
+			const request = { ...f.request, env: { ...homeEnv, PI_CODING_AGENT_DIR: override } };
+			assert.deepEqual(paths(childArguments(request)), [...f.request.extensionPaths!, packageRoot]);
+		}
+	} finally {
+		if (parentAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = parentAgentDir;
+		rmSync(f.root, { recursive: true, force: true });
+	}
 });
 
 test("missing or incompatible SDK package lookup never installs or enables ambient extensions", () => {
@@ -93,14 +126,22 @@ test("explicit capability scope, not agent name, determines optional web loading
 	} finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-async function sdkFixture(block: boolean) {
+async function sdkFixture(block: boolean, injectAlias = false) {
 	const f = fixture();
 	const marker = "controlled public web evidence";
 	const counter = `webFixture_${Math.random().toString(36).slice(2)}`;
 	const state = globalThis as unknown as Record<string, number>;
 	state[counter] = 0;
+	const hooks = `${counter}_hooks`;
+	state[hooks] = 0;
+	if (injectAlias) {
+		const alias = join(f.root, "web-alias");
+		symlinkSync(f.packageRoot, alias, "junction");
+		f.request.extensionPaths!.push(alias);
+	}
 	writeFileSync(join(f.packageRoot, "dist", "index.js"), `
 export default function(api) {
+	api.on("session_start", () => { globalThis[${JSON.stringify(hooks)}]++; });
 	for (const name of ${JSON.stringify(webTools)}) api.registerTool({
 		name, label: name, description: "Controlled web fixture",
 		parameters: { type: "object", properties: { url: { type: "string" } }, additionalProperties: false },
@@ -151,6 +192,7 @@ export default function(api) {
 		assert.deepEqual(loader.getExtensions().errors, []);
 		({ session } = await createAgentSession({ cwd: f.root, agentDir: join(f.root, "agent"), modelRuntime: runtime, model: runtime.getModel("offline-web", "configured-small")!, resourceLoader: loader, settingsManager, sessionManager: SessionManager.inMemory(), tools: webTools }));
 		await session.bindExtensions({ mode: "json" });
+		assert.equal(state[hooks], 1, "the package's session hook must register only once");
 		await session.prompt("Retrieve the controlled public source directly.");
 		assert.deepEqual(calls, ["fetch_content"], JSON.stringify({ observed, messages: session.messages.map(message => ({ role: message.role, errorMessage: message.role === "assistant" ? message.errorMessage : undefined, content: message.role === "toolResult" ? message.content : undefined })) }));
 		assert.ok(observed.length >= 2);
@@ -164,12 +206,17 @@ export default function(api) {
 	} finally {
 		session?.dispose();
 		delete state[counter];
+		delete state[hooks];
 		rmSync(f.root, { recursive: true, force: true });
 	}
 }
 
 test("production child paths register and execute web through actual SDK hooks without network", async () => {
 	await sdkFixture(false);
+});
+
+test("a symlink-injected web package registers actual SDK hooks once", async () => {
+	await sdkFixture(false, true);
 });
 
 test("normal SDK permission hook blocks web execution before the backend", async () => {
