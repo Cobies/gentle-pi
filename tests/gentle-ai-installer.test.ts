@@ -114,6 +114,7 @@ interface WindowsGoCall {
 	file: string;
 	arguments_: string[];
 	options: {
+		cwd?: string;
 		env?: NodeJS.ProcessEnv;
 		shell?: boolean;
 		timeout?: number;
