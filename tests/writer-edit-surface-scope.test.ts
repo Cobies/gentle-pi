@@ -66,7 +66,7 @@ async function assertAccepted(input: Record<string, unknown>, message: string) {
 }
 
 const RESEND = "Resend the same task text unchanged except for that section; never shorten or re-summarize it.";
-const PROBLEM = /^(?:No `## Allowed edit surfaces` heading was found\.|The section has no entries\.|Repeated sections list different surfaces\.|Line ".+" is not a valid surface entry; move prose under a following Markdown heading\.|Line ".+" is not a valid surface entry; if it is a path, wrap the whole entry in backticks, otherwise move it under a following Markdown heading\.|Entry ".+" is not a narrow repository-relative path; remove absolute paths, `\.\.` segments, root globs, and stray backticks\.)$/;
+const PROBLEM = /^(?:No `## Allowed edit surfaces` heading was found\.|The section has no entries\.|Repeated sections list different surfaces\.|Line ".+" is not a valid surface entry; move prose under a following Markdown heading\.|Line ".+" is not a valid surface entry; if it is a path, wrap the whole entry in backticks, otherwise move it under a following Markdown heading\.|Entry ".+" is not a narrow repository-relative path(?: \(use ".+" instead\))?; remove absolute paths, `\.\.` segments, root globs, and stray backticks\.)$/;
 
 // Every rejection is the canonical text, exactly one concrete problem, and the
 // resend instruction; nothing else (review R3-005).
@@ -422,81 +422,87 @@ test("agents outside the bounded writer set are not scope-guarded", async () => 
 	}, "a read-only explorer needs no edit surfaces");
 });
 
-test("in-repository absolute paths are normalized to repository-relative paths and accepted", async () => {
+test("in-repository absolute paths are rejected with actionable suggestion and task is never mutated", async () => {
 	const repoRoot = "/workspace/my-project";
+	const originalTask = [
+		"Update the status parser.",
+		"",
+		"## Allowed edit surfaces",
+		`- \`${repoRoot}/lib/sdd-status.ts\``,
+		`- ${repoRoot}/tests/sdd-status.test.ts`,
+		"",
+		"### Validation",
+		"npm test",
+	].join("\n");
 	const input: Record<string, unknown> = {
 		agent: "gentle-ai-worker",
 		mode: "task",
 		workspace_root: repoRoot,
-		task: [
-			"Update the status parser.",
-			"",
-			"## Allowed edit surfaces",
-			`- \`${repoRoot}/lib/sdd-status.ts\``,
-			`- ${repoRoot}/tests/sdd-status.test.ts`,
-			"",
-			"### Validation",
-			"npm test",
-		].join("\n"),
+		task: originalTask,
 	};
 
-	await assertAccepted(input, "in-repository absolute paths under workspace_root are normalized and accepted");
-	assert.equal(
-		input.task,
-		[
-			"Update the status parser.",
-			"",
-			"## Allowed edit surfaces",
-			"- `lib/sdd-status.ts`",
-			"- tests/sdd-status.test.ts",
-			"",
-			"### Validation",
-			"npm test",
-		].join("\n"),
-		"task prompt is rewritten with clean repository-relative surfaces",
+	const result = await dispatchWriter(input);
+	assert.equal(result?.block, true, "in-repository absolute paths under workspace_root are rejected");
+	assert.ok(
+		result?.reason.includes('(use "lib/sdd-status.ts" instead)'),
+		`rejection reason must include exact actionable hint: ${result?.reason}`,
 	);
+	assert.equal(input.task, originalTask, "input.task remains completely unmutated");
 
 	const winRoot = "C:\\Users\\Dev\\project";
+	const winOriginalTask = [
+		"## Allowed edit surfaces",
+		`- \`${winRoot}\\src\\index.ts\``,
+		`- ${winRoot}\\tests\\index.test.ts`,
+	].join("\n");
 	const winInput: Record<string, unknown> = {
 		agent: "gentle-ai-worker",
 		mode: "task",
 		repository_root: winRoot,
-		task: [
-			"## Allowed edit surfaces",
-			`- \`${winRoot}\\src\\index.ts\``,
-			`- ${winRoot}\\tests\\index.test.ts`,
-		].join("\n"),
+		task: winOriginalTask,
 	};
-	await assertAccepted(winInput, "in-repository Windows drive paths under repository_root are normalized and accepted");
-	assert.equal(
-		winInput.task,
-		[
-			"## Allowed edit surfaces",
-			"- `src/index.ts`",
-			"- tests/index.test.ts",
-		].join("\n"),
-		"Windows drive paths are normalized to clean forward-slash relative surfaces",
+	const winResult = await dispatchWriter(winInput);
+	assert.equal(winResult?.block, true, "in-repository Windows drive paths under repository_root are rejected");
+	assert.ok(
+		winResult?.reason.includes('(use "src/index.ts" instead)'),
+		`Windows path rejection must include exact actionable hint: ${winResult?.reason}`,
 	);
+	assert.equal(winInput.task, winOriginalTask, "winInput.task remains completely unmutated");
 
-	await assertRejected({
+	const outsidePosixResult = await dispatchWriter({
 		agent: "gentle-ai-worker",
 		mode: "task",
 		workspace_root: repoRoot,
-		task: ["## Allowed edit surfaces", `- \`${repoRoot}/lib/sdd-status.ts\``, "- `/etc/passwd`"].join("\n"),
-	}, "out-of-repository POSIX absolute path remains rejected");
+		task: ["## Allowed edit surfaces", "- `/etc/passwd`"].join("\n"),
+	});
+	assert.equal(outsidePosixResult?.block, true);
+	assert.ok(
+		!outsidePosixResult?.reason.includes("(use "),
+		`out-of-repository POSIX absolute path is rejected without false suggestion: ${outsidePosixResult?.reason}`,
+	);
 
-	await assertRejected({
+	const outsideWinResult = await dispatchWriter({
 		agent: "gentle-ai-worker",
 		mode: "task",
 		repository_root: winRoot,
 		task: ["## Allowed edit surfaces", `- \`C:\\outside.ts\``].join("\n"),
-	}, "out-of-repository Windows drive path remains rejected");
+	});
+	assert.equal(outsideWinResult?.block, true);
+	assert.ok(
+		!outsideWinResult?.reason.includes("(use "),
+		`out-of-repository Windows path is rejected without false suggestion: ${outsideWinResult?.reason}`,
+	);
 
-	await assertRejected({
+	const rootTargetResult = await dispatchWriter({
 		agent: "gentle-ai-worker",
 		mode: "task",
 		workspace_root: repoRoot,
 		task: ["## Allowed edit surfaces", `- \`${repoRoot}\``].join("\n"),
-	}, "targeting the repository root itself as an absolute path remains rejected");
+	});
+	assert.equal(rootTargetResult?.block, true);
+	assert.ok(
+		!rootTargetResult?.reason.includes("(use "),
+		`targeting the repository root itself is rejected without false suggestion: ${rootTargetResult?.reason}`,
+	);
 });
 

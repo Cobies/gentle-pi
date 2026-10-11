@@ -1984,33 +1984,6 @@ test("bash tool_call confirms every compound action and centers a long git -C pu
 	assert.ok(preview.startsWith("…"));
 });
 
-test("bash tool_call blocks standalone sleep to prevent background polling loop", async () => {
-	type ToolCallHandler = (
-		event: { toolName: string; input: unknown },
-		ctx: ExtensionContext,
-	) => Promise<ToolCallEventResult | undefined>;
-
-	const handlers = new Map<string, ToolCallHandler>();
-	const pi = {
-		on(name: string, handler: ToolCallHandler) {
-			handlers.set(name, handler);
-		},
-		events: { emit() {} },
-		registerCommand() {},
-		registerTool() {},
-	} as unknown as ExtensionAPI;
-	createGentleAiExtension({ nativeReviewCli: null })(pi);
-	const toolCall = handlers.get("tool_call");
-	assert.equal(typeof toolCall, "function");
-
-	const ctx = { cwd: process.cwd(), hasUI: true } as ExtensionContext;
-
-	for (const cmd of ["sleep 10", "sleep 15", "sleep 1", "  sleep 5  ", "sleep 0.5;"]) {
-		const result = await toolCall!({ toolName: "bash", input: { command: cmd } }, ctx);
-		assert.equal(result?.block, true);
-		assert.match(result?.reason ?? "", /do not run sleep in bash to wait for background tasks/);
-	}
-});
 // /gentle:profiles reopens its panel after actions that finish the interaction,
 // so a test that applies once must confirm on the first visit and close on the
 // next, or the panel and the action loop feed each other forever.
@@ -3973,7 +3946,7 @@ test("context event hook prunes verbose older tool results while keeping recent 
 	const contextHook = handlers.get("context");
 	assert.equal(typeof contextHook, "function", "context hook should be registered");
 
-	const verboseOutput = "long output line\n".repeat(50);
+	const verboseOutput = "long output line\n".repeat(300);
 	const user1 = { role: "user", content: "first prompt" };
 	const tool1 = { role: "toolResult", toolName: "bash", toolCallId: "call_1", content: [{ type: "text", text: verboseOutput }] };
 	const user2 = { role: "user", content: "second prompt" };

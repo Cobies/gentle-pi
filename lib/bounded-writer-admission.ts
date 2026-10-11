@@ -130,74 +130,6 @@ export function tryNormalizeInRepoAbsolutePath(candidate: string, targetRoot: st
 	return undefined;
 }
 
-export function normalizeAllowedEditSurfacesInText(text: string, targetRoot: string): string {
-	let result = "";
-	let lastIndex = 0;
-
-	for (const match of text.matchAll(ALLOWED_EDIT_SURFACES_HEADING)) {
-		const matchIndex = match.index ?? 0;
-		result += text.slice(lastIndex, matchIndex + match[0].length);
-		const rest = text.slice(matchIndex + match[0].length);
-
-		const lineRegex = /([^\r\n]*)(\r?\n|$)/g;
-		let lineMatch: RegExpExecArray | null;
-		let sectionEndPos = 0;
-		let inSection = true;
-		const sectionParts: string[] = [];
-
-		while ((lineMatch = lineRegex.exec(rest)) !== null) {
-			if (lineMatch[0].length === 0) break;
-			const rawLine = lineMatch[1]!;
-			const lineEnding = lineMatch[2]!;
-
-			if (inSection && MARKDOWN_HEADING_LINE.test(rawLine)) {
-				inSection = false;
-				break;
-			}
-
-			if (inSection && rawLine.trim().length > 0) {
-				const indentMatch = rawLine.match(/^ {0,3}/);
-				const indent = indentMatch ? indentMatch[0] : "";
-				const afterIndent = rawLine.slice(indent.length);
-
-				const markerMatch = afterIndent.match(MARKDOWN_LIST_MARKER);
-				const marker = markerMatch ? markerMatch[0] : "";
-				const afterMarker = afterIndent.slice(marker.length);
-
-				const trimmedRight = afterMarker.replace(/ +$/g, "");
-				const trailingSpaces = afterMarker.slice(trimmedRight.length);
-				const backtickMatch = trimmedRight.match(/^`([^`]+)`$/);
-
-				if (backtickMatch) {
-					const normalized = tryNormalizeInRepoAbsolutePath(backtickMatch[1]!, targetRoot);
-					if (normalized !== undefined) {
-						sectionParts.push(`${indent}${marker}\`${normalized}\`${trailingSpaces}${lineEnding}`);
-						sectionEndPos += lineMatch[0].length;
-						continue;
-					}
-				} else if (!trimmedRight.includes("`")) {
-					const normalized = tryNormalizeInRepoAbsolutePath(trimmedRight, targetRoot);
-					if (normalized !== undefined) {
-						sectionParts.push(`${indent}${marker}${normalized}${trailingSpaces}${lineEnding}`);
-						sectionEndPos += lineMatch[0].length;
-						continue;
-					}
-				}
-				sectionParts.push(lineMatch[0]);
-			} else {
-				sectionParts.push(lineMatch[0]);
-			}
-			sectionEndPos += lineMatch[0].length;
-		}
-
-		result += sectionParts.join("");
-		lastIndex = matchIndex + match[0].length + sectionEndPos;
-	}
-
-	result += text.slice(lastIndex);
-	return result;
-}
-
 export function resolveTargetRepositoryRoot(input: Record<string, unknown>, fallbackRoot?: string): string {
 	if (typeof input.repository_root === "string" && input.repository_root.trim().length > 0) {
 		return input.repository_root.trim();
@@ -208,21 +140,11 @@ export function resolveTargetRepositoryRoot(input: Record<string, unknown>, fall
 	return fallbackRoot ?? process.cwd();
 }
 
-export function normalizeWriterEditSurfaces(input: Record<string, unknown>, defaultRoot?: string): void {
-	const targetRoot = resolveTargetRepositoryRoot(input, defaultRoot);
-	if (typeof input.task === "string") {
-		input.task = normalizeAllowedEditSurfacesInText(input.task, targetRoot);
-	}
-	if (typeof input.context === "string") {
-		input.context = normalizeAllowedEditSurfacesInText(input.context, targetRoot);
-	}
-}
-
 // This is the same canonical parser used by both the tool hook and executor.
 // Prose cannot close the section, and repeated sections must agree exactly.
 // A rejection carries the concrete problem so the caller repairs only the
 // section instead of re-summarizing the whole task (gentle-shell#1713).
-function parseAllowedEditSurfaces(values: readonly unknown[]): { paths: string[] } | { problem: string } {
+function parseAllowedEditSurfaces(values: readonly unknown[], targetRoot?: string): { paths: string[] } | { problem: string } {
 	let expected: string[] | undefined;
 	for (const value of values) {
 		if (typeof value !== "string") continue;
@@ -246,11 +168,17 @@ function parseAllowedEditSurfaces(values: readonly unknown[]): { paths: string[]
 					const quotable = prose && !quoted && !unlisted.includes("`") && !/\p{Cc}|\p{Zl}|\p{Zp}/u.test(source) && isTaskScopedRepositoryRelativePath(unlisted, true);
 					const shown = (prose ? source.trim() : path).replace(/\p{Cc}|\p{Zl}|\p{Zp}/gu, " ");
 					const bounded = shown.length > 120 ? `${shown.slice(0, 120)}...` : shown;
-					return { problem: quotable
-						? `Line "${bounded}" is not a valid surface entry; if it is a path, wrap the whole entry in backticks, otherwise move it under a following Markdown heading.`
-						: prose
-							? `Line "${bounded}" is not a valid surface entry; move prose under a following Markdown heading.`
-							: `Entry "${bounded}" is not a narrow repository-relative path; remove absolute paths, \`..\` segments, root globs, and stray backticks.` };
+					if (quotable) {
+						return { problem: `Line "${bounded}" is not a valid surface entry; if it is a path, wrap the whole entry in backticks, otherwise move it under a following Markdown heading.` };
+					}
+					if (prose) {
+						return { problem: `Line "${bounded}" is not a valid surface entry; move prose under a following Markdown heading.` };
+					}
+					const suggestedRelative = targetRoot ? tryNormalizeInRepoAbsolutePath(path, targetRoot) : undefined;
+					if (suggestedRelative && isTaskScopedRepositoryRelativePath(suggestedRelative, !!quoted)) {
+						return { problem: `Entry "${bounded}" is not a narrow repository-relative path (use "${suggestedRelative}" instead); remove absolute paths, \`..\` segments, root globs, and stray backticks.` };
+					}
+					return { problem: `Entry "${bounded}" is not a narrow repository-relative path; remove absolute paths, \`..\` segments, root globs, and stray backticks.` };
 				}
 				paths.push(path);
 			}
@@ -271,8 +199,8 @@ export function rejectUnscopedBoundedWriterDispatch(input: unknown, defaultRoot?
 	if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
 	const record = input as Record<string, unknown>;
 	if (typeof record.agent !== "string" || !WRITER_NAMES.includes(record.agent)) return undefined;
-	normalizeWriterEditSurfaces(record, defaultRoot);
-	const parsed = parseAllowedEditSurfaces([record.task, record.context]);
+	const targetRoot = resolveTargetRepositoryRoot(record, defaultRoot);
+	const parsed = parseAllowedEditSurfaces([record.task, record.context], targetRoot);
 	if ("paths" in parsed) return undefined;
 	return { block: true, reason: `${WRITER_EDIT_SURFACE_REJECTION} ${parsed.problem} Resend the same task text unchanged except for that section; never shorten or re-summarize it.` };
 }

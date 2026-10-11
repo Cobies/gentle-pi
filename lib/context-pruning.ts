@@ -1,4 +1,64 @@
 // Rolling window context pruning for historical tool outputs.
+export const DEFAULT_MAX_RETAINED_CHARS = 4_000;
+export const DEFAULT_RECENT_TURNS_TO_KEEP = 2;
+
+export const PROTECTED_TOOL_NAMES: ReadonlySet<string> = new Set([
+	"subagent_run",
+	"subagent_result",
+	"subagent_status",
+	"subagent_list_tasks",
+	"subagent_continue",
+	"gentle_review",
+	"gentle_review_capture",
+	"gentle_review_capture_group",
+	"gentle_review_scope",
+	"mem_save",
+	"mem_get_observation",
+	"mem_search",
+	"mem_context",
+	"mem_timeline",
+	"todo",
+	"ask_user_choice",
+	"ask_user_question",
+	"orchestrator_session_id",
+	"orchestrator_consult",
+]);
+
+export function isProtectedToolResult(message: any): boolean {
+	const toolName = typeof message?.toolName === "string" ? message.toolName : typeof message?.name === "string" ? message.name : "";
+	return PROTECTED_TOOL_NAMES.has(toolName);
+}
+
+const SYNTHETIC_SUBAGENT_NOTIFICATION_PATTERN = /^Subagent\s+\S+\s+\(task\s+[^)]+\)\s+(?:finished|timed out|failed)\b/i;
+
+function getUserMessageText(message: any): string {
+	if (typeof message?.content === "string") {
+		return message.content;
+	}
+	if (Array.isArray(message?.content)) {
+		const textParts = message.content.filter(
+			(part: any) => part && (part.type === "text" || typeof part === "string"),
+		);
+		if (textParts.length > 0) {
+			return textParts
+				.map((part: any) => (typeof part === "string" ? part : (part.text ?? "")))
+				.join("\n");
+		}
+	}
+	if (typeof message?.text === "string") {
+		return message.text;
+	}
+	return "";
+}
+
+export function isSyntheticSubagentNotification(message: any): boolean {
+	if (!message || message.role !== "user") {
+		return false;
+	}
+	const text = getUserMessageText(message).trim();
+	return SYNTHETIC_SUBAGENT_NOTIFICATION_PATTERN.test(text);
+}
+
 export interface ContextPruningOptions {
 	enabled?: boolean;
 	recentTurnsToKeep?: number;
@@ -87,13 +147,13 @@ export function pruneContextMessages<T = any>(
 		return [...messages];
 	}
 
-	const recentTurnsToKeep = options?.recentTurnsToKeep ?? 2;
-	const maxRetainedChars = options?.maxRetainedChars ?? 400;
+	const recentTurnsToKeep = options?.recentTurnsToKeep ?? DEFAULT_RECENT_TURNS_TO_KEEP;
+	const maxRetainedChars = options?.maxRetainedChars ?? DEFAULT_MAX_RETAINED_CHARS;
 
 	const userIndices: number[] = [];
 	for (let i = 0; i < messages.length; i++) {
 		const msg: any = messages[i];
-		if (msg && msg.role === "user") {
+		if (msg && msg.role === "user" && !isSyntheticSubagentNotification(msg)) {
 			userIndices.push(i);
 		}
 	}
@@ -114,9 +174,15 @@ export function pruneContextMessages<T = any>(
 		if (!msg || msg.role !== "toolResult") {
 			return msg;
 		}
+		if (isProtectedToolResult(msg)) {
+			return msg;
+		}
 
 		const origText = getToolResultText(msg);
 		if (origText === undefined || origText.length <= maxRetainedChars) {
+			return msg;
+		}
+		if (origText.startsWith("[Output omitted from LLM context:")) {
 			return msg;
 		}
 

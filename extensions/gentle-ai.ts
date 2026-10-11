@@ -3,7 +3,7 @@ import { pruneContextMessages } from "../lib/context-pruning.ts";
 import { recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
-import { allowedEditSurfaces, allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, normalizeAllowedEditSurfacesInText, normalizeWriterEditSurfaces, prepareBoundSessionRepository, rejectUnscopedBoundedWriterDispatch, resolveTargetRepositoryRoot, safeBootstrapDirectory, sourcePathWithinProject, tryNormalizeInRepoAbsolutePath } from "../lib/bounded-writer-admission.ts";
+import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, prepareBoundSessionRepository, rejectUnscopedBoundedWriterDispatch, resolveTargetRepositoryRoot, safeBootstrapDirectory, sourcePathWithinProject, tryNormalizeInRepoAbsolutePath } from "../lib/bounded-writer-admission.ts";
 import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProfiles, recordReviewMutation, type ReceiptSession } from "../lib/review-reminder-receipt.ts";
 import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
 import { StatusTimingDiagnostics } from "../lib/status-timing-diagnostics.ts";
@@ -30,8 +30,8 @@ import {
 	readdir,
 	writeFile,
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
 	ExtensionAPI,
@@ -469,159 +469,6 @@ function renderBackgroundSubagentsReport(
 
 const SUBAGENTS_PACKAGE_NAMES = ["pi-subagents-j0k3r", "pi-subagents"] as const;
 const SUBAGENT_RUN_TOOL = "subagent_run";
-function isAllowedOrchestratorMutationPath(rawPath: string, cwd: string): boolean {
-	if (typeof rawPath !== "string" || !rawPath.trim()) return false;
-	const normalized = rawPath.trim().replace(/\\/g, "/");
-	const strippedLeadingDot = normalized.replace(/^\.\//, "");
-
-	const allowedBookkeepingPrefixes = ["odd/tasks/", ".atl/", ".pi/", ".git/", ".engram/"];
-	if (allowedBookkeepingPrefixes.some((prefix) => strippedLeadingDot === prefix.slice(0, -1) || strippedLeadingDot.startsWith(prefix))) {
-		return true;
-	}
-
-	const resolvedCwd = resolve(cwd);
-	const absPath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(resolvedCwd, rawPath);
-	const relFromCwd = relative(resolvedCwd, absPath).replace(/\\/g, "/");
-	const isInsideCwd = !relFromCwd.startsWith("..") && !isAbsolute(relFromCwd);
-
-	if (isInsideCwd) {
-		const cleanRel = relFromCwd.replace(/^\.\//, "");
-		if (allowedBookkeepingPrefixes.some((prefix) => cleanRel === prefix.slice(0, -1) || cleanRel.startsWith(prefix))) {
-			return true;
-		}
-		const blockedSourcePrefixes = ["src/", "lib/", "extensions/", "assets/", "tests/", "bin/", "skills/", "prompts/"];
-		const blockedExactFiles = ["package.json", "package-lock.json", "tsconfig.json", "pnpm-lock.yaml"];
-		if (blockedSourcePrefixes.some((prefix) => cleanRel.startsWith(prefix)) || blockedExactFiles.includes(cleanRel)) {
-			return false;
-		}
-	}
-
-	const resolvedTemp = resolve(tmpdir());
-	const relFromTemp = relative(resolvedTemp, absPath).replace(/\\/g, "/");
-	const isInsideTemp = !relFromTemp.startsWith("..") && !isAbsolute(relFromTemp);
-	const normalizedAbs = absPath.replace(/\\/g, "/").toLowerCase();
-	if (isInsideTemp || normalizedAbs.startsWith("/tmp/") || normalizedAbs.startsWith("/var/tmp/") || normalizedAbs.startsWith("/private/tmp/")) {
-		return true;
-	}
-	return false;
-}
-
-const ORCHESTRATOR_READ_ALLOWLIST_PREFIXES = ["odd/tasks/", "skills/", ".atl/", "docs/"] as const;
-
-function isAllowedOrchestratorReadPath(rawPath: string, cwd?: string): boolean {
-	if (typeof rawPath !== "string" || !rawPath.trim()) return false;
-	const normalized = rawPath.trim().replace(/\\/g, "/");
-	if (normalized === "." || normalized === "./") return false;
-	const strippedLeadingDot = normalized.replace(/^\.\//, "");
-	if (!strippedLeadingDot || strippedLeadingDot === ".") return false;
-
-	for (const prefix of ORCHESTRATOR_READ_ALLOWLIST_PREFIXES) {
-		const prefixWithoutSlash = prefix.slice(0, -1);
-		if (strippedLeadingDot === prefixWithoutSlash || strippedLeadingDot.startsWith(prefix)) {
-			return true;
-		}
-	}
-
-	if (cwd) {
-		const resolvedCwd = resolve(cwd);
-		const absPath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(resolvedCwd, rawPath);
-		const relFromCwd = relative(resolvedCwd, absPath).replace(/\\/g, "/").replace(/^\.\//, "");
-		if (relFromCwd && relFromCwd !== "." && !relFromCwd.startsWith("..") && !isAbsolute(relFromCwd)) {
-			for (const prefix of ORCHESTRATOR_READ_ALLOWLIST_PREFIXES) {
-				const prefixWithoutSlash = prefix.slice(0, -1);
-				if (relFromCwd === prefixWithoutSlash || relFromCwd.startsWith(prefix)) {
-					return true;
-				}
-			}
-		}
-	}
-
-	return false;
-}
-
-const BOUNDED_WRITER_AGENT_NAMES = Object.freeze(["gentle-ai-worker", "worker", "jd-fix-agent"] as const);
-
-async function confirmBoundedWriterDispatch(
-	input: unknown,
-	ctx: ExtensionContext,
-): Promise<{ block: true; reason: string } | undefined> {
-	if (
-		!isRecord(input) ||
-		typeof input.agent !== "string" ||
-		!(BOUNDED_WRITER_AGENT_NAMES as readonly string[]).includes(input.agent)
-	) {
-		return undefined;
-	}
-
-	if (!ctx.hasUI || typeof ctx.ui?.confirm !== "function") {
-		return undefined;
-	}
-
-	const agentName = input.agent;
-	const label = typeof input.label === "string" ? input.label : "code modification";
-	const targetRoot = (input.repository_root as string) || (input.workspace_root as string) || ctx.cwd;
-	
-	const parsedSurfaces = allowedEditSurfaces(input.task, input.context) ??
-		(Array.isArray(input.task) ? allowedEditSurfaces(...input.task) : undefined);
-	const surfaces = parsedSurfaces && parsedSurfaces.length > 0
-		? parsedSurfaces.join(", ")
-		: "Not specified";
-
-	const promptTitle = "Authorize worker subagent dispatch";
-	const promptMessage = `Agent: ${agentName}\nLabel: ${label}\nTarget root: ${targetRoot}\nAllowed edit surfaces: ${surfaces}\n\nDo you authorize this worker subagent to proceed with editing files?`;
-
-	let approved = false;
-	try {
-		approved = (await ctx.ui.confirm(promptTitle, promptMessage)) === true;
-	} catch {
-		approved = false;
-	}
-
-	if (!approved) {
-		return {
-			block: true,
-			reason: "Gentle AI safety policy: dispatch of bounded writer subagent was declined or not authorized by the user.",
-		};
-	}
-
-	return undefined;
-}
-
-const CODE_FILE_EXTENSIONS = new Set([
-	".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".py", ".pyw", ".rs", ".c", ".h", ".cpp",
-	".hpp", ".cc", ".cxx", ".java", ".kt", ".kts", ".scala", ".rb", ".php", ".cs", ".swift", ".sh",
-	".bash", ".zsh", ".lua", ".zig", ".nim", ".dart", ".vue", ".svelte", ".sql", ".graphql", ".proto"
-]);
-
-const COMMON_CONFIG_FILENAMES = new Set([
-	"package.json", "tsconfig.json", "pnpm-lock.yaml", "package-lock.json", "go.mod", "go.sum", ".gitignore", ".env"
-]);
-
-const ALLOWLIST_PATH_PREFIXES = ["odd/tasks/", ".atl/", "skills/", ".pi/", ".git/", ".engram/"];
-const SOURCE_DIRECTORY_PREFIXES = ["src/", "lib/", "extensions/", "cmd/", "internal/", "test/", "tests/", "bin/", "app/", "packages/"];
-
-function isCodeSourcePath(rawPath: string, cwd: string): boolean {
-	if (typeof rawPath !== "string" || !rawPath.trim()) return false;
-	const normalized = rawPath.trim().replace(/\\/g, "/");
-	const strippedLeadingDot = normalized.replace(/^\.\//, "");
-	const absPath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(cwd, rawPath);
-	const normalizedAbs = absPath.replace(/\\/g, "/");
-	const relFromCwd = relative(resolve(cwd), absPath).replace(/\\/g, "/").replace(/^\.\//, "");
-
-	const lowerAbs = normalizedAbs.toLowerCase();
-	if (lowerAbs.startsWith("/tmp/") || lowerAbs.startsWith("/var/tmp/") || strippedLeadingDot.startsWith("tmp/")) return false;
-	if (normalized.toLowerCase().endsWith(".md")) return false;
-	for (const prefix of ALLOWLIST_PATH_PREFIXES) {
-		if (strippedLeadingDot.startsWith(prefix) || relFromCwd.startsWith(prefix)) return false;
-	}
-	const baseName = basename(absPath).toLowerCase();
-	if (COMMON_CONFIG_FILENAMES.has(baseName) || baseName.startsWith(".env.")) return false;
-	for (const prefix of SOURCE_DIRECTORY_PREFIXES) {
-		if (relFromCwd.startsWith(prefix) || strippedLeadingDot.startsWith(prefix)) return true;
-	}
-	if (CODE_FILE_EXTENSIONS.has(extname(absPath).toLowerCase())) return true;
-	return false;
-}
 const JUDGMENT_DAY_FIX_AGENT_NAME = "jd-fix-agent";
 const JUDGMENT_DAY_ACTIVATION_HEADING = "## Judgment Day activation";
 const JUDGMENT_DAY_ACTIVATION_SENTENCE = "User explicitly requested Judgment Day.";
@@ -774,9 +621,8 @@ function hasCanonicalJudgmentDayFixActivation(...values: unknown[]): boolean {
 const JUDGMENT_DAY_FIX_DISPATCH_REJECTION =
 	"Judgment Day fix dispatch requires exactly one `agent: \"jd-fix-agent\"`, one exact `## Judgment Day activation` section containing only `User explicitly requested Judgment Day.`, one non-empty unique canonical `## Exact authorized severe IDs` section, one exact `## Judgment Day correction batch` section with `Round: 1 of 2.` or `Round: 2 of 2.` and the matching canonical lowercase SHA-256 of one exact `## Exact frozen finding rows` section whose BLOCKER/CRITICAL open Judgment Day rows equal the authorized IDs in the same order, and the existing exact `## Allowed edit surfaces` guard. The parent must provide the canonical bounded dispatch; do not infer activation, authorization, or frozen findings.";
 
-function rejectInvalidJudgmentDayFixDispatch(input: unknown, defaultRoot?: string): { block: true; reason: string } | undefined {
+function rejectInvalidJudgmentDayFixDispatch(input: unknown): { block: true; reason: string } | undefined {
 	if (!isRecord(input) || !hasJudgmentDayFixAgentReference(input)) return undefined;
-	normalizeWriterEditSurfaces(input, defaultRoot);
 	if (
 		input.agent === JUDGMENT_DAY_FIX_AGENT_NAME &&
 		!("agents" in input) &&
@@ -6640,8 +6486,6 @@ const processRetainedNativeStatusSelections = new Map<PendingReviewConsentSessio
 // loop's `agent_end` preflight suppressed for the rest of the session: a
 // named-agent start increments the depth, a matching end decrements it,
 // and a fresh primary-loop start resets it to 0.
-const processTurnCodeReadCounts = new Map<PendingReviewConsentSessionKey, number>();
-function resetTurnCodeReadCountsForTesting(): void { processTurnCodeReadCounts.clear(); }
 const processAgentEndSubagentDepth = new Map<PendingReviewConsentSessionKey, number>();
 
 // gentle-shell#1064 slice 1: the parent-session profile binding store lives in
@@ -9448,11 +9292,6 @@ async function executeReviewControllerOperation(
 
 /** @internal */
 export const __testing = {
-	isAllowedOrchestratorMutationPath,
-	isAllowedOrchestratorReadPath,
-	isCodeSourcePath,
-	processTurnCodeReadCounts,
-	resetTurnCodeReadCountsForTesting,
 	parseReviewControllerParameters,
 	parseReviewCaptureParameters,
 	parseReviewCaptureGroupParameters,
@@ -9513,8 +9352,6 @@ export const __testing = {
 	MODEL_CONTROL_OPTIONS,
 	switchLiveOrchestrator,
 	tryNormalizeInRepoAbsolutePath,
-	normalizeAllowedEditSurfacesInText,
-	normalizeWriterEditSurfaces,
 	resolveTargetRepositoryRoot,
 };
 
@@ -10194,11 +10031,6 @@ function createGentleAiExtensionForTesting(
 		consumeReviewMutation(pi, ctx.sessionManager, root, mutation, "nudged", targetIdentity);
 	});
 
-	pi.on("turn_start", (_event, ctx) => {
-		const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
-		processTurnCodeReadCounts.set(sessionKey, 0);
-	});
-
 	pi.on("context", (event, _ctx) => {
 		if (event.messages && event.messages.length > 0) {
 			const pruned = pruneContextMessages(event.messages);
@@ -10232,46 +10064,11 @@ function createGentleAiExtensionForTesting(
 			event.input,
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
-		if (event.toolName === "read") {
-			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
-				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
-				Boolean((ctx as unknown as { agent?: unknown })?.agent);
-			if (!isChild) {
-				const targetPath = isRecord(event.input) && typeof event.input.path === "string" ? event.input.path : "";
-				if (isCodeSourcePath(targetPath, ctx.cwd)) {
-					const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
-					const currentCount = processTurnCodeReadCounts.get(sessionKey) ?? 0;
-					if (currentCount >= 2) {
-						return {
-							block: true,
-							reason: "Gentle AI Pure Thinker policy: inline code read cap exceeded (max 2 source files per turn). You MUST delegate codebase exploration to gentle-ai-explore to preserve orchestrator context (<20k tokens).",
-						};
-					}
-					processTurnCodeReadCounts.set(sessionKey, currentCount + 1);
-				}
-			}
-		}
-		if (event.toolName === "write" || event.toolName === "edit") {
-			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
-				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
-				Boolean((ctx as unknown as { agent?: unknown })?.agent);
-			if (!isChild) {
-				const targetPath = isRecord(event.input) && typeof event.input.path === "string" ? event.input.path : "";
-				if (!isAllowedOrchestratorMutationPath(targetPath, ctx.cwd)) {
-					return {
-						block: true,
-						reason: "Gentle AI Pure Thinker policy: direct source code editing by the parent orchestrator is strictly prohibited. All code modifications must be delegated to gentle-ai-worker. Dispatch a worker subagent with explicit ## Allowed edit surfaces.",
-					};
-				}
-			}
-		}
 		if (event.toolName === "subagent_run") {
-			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input, ctx.cwd);
+			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input);
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
 			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input, ctx.cwd);
 			if (writerScopeDenied) return writerScopeDenied;
-			const writerConsentDenied = await confirmBoundedWriterDispatch(event.input, ctx);
-			if (writerConsentDenied) return writerConsentDenied;
 			try {
 				injectReviewCandidateView(event.input, candidateViews);
 				return undefined;
@@ -10281,21 +10078,6 @@ function createGentleAiExtensionForTesting(
 					reason: error instanceof Error ? error.message : "review subagent dispatch is invalid",
 				};
 			}
-		}
-		if (event.toolName === "grep" || event.toolName === "find") {
-			const isChild = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1" ||
-				(processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) > 0 ||
-				Boolean((ctx as unknown as { agent?: unknown })?.agent);
-			if (!isChild) {
-				const targetPath = isRecord(event.input) && typeof event.input.path === "string" ? event.input.path : "";
-				if (!isAllowedOrchestratorReadPath(targetPath, ctx.cwd)) {
-					return {
-						block: true,
-						reason: `Gentle AI Pure Thinker policy: inline codebase exploration via ${event.toolName} is strictly prohibited in the primary orchestrator. Codebase search and discovery must be delegated to gentle-ai-explore to preserve orchestrator context (<20k tokens). Dispatch gentle-ai-explore with explicit search scope.`,
-					};
-				}
-			}
-			return undefined;
 		}
 		if (!SHELL_COMMAND_TOOLS.has(event.toolName) || !isRecord(event.input)) return undefined;
 		const command = (event.input as { command?: unknown }).command;

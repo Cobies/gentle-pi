@@ -503,6 +503,7 @@ export async function answerThroughUi(ui: ExtensionContext["ui"] | undefined, as
 }
 
 export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env, overrides: Partial<AgentsDeps> = {}): void {
+	// SAFETY: process satisfies IpcEndpoint when process.send is defined in a forked child process.
 	const childIpc = ownedChildIpc(env, overrides.childIpc ?? (process.send ? process as unknown as IpcEndpoint : undefined));
 	if (env.GENTLE_PI_AGENTS_CHILD === "1") {
 		// A stale managed-SDD child must never inherit unrestricted ordinary tools.
@@ -644,7 +645,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	// started before /new or /resume stays in the store and comes back with
 	// its session. Before the first session_start there is nothing to scope by.
 	const activeSessionId = (): string | undefined => (sessions === undefined ? undefined : sessions.getSessionId() ?? "");
-	// Pi 0.86.1 adds this event; the package's pinned 0.85.1 types predate it.
+	// SAFETY: Pi 0.86.1 adds this event; the package's pinned 0.85.1 types predate it.
 	installBackgroundCacheWarming(pi as unknown as Parameters<typeof installBackgroundCacheWarming>[0], () => ({
 		sessionId: activeSessionId(),
 		ownedTaskIds,
@@ -1599,7 +1600,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		if (retiredSddAgent(agent.name)) throw new Error("Retired SDD agents cannot be dispatched.");
 		if (![AGENT_MODE.TASK, AGENT_MODE.BACKGROUND].includes(mode)) throw new Error("Subagent mode must be task or background.");
 		if (isSingleShotMode(ctx.mode) && mode === AGENT_MODE.BACKGROUND) throw new Error(SINGLE_SHOT_BACKGROUND_ERROR);
-		const scopeDenied = rejectUnscopedBoundedWriterDispatch({ agent: agent.name, task: prompt, context });
+		const scopeDenied = rejectUnscopedBoundedWriterDispatch({ agent: agent.name, task: prompt, context, workspace_root: workspaceRoot, repository_root: repositoryRoot }, ctx.sessionManager.getCwd());
 		if (scopeDenied) throw new Error(scopeDenied.reason);
 		if (signal?.aborted) throw new Error("Subagent launch aborted before authorization.");
 		const registry = registryFor(ctx);
@@ -1701,6 +1702,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		}
 		if (signal?.aborted) throw new Error("Subagent launch aborted before queueing.");
 		mkdirSync(sessionDir, { recursive: true });
+		// SAFETY: ExtensionContext.sessionManager provides the runtime ReviewSessionManager surface.
 		const parentSessionManager = ctx.sessionManager as unknown as ReviewSessionManager;
 		const parentSessionId = ctx.sessionManager.getSessionId() ?? "";
 		const parentWorktreeRoot = ctx.sessionManager.getCwd();

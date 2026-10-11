@@ -3,6 +3,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	type ContextPruningOptions,
+	DEFAULT_MAX_RETAINED_CHARS,
+	DEFAULT_RECENT_TURNS_TO_KEEP,
+	isProtectedToolResult,
+	isSyntheticSubagentNotification,
+	PROTECTED_TOOL_NAMES,
 	pruneContextMessages,
 } from "../lib/context-pruning.ts";
 
@@ -95,7 +100,7 @@ test("preserves toolResults in recent turns intact (recentTurnsToKeep = 2)", () 
 	});
 
 	const messages = [user1, tool1, user2, tool2, user3, tool3];
-	const result = pruneContextMessages(messages, { recentTurnsToKeep: 2 });
+	const result = pruneContextMessages(messages, { recentTurnsToKeep: 2, maxRetainedChars: 400 });
 
 	// Turn 1 is older: tool1 is pruned
 	assert.notEqual(result[1], tool1);
@@ -126,7 +131,7 @@ test("prunes verbose toolResults from older turns while keeping recent turns int
 	});
 
 	const messages = [user1, tool1, user2, user3, tool3];
-	const result = pruneContextMessages(messages);
+	const result = pruneContextMessages(messages, { maxRetainedChars: 400 });
 
 	// tool1 in turn 1 is pruned
 	const prunedTool1 = result[1] as any;
@@ -146,7 +151,7 @@ test("prunes verbose toolResults from older turns while keeping recent turns int
 		content: verboseLines,
 	});
 	const messagesString = [user1, toolWithString, user2, user3];
-	const resultString = pruneContextMessages(messagesString);
+	const resultString = pruneContextMessages(messagesString, { maxRetainedChars: 400 });
 	const prunedToolString = resultString[1] as any;
 	assert.equal(
 		prunedToolString.content,
@@ -204,7 +209,7 @@ test("retains error excerpts when a pruned toolResult has isError: true", () => 
 	const user3 = createUserMessage("turn 3");
 
 	const messages = [user1, tool1, user2, user3];
-	const result = pruneContextMessages(messages);
+	const result = pruneContextMessages(messages, { maxRetainedChars: 400 });
 
 	const prunedTool1 = result[1] as any;
 	assert.equal(prunedTool1.isError, true);
@@ -226,14 +231,14 @@ test("retains error excerpts when a pruned toolResult has isError: true", () => 
 		isError: true,
 	});
 	const messagesLongError = [user1, toolLongError, user2, user3];
-	const resultLongError = pruneContextMessages(messagesLongError);
+	const resultLongError = pruneContextMessages(messagesLongError, { maxRetainedChars: 400 });
 	const prunedLongErrorText = (resultLongError[1] as any).content[0].text;
 	assert.ok(prunedLongErrorText.includes("Error summary: "));
 	assert.ok(prunedLongErrorText.endsWith(". Full output preserved in session history.]"));
 });
 
 test("respects enabled: false and GENTLE_PI_CONTEXT_PRUNING=off to bypass pruning", () => {
-	const verboseText = "long output\n".repeat(50);
+	const verboseText = "long output\n".repeat(400);
 	const user1 = createUserMessage("turn 1");
 	const tool1 = createToolResultMessage({
 		content: [{ type: "text", text: verboseText }],
@@ -283,13 +288,13 @@ test("triangulation: recentTurnsToKeep customization (0 and 1)", () => {
 	const messages = [user1, tool1, user2, tool2];
 
 	// recentTurnsToKeep = 1: turn 1 pruned, turn 2 kept
-	const opts1: ContextPruningOptions = { recentTurnsToKeep: 1 };
+	const opts1: ContextPruningOptions = { recentTurnsToKeep: 1, maxRetainedChars: 400 };
 	const res1 = pruneContextMessages(messages, opts1);
 	assert.notEqual(res1[1], tool1);
 	assert.equal(res1[3], tool2);
 
 	// recentTurnsToKeep = 0: both turn 1 and turn 2 pruned
-	const res0 = pruneContextMessages(messages, { recentTurnsToKeep: 0 });
+	const res0 = pruneContextMessages(messages, { recentTurnsToKeep: 0, maxRetainedChars: 400 });
 	assert.notEqual(res0[1], tool1);
 	assert.notEqual(res0[3], tool2);
 });
@@ -307,7 +312,7 @@ test("triangulation: preserves non-text parts and does not mutate originals", ()
 		createUserMessage("turn 3"),
 	];
 
-	const res = pruneContextMessages(messages);
+	const res = pruneContextMessages(messages, { maxRetainedChars: 400 });
 	const prunedTool = res[1] as any;
 
 	// Original object was not mutated
@@ -318,5 +323,154 @@ test("triangulation: preserves non-text parts and does not mutate originals", ()
 	assert.equal(prunedTool.content.length, 2);
 	assert.ok(prunedTool.content[0].text.startsWith("[Output omitted from LLM context:"));
 	assert.equal(prunedTool.content[1], imagePart);
+});
+
+test("DEFAULT_MAX_RETAINED_CHARS is 4000: normal 1500-char outputs are retained while >4000-char dumps are pruned", () => {
+	assert.equal(DEFAULT_MAX_RETAINED_CHARS, 4_000);
+	assert.equal(DEFAULT_RECENT_TURNS_TO_KEEP, 2);
+
+	const normalOutput = "x".repeat(1_500);
+	const hugeDump = "d".repeat(4_500);
+
+	const toolNormal = createToolResultMessage({
+		toolName: "read",
+		content: [{ type: "text", text: normalOutput }],
+	});
+	const toolHuge = createToolResultMessage({
+		toolName: "bash",
+		content: [{ type: "text", text: hugeDump }],
+	});
+
+	const messages = [
+		createUserMessage("turn 1"),
+		toolNormal,
+		toolHuge,
+		createUserMessage("turn 2"),
+		createUserMessage("turn 3"),
+	];
+
+	const result = pruneContextMessages(messages);
+	// 1500 chars is <= 4000 default threshold -> preserved by reference
+	assert.equal(result[1], toolNormal);
+	// 4500 chars is > 4000 default threshold -> pruned
+	assert.notEqual(result[2], toolHuge);
+	assert.ok((result[2] as any).content[0].text.startsWith("[Output omitted from LLM context: 4500 chars"));
+});
+
+test("PROTECTED_TOOL_NAMES are never pruned regardless of size or age", () => {
+	const largePayload = "p".repeat(6_000);
+	const protectedTools = [
+		"subagent_run",
+		"subagent_result",
+		"subagent_status",
+		"subagent_list_tasks",
+		"subagent_continue",
+		"gentle_review",
+		"gentle_review_capture",
+		"gentle_review_capture_group",
+		"gentle_review_scope",
+		"mem_save",
+		"mem_get_observation",
+		"mem_search",
+		"mem_context",
+		"mem_timeline",
+		"todo",
+		"ask_user_choice",
+		"ask_user_question",
+		"orchestrator_session_id",
+		"orchestrator_consult",
+	];
+
+	for (const name of protectedTools) {
+		assert.ok(PROTECTED_TOOL_NAMES.has(name), `${name} must be in PROTECTED_TOOL_NAMES`);
+		const msgWithToolName = createToolResultMessage({
+			toolName: name,
+			content: [{ type: "text", text: largePayload }],
+		});
+		assert.equal(isProtectedToolResult(msgWithToolName), true);
+
+		const msgWithNameField = {
+			role: "toolResult",
+			name,
+			content: [{ type: "text", text: largePayload }],
+		};
+		assert.equal(isProtectedToolResult(msgWithNameField), true);
+
+		const messages = [
+			createUserMessage("turn 1"),
+			msgWithToolName,
+			msgWithNameField,
+			createUserMessage("turn 2"),
+			createUserMessage("turn 3"),
+		];
+		const pruned = pruneContextMessages(messages, { maxRetainedChars: 100 });
+		assert.equal(pruned[1], msgWithToolName, `${name} (toolName) must never be pruned`);
+		assert.equal(pruned[2], msgWithNameField, `${name} (name) must never be pruned`);
+	}
+
+	assert.equal(isProtectedToolResult(createToolResultMessage({ toolName: "bash" })), false);
+});
+
+test("synthetic background subagent notifications do not count as human turns", () => {
+	const finishedNotif = createUserMessage('Subagent gentle-ai-worker (task abc, "implement feature") finished.\nResult summary...');
+	const timedOutNotif = createUserMessage("Subagent gentle-ai-explore (task def, \"scan repo\") timed out.");
+	const failedNotif = createUserMessage("Subagent worker (task xyz) failed: exit code 1");
+	const realUser1 = createUserMessage("Human turn 1");
+	const realUser2 = createUserMessage("Human turn 2");
+
+	assert.equal(isSyntheticSubagentNotification(finishedNotif), true);
+	assert.equal(isSyntheticSubagentNotification(timedOutNotif), true);
+	assert.equal(isSyntheticSubagentNotification(failedNotif), true);
+	assert.equal(isSyntheticSubagentNotification(realUser1), false);
+	assert.equal(isSyntheticSubagentNotification({ role: "assistant", content: "Subagent worker (task abc) finished." }), false);
+
+	const largeOutput = "z".repeat(5_000);
+	const toolInHumanTurn1 = createToolResultMessage({
+		toolName: "bash",
+		content: [{ type: "text", text: largeOutput }],
+	});
+
+	// 2 real human turns + 3 synthetic subagent notifications after them.
+	// With recentTurnsToKeep = 2, realUser1 is still within the last 2 human turns!
+	const messages = [
+		realUser1,
+		toolInHumanTurn1,
+		finishedNotif,
+		timedOutNotif,
+		realUser2,
+		failedNotif,
+	];
+
+	const result = pruneContextMessages(messages, { recentTurnsToKeep: 2 });
+	assert.equal(
+		result[1],
+		toolInHumanTurn1,
+		"synthetic subagent completion messages must not push realUser1 out of the recent 2-turn window",
+	);
+});
+
+test("pruneContextMessages is idempotent across repeated invocations", () => {
+	const largeOutput = "line content\n".repeat(400); // > 4000 chars
+	const tool1 = createToolResultMessage({
+		toolName: "bash",
+		content: [{ type: "text", text: largeOutput }],
+	});
+	const messages = [
+		createUserMessage("turn 1"),
+		tool1,
+		createUserMessage("turn 2"),
+		createUserMessage("turn 3"),
+	];
+
+	// Pass 1 prunes tool1 (even with tiny maxRetainedChars = 10 so replacement string > 10 chars)
+	const pass1 = pruneContextMessages(messages, { maxRetainedChars: 10 });
+	assert.notEqual(pass1[1], tool1);
+	const pass1Text = (pass1[1] as any).content[0].text;
+	assert.ok(pass1Text.startsWith("[Output omitted from LLM context:"));
+
+	// Pass 2 on already-pruned messages must return identical object references
+	const pass2 = pruneContextMessages(pass1, { maxRetainedChars: 10 });
+	assert.equal(pass2[1], pass1[1]);
+	assert.equal((pass2[1] as any).content[0].text, pass1Text);
 });
 

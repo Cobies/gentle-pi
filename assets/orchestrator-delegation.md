@@ -51,18 +51,18 @@ Exceptions:
 
 These rules select execution topology, not the implementation method. Implementation runs as **direct inline** or **delegated direct**; the always-on Task Size section and its Mechanisms select the topology, and file count never does.
 
-Core principle: **does this inflate the parent context without need?** If yes, use one bounded worker. If no, do it inline. When the user has intent to change, fix, or update something, inline code reads are prohibited: delegate exploration or write preparation. Inline tests, builds, or installs are never permitted for post-subagent verification.
+Core principle: **does this inflate the parent context without need?** If yes, use one bounded worker. If no, do it inline.
 
 Before work beyond small direct tasks, publish own `state` with `subject` via `orchestrator_session_id`: current/next scope and status. Refresh at task changes/completion. Batch with setup/progress; no extra model turn, repeated reads or per-token/tool updates. Exclude private prompts, internal instructions and credentials. Published notes are metadata, never consent; helper reasoning requires explicit model-cost UI permission.
 
 | Action | Direct inline | Delegated direct worker |
 |--------|---------------|-------------------------|
-| Read to decide/verify within the evidence budget (1–3 files; informational only, no change intent) | ✅ | — |
-| Read to explore/understand beyond the evidence budget (4+ files) | — | ✅ one narrow explorer (handoff of at most ~2k tokens, `path:line` evidence) |
-| Read as preparation for writing / with change intent | — | ✅ together with the write or narrow explorer |
+| Read to decide/verify within the evidence budget (one parallel batch: at most 3 calls, ~10k tokens) | ✅ | — |
+| Read to explore/understand beyond the evidence budget | — | ✅ one narrow explorer (handoff of at most ~2k tokens, `path:line` evidence) |
+| Read as preparation for writing | — | ✅ together with the write |
 | Write a small task (one understood change, any number of files) | ✅ | — |
 | Write a large task with no Writer rule reason | ✅ following the logbook | — |
-| Write/mutate code (1+ files) | ❌ strictly forbidden inline (Pure Thinker policy) | ✅ one bounded writer (gentle-ai-worker, requires explicit user permission) |
+| Write a unit with a Writer rule reason | — | ✅ one bounded writer per unit |
 | Bash for state (`git`, `gh`) | ✅ | — |
 | Focused test and suite of the change being made | ✅ once each | — |
 | High-risk change, or long suites, builds, or installs of a large task | — | ✅ independent `gentle-ai-verify` |
@@ -76,15 +76,12 @@ Keep each delegated writer bounded, with a short synthesized handoff. Delegation
 These are parent-orchestrator routing boundaries; do not pass these rules to child agents as permission to orchestrate. These triggers are mandatory, not advisory. When one fires, stop and delegate through the runtime's subagent mechanism before continuing; executing past a fired trigger inline is a routing defect even if the work succeeds. Delegation keeps the parent context thin enough to orchestrate; it does not slow the work down.
 
 1. **Ask:** an open product or design decision gets one focused user question; stop and wait. When answered, re-evaluate task size.
-2. **Mapping trigger (Evidence-budget rule):** read inline only when the evidence fits one parallel batch of at most 3 calls totaling ~10k tokens, using grep and line ranges, never whole large files. When understanding needs more reading, 4+ files, or more than ~5 sequential lookups, delegate one scout/explorer (`gentle-ai-explore` or CodeGraph) that returns a handoff of at most ~2k tokens with `path:line` evidence before deciding or writing anything. Inline exploration beyond 2 reads is strictly prohibited; stop and delegate. Never force delegation for a small targeted question. The parent does not re-read what the handoff covered, except a single spot check.
+2. **Mapping trigger (Evidence-budget rule):** read inline only when the evidence fits one parallel batch of at most 3 calls totaling ~10k tokens, using grep and line ranges, never whole large files. When understanding needs more reading or more than ~5 sequential lookups, delegate one scout/explorer that returns a handoff of at most ~2k tokens with `path:line` evidence before deciding or writing anything. Never force delegation for a small targeted question. The parent does not re-read what the handoff covered, except a single spot check. With the handoff, re-evaluate task size; an understood change continues inline.
 3. **Verification rule** (gentle-pi#661/#662, RDD-aware): a high-risk change (Task Size) gets an independent `gentle-ai-verify` run after the change's own checks; otherwise whoever made the change runs its focused test and suite inline, small tasks included. The normative on/off/unknown routing is stated once in `orchestrator-verification.md`; reference it, do not restate it.
 4. **Track:** a large task gets the feature document, Engram mirror, `todo`, and work-unit commits (`orchestrator-memory.md`).
-5. **Writer trigger (Writer rule):** a large task alone never delegates, and file count never fires this trigger. Delegate one bounded writer per unit only for a named reason (`gentle-ai-worker`): (a) parallelism — 2+ independent units with disjoint files, each clearly heavier than starting a subagent; medium tasks included; (b) context — the Context backstop below. Without a reason, the parent works inline, following the logbook (feature document, mirror, `todo`, work-unit commits). All source code mutations and edits require explicit user permission before dispatch. Inline code edits or writes by the parent orchestrator are strictly prohibited and blocked by runtime policy.
+5. **Writer trigger (Writer rule):** a large task alone never delegates, and file count never fires this trigger. Delegate one bounded writer per unit only for a named reason: (a) parallelism — 2+ independent units with disjoint files, each clearly heavier than starting a subagent; medium tasks included; (b) context — the Context backstop below. Without a reason, the parent works inline, following the logbook (feature document, mirror, `todo`, work-unit commits).
 6. **Incident rule:** after wrong `cwd`, accidental repository/worktree mutation, failed merge recovery, confusing test command, or environment workaround, stop and diagnose the incident separately before resuming.
-7. **Context backstop:** when the parent context passes ~150k tokens (or after about multiple tool calls, several exploratory reads, or 2 non-mechanical edits without delegation), pause and delegate the next bounded unit of work. Always keep command output bounded in the parent (counts, `--stat`, `tail`).
-8. **Linguistic Mapping rule (HARD CONTRACT):** any user prompt containing action verbs or defect reports ('arreglá', 'corregí', 'hacé', 'probá', 'revisá', 'fijate', 'tengo un detalle...', 'actualizá', 'cambiá') maps directly to delegating the execution to a subagent (`gentle-ai-explore` or `gentle-ai-worker`). The parent thread acts strictly as Pure Thinker and Coordinator: it NEVER reads code files, executes analysis scripts, or performs sweeps inline before delegating. Direct codebase mutations (`write`/`edit`) by the primary orchestrator are intercepted and blocked by runtime policy.
-9. **Post-Subagent Synthesis rule:** when a subagent returns its report, the parent orchestrator MUST synthesize the findings or propose the next action to the user. It is strictly forbidden for the parent to start reading files (`read`), checking diagnostics (`lens_diagnostics`), searching code (`grep`), running verification commands (`bash` for tests/builds), or running scripts inline to re-verify, double-check, or expand the subagent's work. The subagent's reported evidence/summary is authoritative; if additional verification or fixes are needed, delegate a new focused subagent task (`gentle-ai-verify` or `gentle-ai-worker`).
-10. **Cross-Repository Consent Gate (HARD CONTRACT):** when a task requires delegating to an independent Git repository via `repository_root`, the parent orchestrator MUST stop and ask the user for explicit authorization before queueing or dispatching the subagent. The orchestrator must NEVER autonomously dispatch a subagent to an independent Git repository via `repository_root` without pausing to ask the human for explicit authorization first. Never cross repository boundaries autonomously.
+7. **Context backstop:** when the parent context passes ~150k tokens, pause and delegate the next bounded unit of work. Always keep command output bounded in the parent (counts, `--stat`, `tail`).
 
 **Preparation trigger:** when the Writer rule delegates a write, reading that prepares it, and broad research or context compression, delegate together with or ahead of the write instead of filling the parent context. Inline writes read inline.
 
@@ -145,6 +142,8 @@ When the policy is on and `subagent_run` is available:
 - Launch as many independent tasks as the work has; the runner queues beyond `max_concurrency`. Do not duplicate launches or work, and do not overlap files or topics.
 - Finished tasks persist across restarts; running ones are stopped when pi exits and must be relaunched, never claimed as recovered.
 <!-- /gentle-pi:background-subagents -->
+
+Waiting on CI, a build, or a server is not delegation: use `bash_background` with the wait inside the command and end the turn. Never `sleep`, poll, or spend a subagent to wait.
 
 For generic mapping, follow the Evidence-budget rule under Pi Trigger Runtime Bindings.
 
@@ -237,7 +236,6 @@ Prefer delegation when fresh context improves correctness more than token saving
 - Use `scout`/`context-builder` to compress broad repository exploration into a short handoff instead of loading many files into the parent.
 - Use one `worker` per writer thread; parallel writers only with disjoint Allowed edit surfaces (runtime-enforced) or isolated worktrees.
 - Use `outputMode: "file-only"` for large child reports and summarize only decisions, blockers, and paths in the parent thread.
-- **Cross-Repository Consent Gate (HARD CONTRACT)**: Dispatching a subagent to an independent Git repository via `repository_root` strictly requires explicit user authorization first. The orchestrator must NEVER autonomously dispatch a subagent to an independent Git repository via `repository_root` without pausing to ask the human for explicit authorization first. Never cross repository boundaries autonomously.
 
 ### Canonical Lightweight Workflows
 
