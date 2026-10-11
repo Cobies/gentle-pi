@@ -119,11 +119,11 @@ test("T16: the verify handoff names probe command forms and the scratch location
 // T17b (L42): after4 B x5 read two files, then the core Evidence-budget rule
 // fired and delegated a 1.5 min exploration on a small task the parent then
 // implemented inline. The trigger itself must exclude reading for an inline write.
-test("T17b: the core Evidence-budget rule mandates delegation for codebase inspection", () => {
+test("T17b: the core Evidence-budget rule never fires to prepare an inline write", () => {
 	const core = read("assets/orchestrator.md");
 	const rule = core.split("\n").find((line) => line.includes("**Evidence-budget rule**"));
 	assert.ok(rule, "Evidence-budget rule is missing");
-	assert.ok(rule.includes("all codebase inspection delegates to gentle-ai-explore"), "Evidence-budget rule must mandate delegation to gentle-ai-explore");
+	assert.ok(rule.includes("never for reading before an inline write"), "Evidence-budget rule must exclude reading for an inline write");
 });
 
 test("T17: the always-on Explore step delegates codebase exploration to gentle-ai-explore", () => {

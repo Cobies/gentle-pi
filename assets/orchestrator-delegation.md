@@ -7,7 +7,7 @@ Detail modules, each loaded only when its mechanism fires (small tasks load none
 - `orchestrator-tracking.md` — large-task ODD tracking: authorization and progress, research depth, checks and candidate consent, phase signaling, RDD assess, delivery strategy.
 - `orchestrator-verification.md` — the Verification rule, native risk tiers, writer verification contract.
 - `orchestrator-writer.md` — allowed edit surfaces and Judgment Day fix dispatch.
-- `orchestrator-prompts.md` — parent-source handoffs, lossless prompts and Gentle AI provider defects.
+- `orchestrator-prompts.md` — explorer web work, lossless prompts and Gentle AI provider defects.
 
 ### Language Domain Contract
 
@@ -115,12 +115,6 @@ Use inline execution when the task is small by the always-on Task Size section: 
 
 Delegate when a mechanism's own trigger fires, within the ODD workflow: understanding an unfamiliar module beyond the evidence budget (explore), implementing a unit with a Writer rule reason (writer), or checking a high-risk change (independent verifier).
 
-**Lean Fast-Path (CodeGraph + Engram)**: For 2–4 bounded files in a single domain with zero architectural ambiguity, treat Simple Delegation as the Lean Fast-Path:
-1. **Explore first**: Use CodeGraph (`codegraph_explore`) or `gentle-ai-explore` to map symbol flows and references without dumping raw files into the parent context.
-2. **Persist discoveries**: Persist exploration insights and symbols in Engram via `mem_save` under `topic_key: odd/<feature>/explore` (or memory equivalent) to keep the orchestrator context thin (<20k tokens).
-3. **Track simply**: Record the feature in `odd/tasks/<feature>.md` using the 4-part Hybrid ODD Unified Specification Pattern (Diagnosis & Technical Proposal, Technical Specification & Contracts, Tasks & Evidence, Acceptance Criteria & Verification) without open-spec multi-file ceremony, offloading context weight from the live chat session into the physical file.
-4. **Delegate implementation & checks**: Launch `gentle-ai-worker` for edits and `gentle-ai-verify` for checks.
-
 Use the configured subagent runtime when available. Prefer the `subagent_*` tools (`subagent_run`, status/result helpers) when the Pi Subagents extension is installed, because they run the user's configured project/global subagent definitions and preserve history/background behavior.
 
 A child must be able to do the task it is given. Check the agent's declared `tools` in `subagent_list_agents` before launching: never give a read-only explorer shell, HTTP or MCP work, and never assume your own tools transfer to the child. With no qualified agent, report the capability gap; a fired trigger is never replaced by inline work.
@@ -136,7 +130,7 @@ When the policy is on and `subagent_run` is available:
 
 - The runtime already defaults `subagent_run` to `mode: "background"` under this policy in interactive and RPC sessions, so omit `mode` for ordinary delegation. It returns a task id at once; the terminal stays free and the human keeps typing. Pass a `label` of three to six words naming the work.
 - A child `agent_end` retains its latest answer but is not completion: Pi may still retry, compact, or run a queued follow-up. Treat the task as finished only at `agent_settled`; only then release its queue slot, publish its background result, or terminate it. If it exits first, report failure with its retained answer as diagnostics.
-- When a background task settles, its result arrives as a message in this session (custom type `gentle-agents.result`, one per task) and starts a new turn if you are idle. Wait for it: end the turn once launches and any non-overlapping work are done. Never sleep or periodically poll `subagent_status`/`subagent_result` for completion or cache maintenance. The runtime enforces this via an anti-polling guardrail: invoking `subagent_status` or `subagent_result` on a running or queued background task is blocked immediately at runtime, requiring the model to yield its turn without calling further tools. Retain the task ID. Use `subagent_status` only at a real orchestration decision boundary on settled tasks: user-requested inspection, relevant scope change, input request, or suspected abnormal behavior. Never relaunch equivalent work merely because it is queued or running. Cache warming belongs to Pi's native runtime, never to model-driven maintenance turns.
+- When a background task settles, its result arrives as a message in this session (custom type `gentle-agents.result`, one per task) and starts a new turn if you are idle. Wait for it: end the turn once launches and any non-overlapping work are done. Never sleep or periodically poll `subagent_status`/`subagent_result` for completion or cache maintenance. Retain the task ID. Use `subagent_status` only at a real orchestration decision boundary: user-requested inspection, relevant scope change, input request, or suspected abnormal behavior. Never relaunch equivalent work merely because it is queued or running. Cache warming belongs to Pi's native runtime, never to model-driven maintenance turns.
 - Do not claim an implementation ready or RDD-ready while its required verification or correction follow-up remains queued. Run the required focused verification before that claim, and retain legitimate post-correction verification. This does not invent a universal full-suite requirement or make a receipt a delivery gate.
 - Use `mode: "task"` only when the subagent must ask the human something mid-flight (task-mode dialogs reach the human; background dialogs are dismissed) or when the human asked to wait.
 - Launch as many independent tasks as the work has; the runner queues beyond `max_concurrency`. Do not duplicate launches or work, and do not overlap files or topics.
@@ -149,59 +143,7 @@ For generic mapping, follow the Evidence-budget rule under Pi Trigger Runtime Bi
 
 The canonical Writer rule under Mandatory Delegation Triggers overrides the general runtime preference above.
 
-#### Dynamic Subagent Specialization (DSS) in ODD
-
-Instead of creating persistent ad-hoc agent files on disk, use Dynamic Subagent Specialization (DSS) via `subagent_run`'s `specialization` overlay. DSS enables ephemeral derivation from canonical base archetypes (`gentle-ai-explore` or `gentle-ai-worker`).
-
-When to specialize:
-- **ODD Architecture & Contract Design**: Specialize `gentle-ai-explore` with `label: "ODD Architect"` to draft Part 1 (Diagnosis & Technical Proposal) and Part 2 (Technical Specification & Contracts) of an ODD task document before implementation.
-- **Deep Domain Inspections**: Specialize `gentle-ai-explore` (e.g. `label: "SQL Auditor"`, `label: "Security Reviewer"`, `label: "A11y Inspector"`) when domain-specific directives or read-only tool extensions are required.
-
-Payload fields in `subagent_run`:
-```typescript
-specialization: {
-  label?: string;               // Concise TUI badge (e.g., "ODD Architect")
-  instructionsOverlay: string;  // Domain directives merged into the child system prompt
-  extraTools?: string[];        // Controlled read-only tools (for read-only base agents)
-  outputContract?: string;      // Expected structure or template for the return report
-}
-```
-
-Security and Sandboxing Invariants:
-- **Strictly Monotonic Read-Only Invariant**: If the base agent does not contain `write` or `edit` tools (like `gentle-ai-explore`), `extraTools` may ONLY include whitelisted read-only tools (`read_symbol`, `read_enclosing`, `lens_diagnostics`, `web_search`, `fetch_content`, `source_check`, `ast_grep_search`, `ast_grep_outline`). Any attempt to inject mutating tools (`write`, `edit`, `bash`) throws a validation error before process spawn.
-- **Ephemeral Lifespan**: Specialization never mutates disk assets (`assets/agents/*.md`) or persistent configuration. It lives exclusively in the memory of the spawned RPC child.
-- **UI Transparency**: Cards in the TUI display `<agent-name> ▸ [<specialization-label>]` (e.g. `gentle-ai-explore ▸ [ODD Architect]`).
-
-Delegate generic verification that executes or delegates commands per the RDD-aware Verification rule (trigger 5 under Mandatory Delegation Triggers, gentle-pi#661) -- the normative on/off/unknown routing lives there, not here: the bounded writer always self-verifies via `## Verification`, and `gentle-ai-verify` (or the native `Agent` fallback, with the same read-only verification constraints, exact parent-authorized commands, and fallback reporting) is on-demand only when the rendered `Receipt-driven development:` line reads `on`; when the line reads `off` or `unknown`, the `gentle_review` `assess` operation's returned plan decides it by native risk tier instead of a blanket non-trivial rule (gentle-pi#662). `## Known environmental failures` follows the same definition as `gentle-ai-worker`'s Verification contract: exact pre-existing base failures reported as evidence, never blockers -- any other failing required command still forces `status: partial`. Truly local read-only checking of 1–3 known files may remain inline. Separate exploration stays reserved for when the parent needs the map to decide or route; reading that prepares a write belongs with the writer making the change, consistent with the Delegation Rules table above.
-
-#### Allowed edit surfaces (MANDATORY)
-
-The bounded writer refuses to write outside the exact allowed edit surfaces and stops with `status: interaction_required` when they are missing. The parent owns that input. Deriving it is part of planning the delegation, not something the writer or the human can be left to supply.
-
-Before launching a bounded writer (`gentle-ai-worker`, a user-configured `worker`, or the native `Agent` fallback), derive the allowed edit surface from the task being delegated — the files the planned change must touch, plus the directories where the task authorizes new files — and pass it in the delegated prompt under an `## Allowed edit surfaces` heading, in the same exact-path form as `## Skills to load before work`:
-
-- exact repository-relative paths or narrow globs, one per line; never `.` and never a bare repository root; paths containing whitespace require whole-entry backticks (for example, `` `Directory With Spaces/note.md` `` or ``- `Directory With Spaces/note.md` ``); a list marker alone does not permit whitespace;
-- the section ends only at the next canonical ATX Markdown heading of any level (zero to three leading ASCII spaces, one to six `#`, then an ASCII space); every non-empty line before that heading must be a valid surface entry, so put explanatory prose under a following heading;
-- pre-existing untracked targets the writer may write, listed explicitly;
-- the directories where new files are authorized, when the task requires new files;
-- nothing beyond the delegated task — a surface wider than the task is the same defect as no surface at all.
-
-If the surface genuinely cannot be derived, do not launch the writer, and do not ask the human to author paths. Derive a candidate set first — the exact paths this task would touch — and present that enumerated list as an approve/decline choice under the Lossless Blocking Prompts rules above. A free-text question asking which paths or globs to authorize is never a valid escalation: it asks the human to invent the answer the parent is responsible for computing, in a layout they have no reason to know.
-
-Relay a writer's `interaction_required` payload about edit surfaces the same way: present its derived candidate paths as the choice, and add or drop paths only on the human's explicit instruction.
-
-
-#### Skills to load before work (MANDATORY)
-
-Subagents refuse to rediscover the project/user skill registry during normal runtime. The parent owns skill selection:
-
-Before launching any subagent (`gentle-ai-worker`, `gentle-ai-explore`, `gentle-ai-verify`):
-1. Check if `.atl/skill-registry.md` exists in the target project/workspace.
-2. If present, match the target files and technology stack of the task (e.g. Angular, Go, SQL, Docker, TypeScript, etc.) against the `Trigger / description` column in the registry.
-3. Include the matching absolute paths under a `## Skills to load before work` heading in the delegated task/prompt, one per line.
-4. If no skills match or the registry is absent, explicitly pass `## Skills to load before work: none`.
-
-Never omit this section when delegating: subagents depend on parent-injected paths to enforce stack conventions and architecture rules, and reporting `skill_resolution: none` when matching skills exist in `.atl/skill-registry.md` is an orchestration defect.
+Delegate generic verification that executes or delegates commands per the RDD-aware Verification rule (trigger 3 under Mandatory Delegation Triggers, gentle-pi#661) -- the normative on/off/unknown routing lives in `orchestrator-verification.md`, not here: the bounded writer always self-verifies via `## Verification`, and the `gentle_review` `assess` operation's returned plan decides whether `gentle-ai-verify` (or the native `Agent` fallback, with the same read-only verification constraints, exact parent-authorized commands, and fallback reporting) also runs, by native risk tier and whatever the rendered `Receipt-driven development:` line reads, instead of a blanket non-trivial rule (gentle-pi#662). `## Known environmental failures` follows the same definition as `gentle-ai-worker`'s Verification contract: exact pre-existing base failures reported as evidence, never blockers -- any other failing required command still forces `status: partial`. The change's own focused test and suite run inline. Separate exploration stays reserved for when the parent needs the map to decide or route; reading that prepares a write belongs with the writer making the change, consistent with the Delegation Rules table above.
 
 #### Key Learnings closing block
 

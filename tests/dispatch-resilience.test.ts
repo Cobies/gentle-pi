@@ -11,7 +11,7 @@ import gentleAgents from "../extensions/gentle-agents.ts";
 import { AgentRunner } from "../lib/agents-runner.ts";
 
 const EXPECTED_INDEPENDENT_CLONE_GUIDANCE =
-	"Select an existing worktree in the same Git clone as this session. For an independent Git repository, pass repository_root instead of workspace_root.";
+	"Select an existing worktree in the same Git clone as this session. To work in an independent Git repository, delegate with subagent_run with repository_root instead; it asks for your consent first.";
 
 const scratchRoots: string[] = [];
 
@@ -193,7 +193,7 @@ test("tryNormalizeInRepoAbsolutePath handles POSIX and Windows paths inside and 
 	assert.equal(tryNormalizeInRepoAbsolutePath("lib/file.ts", "/workspace/repo"), undefined);
 });
 
-test("writer dispatch normalizes surfaces across repository_root, workspace_root, and cwd", async () => {
+test("writer dispatch rejects in-repository absolute paths across repository_root, workspace_root, and cwd with actionable suggestion without mutating task", async () => {
 	type ToolCallHandler = (
 		event: { toolName: string; input: unknown },
 		ctx: ExtensionContext,
@@ -215,74 +215,61 @@ test("writer dispatch normalizes surfaces across repository_root, workspace_root
 	scratchRoots.push(cwd);
 
 	// 1. Fallback to ctx.cwd
+	const originalTaskCwd = [
+		"## Allowed edit surfaces",
+		`- \`${cwd}/lib/session.ts\``,
+		`- ${cwd}/tests/session.test.ts`,
+	].join("\n");
 	const inputCwd: Record<string, unknown> = {
 		agent: "gentle-ai-worker",
 		mode: "task",
-		task: [
-			"## Allowed edit surfaces",
-			`- \`${cwd}/lib/session.ts\``,
-			`- ${cwd}/tests/session.test.ts`,
-		].join("\n"),
+		task: originalTaskCwd,
 	};
 	const resCwd = await toolCall(
 		{ toolName: "subagent_run", input: inputCwd },
 		{ cwd, hasUI: false, ui: { confirm: async () => true } } as unknown as ExtensionContext,
 	);
-	assert.equal(resCwd, undefined);
-	assert.equal(
-		inputCwd.task,
-		["## Allowed edit surfaces", "- `lib/session.ts`", "- tests/session.test.ts"].join("\n"),
-	);
+	assert.equal(resCwd?.block, true);
+	assert.match(resCwd!.reason, /use "lib\/session\.ts" instead/);
+	assert.equal(inputCwd.task, originalTaskCwd);
 
 	// 2. Explicit workspace_root
 	const wsRoot = "/foreign/workspace";
+	const originalTaskWs = [
+		"## Allowed edit surfaces",
+		`- \`${wsRoot}/src/app.ts\``,
+	].join("\n");
 	const inputWs: Record<string, unknown> = {
 		agent: "gentle-ai-worker",
 		mode: "task",
 		workspace_root: wsRoot,
-		task: [
-			"## Allowed edit surfaces",
-			`- \`${wsRoot}/src/app.ts\``,
-		].join("\n"),
+		task: originalTaskWs,
 	};
 	const resWs = await toolCall(
 		{ toolName: "subagent_run", input: inputWs },
 		{ cwd, hasUI: false, ui: { confirm: async () => true } } as unknown as ExtensionContext,
 	);
-	assert.equal(resWs, undefined);
-	assert.equal(inputWs.task, ["## Allowed edit surfaces", "- `src/app.ts`"].join("\n"));
+	assert.equal(resWs?.block, true);
+	assert.match(resWs!.reason, /use "src\/app\.ts" instead/);
+	assert.equal(inputWs.task, originalTaskWs);
 
 	// 3. Explicit repository_root
 	const repoRoot = "C:\\Repositories\\IndependentRepo";
+	const originalTaskRepo = [
+		"## Allowed edit surfaces",
+		`- \`${repoRoot}\\modules\\auth.ts\``,
+	].join("\n");
 	const inputRepo: Record<string, unknown> = {
 		agent: "gentle-ai-worker",
 		mode: "task",
 		repository_root: repoRoot,
-		task: [
-			"## Allowed edit surfaces",
-			`- \`${repoRoot}\\modules\\auth.ts\``,
-		].join("\n"),
+		task: originalTaskRepo,
 	};
 	const resRepo = await toolCall(
 		{ toolName: "subagent_run", input: inputRepo },
 		{ cwd, hasUI: false, ui: { confirm: async () => true } } as unknown as ExtensionContext,
 	);
-	assert.equal(resRepo, undefined);
-	assert.equal(inputRepo.task, ["## Allowed edit surfaces", "- `modules/auth.ts`"].join("\n"));
-
-	// 4. Normalization inside context as well as task
-	const inputBoth: Record<string, unknown> = {
-		agent: "gentle-ai-worker",
-		mode: "task",
-		workspace_root: wsRoot,
-		task: ["## Allowed edit surfaces", `- \`${wsRoot}/src/app.ts\``].join("\n"),
-		context: ["## Allowed edit surfaces", `- \`${wsRoot}/src/app.ts\``].join("\n"),
-	};
-	const resBoth = await toolCall(
-		{ toolName: "subagent_run", input: inputBoth },
-		{ cwd, hasUI: false, ui: { confirm: async () => true } } as unknown as ExtensionContext,
-	);
-	assert.equal(resBoth, undefined);
-	assert.equal(inputBoth.task, ["## Allowed edit surfaces", "- `src/app.ts`"].join("\n"));
-	assert.equal(inputBoth.context, ["## Allowed edit surfaces", "- `src/app.ts`"].join("\n"));
+	assert.equal(resRepo?.block, true);
+	assert.match(resRepo!.reason, /use "modules\/auth\.ts" instead/);
+	assert.equal(inputRepo.task, originalTaskRepo);
 });

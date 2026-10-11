@@ -429,19 +429,6 @@ test("ODD protocol is always-on in the rendered system prompt and runs by defaul
 test("cross-repository subagent dispatch enforces mandatory human consent gate across contracts and prompts", () => {
 	const consentMandate =
 		"Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via `repository_root`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously.";
-	const consentGate = "Cross-Repository Consent Gate (HARD CONTRACT)";
-
-	containsAll(delegation, [
-		consentGate,
-		"when a task requires delegating to an independent Git repository via `repository_root`",
-		"The orchestrator must NEVER autonomously dispatch a subagent to an independent Git repository via `repository_root` without pausing to ask the human for explicit authorization first",
-		"Never cross repository boundaries autonomously",
-	]);
-
-	containsAll(core, [
-		"Cross-Repository Consent Gate (HARD CONTRACT): dispatching a subagent to an independent Git repository via `repository_root` strictly requires explicit user authorization first; never cross repository boundaries autonomously.",
-		"Cross-Repository Consent Mandate: dispatching subagents to an independent Git repository (via `repository_root`) strictly requires asking the user for explicit authorization first; never cross repository boundaries autonomously.",
-	]);
 
 	containsAll(wrapper, [
 		"Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via \\`repository_root\\`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously.",
