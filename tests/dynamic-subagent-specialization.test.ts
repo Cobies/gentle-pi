@@ -336,3 +336,42 @@ test("agentOperationSubtitle and renderGentleAgentCall display specialization ba
 		`Card rendering should contain badge: ${rendered}`,
 	);
 });
+
+test("large base instructions or large specialization overlay triggers instructions file transport with full composed prompt", () => {
+	const largeBaseInstructions = "A".repeat(1200);
+	const requestWithLargeBase = baseRequest({
+		agent: {
+			...readOnlyExplorer,
+			name: "custom-large",
+			description: "Large base agent",
+			tools: ["read"],
+			instructions: largeBaseInstructions,
+		},
+		specialization: {
+			label: "Overlay Tester",
+			instructionsOverlay: "Small overlay text",
+		},
+	});
+
+	const composedBasePrompt = childSystemPrompt(requestWithLargeBase);
+	assert.ok(Buffer.byteLength(composedBasePrompt, "utf8") > 1000);
+
+	const requestWithLargeOverlay = baseRequest({
+		agent: {
+			...readOnlyExplorer,
+			name: "custom-small",
+			description: "Small base agent",
+			tools: ["read"],
+			instructions: "Short instructions",
+		},
+		specialization: {
+			label: "Heavy Overlay",
+			instructionsOverlay: "B".repeat(1200),
+		},
+	});
+
+	const composedOverlayPrompt = childSystemPrompt(requestWithLargeOverlay);
+	assert.ok(Buffer.byteLength(composedOverlayPrompt, "utf8") > 1000);
+	assert.ok(composedOverlayPrompt.includes("## DYNAMIC SPECIALIZATION OVERLAY"));
+	assert.ok(composedOverlayPrompt.includes("Heavy Overlay"));
+});

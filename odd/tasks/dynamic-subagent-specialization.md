@@ -42,7 +42,7 @@ specialization?: SubagentSpecialization;
 
 ### 2.2 Security & Sandbox Invariants
 1. **Read-Only Base Invariant:** If `agent.tools` does not contain `write` or `edit`, `extraTools` may ONLY contain tools from `ALLOWED_READONLY_EXTENSIONS` (`read_symbol`, `read_enclosing`, `lens_diagnostics`, `web_search`, `fetch_content`, `source_check`, `ast_grep_search`, `ast_grep_outline`). Any attempt to inject mutating tools throws a validation error before process spawn.
-2. **Ephemeral Lifespan:** Specialization never mutates disk assets (`assets/agents/*.md`) or persistent configuration (`subagents.json`). It lives exclusively in the memory of the spawned RPC child.
+2. **Ephemeral Derivation:** Specialization never mutates disk assets (`assets/agents/*.md`) or persistent configuration (`subagents.json`). The parent retains it in `TaskRecord`, and task history persists it for continuation.
 3. **Prompt Composition:** The subagent prompt in `agents-runner.ts` appends a clearly demarcated section:
    ```markdown
    ## DYNAMIC SPECIALIZATION OVERLAY (Active for this execution)
@@ -64,9 +64,6 @@ When `task.specialization?.label` is present:
    - In `hasTaskScopedAllowedEditSurfaces` / `rejectUnscopedBoundedWriterDispatch`, resolve the effective target root (`input.repository_root ?? input.workspace_root ?? ctx.cwd`).
    - If an entry in `## Allowed edit surfaces` is an absolute path that resolves strictly inside the target root (without escaping via `..` or targeting root `.`), normalize it in-place to a clean repository-relative path before validating and dispatching.
    - Any absolute path outside the target root (`/etc/passwd`, `C:\outside.ts`, `/tmp/...`) continues to fail closed immediately.
-3. **Cross-Repository Consent Gate (HARD CONTRACT):**
-   - When a task requires delegating to an independent Git repository via `repository_root`, the parent orchestrator MUST stop and ask the user for explicit authorization before queueing or dispatching the subagent.
-   - The orchestrator must NEVER autonomously dispatch a subagent to an independent Git repository via `repository_root` without pausing to ask the human for explicit authorization first. Never cross repository boundaries autonomously.
 
 ---
 
@@ -79,12 +76,8 @@ When `task.specialization?.label` is present:
 - [x] Task 5: Update orchestrator delegation guidelines in `assets/orchestrator-delegation.md` for ODD dynamic specialization
 - [x] Task 6: Add automated tests for specialization validation, tool safety sandbox, and child config generation in `tests/`
 - [x] Task 7: Verify whole test suite and run functional validation
-- [x] Task 8: Implement actionable `workspace_root` vs `repository_root` guidance and in-repo absolute path normalization for `## Allowed edit surfaces`
-- [x] Task 9: Verify dispatch resilience and path normalization with unit tests in `tests/`
-- [x] Task 10: Enforce mandatory human consent before cross-repository subagent dispatch in orchestrator prompts and contracts
-
-### Evidence & Commits
-- `gentle-pi` commit: `f0e0cdc3` (`feat(agents): dynamic subagent specialization and dispatch resilience`)
+- [ ] Task 8: Implement actionable `workspace_root` vs `repository_root` guidance and in-repo absolute path normalization for `## Allowed edit surfaces`
+- [ ] Task 9: Verify dispatch resilience and path normalization with unit tests in `tests/`
 
 ---
 
