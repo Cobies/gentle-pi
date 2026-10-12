@@ -590,13 +590,14 @@ export class AgentRunner {
 		else delete env[REQUESTED_TOOLS_ENV];
 		let instructionsTransportDir: string | undefined;
 		let instructionsTransportPath: string | undefined;
-		if (Buffer.byteLength(request.agent.instructions, "utf8") > MAX_INLINE_INSTRUCTIONS_BYTES) {
+		const systemPrompt = childSystemPrompt(request);
+		if (Buffer.byteLength(systemPrompt, "utf8") > MAX_INLINE_INSTRUCTIONS_BYTES) {
 			try {
 				const prefix = (request.agent.name || "instructions").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, MAX_TRANSPORT_PREFIX_CHARS);
 				instructionsTransportDir = mkdtempSync(join(tmpdir(), `gentle-pi-subagent-${prefix}-`));
 				try { chmodSync(instructionsTransportDir, DIR_MODE); } catch { /* best effort */ }
 				instructionsTransportPath = join(instructionsTransportDir, "instructions.md");
-				writeFileSync(instructionsTransportPath, request.agent.instructions, { mode: FILE_MODE, encoding: "utf8" });
+				writeFileSync(instructionsTransportPath, systemPrompt, { mode: FILE_MODE, encoding: "utf8" });
 				try { chmodSync(instructionsTransportPath, FILE_MODE); } catch { /* best effort */ }
 			} catch (error) {
 				if (instructionsTransportDir) {

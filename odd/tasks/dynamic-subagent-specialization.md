@@ -42,7 +42,7 @@ specialization?: SubagentSpecialization;
 
 ### 2.2 Security & Sandbox Invariants
 1. **Read-Only Base Invariant:** If `agent.tools` does not contain `write` or `edit`, `extraTools` may ONLY contain tools from `ALLOWED_READONLY_EXTENSIONS` (`read_symbol`, `read_enclosing`, `lens_diagnostics`, `web_search`, `fetch_content`, `source_check`, `ast_grep_search`, `ast_grep_outline`). Any attempt to inject mutating tools throws a validation error before process spawn.
-2. **Ephemeral Lifespan:** Specialization never mutates disk assets (`assets/agents/*.md`) or persistent configuration (`subagents.json`). It lives exclusively in the memory of the spawned RPC child.
+2. **Ephemeral Derivation:** Specialization never mutates disk assets (`assets/agents/*.md`) or persistent configuration (`subagents.json`). The parent retains it in `TaskRecord`, and task history persists it for continuation.
 3. **Prompt Composition:** The subagent prompt in `agents-runner.ts` appends a clearly demarcated section:
    ```markdown
    ## DYNAMIC SPECIALIZATION OVERLAY (Active for this execution)

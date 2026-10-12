@@ -1847,8 +1847,18 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 				// The result title belongs with the result body so a running poll
 				// can hide both without changing the tool call or its model output.
 				if (name === "result") return { render: () => [], invalidate() {} };
-				const params = args as { agent?: string; task_id?: string };
-				return new Text(theme.fg("toolTitle", `${AGENTS_GLYPH} agent ${name.replace(/_/g, " ")}${params.agent ? ` · ${params.agent}` : params.task_id ? ` · ${params.task_id}` : ""}`), 0, 0);
+				const params = args as { agent?: string; task_id?: string; specialization?: unknown };
+				const specialization = params.specialization;
+				const rawLabel = specialization && typeof specialization === "object"
+					? (specialization as { label?: unknown }).label
+					: undefined;
+				const specializationLabel = typeof rawLabel === "string"
+					? sanitizeTerminalText(rawLabel.trim()).trim()
+					: "";
+				const agentTitle = params.agent
+					? `${params.agent}${specializationLabel ? ` ▸ [${specializationLabel}]` : ""}`
+					: "";
+				return new Text(theme.fg("toolTitle", `${AGENTS_GLYPH} agent ${name.replace(/_/g, " ")}${agentTitle ? ` · ${agentTitle}` : params.task_id ? ` · ${params.task_id}` : specializationLabel ? ` · [${specializationLabel}]` : ""}`), 0, 0);
 			},
 			renderResult(result, options, theme) {
 				const task = (result.details as { gentleAgents?: { status?: string; taskId?: string } } | undefined)?.gentleAgents;
