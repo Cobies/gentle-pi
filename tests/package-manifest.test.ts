@@ -61,7 +61,7 @@ const V014_MANAGED_ASSETS = join(
 // gentle-ai-explore.md as their exemplar (packaged, absent from the v0.13
 // manifest) after review-refuter.md was retired together with every
 // Pi-authored adversarial review verdict.
-const MANAGED_EXEMPLAR_TOOLS = ["read", "grep", "find", "codegraph"];
+const MANAGED_EXEMPLAR_TOOLS = ["read", "grep", "find", "codegraph", "web_enable", "web_search", "source_check", "fetch_content", "get_search_content"];
 const RETIRED_ADVERSARIAL_AGENTS = ["review-refuter.md", "review-validator.md"];
 
 interface ManagedAssetsManifest {
@@ -252,6 +252,25 @@ test("package verification names the native review runtime boundary and packaged
 		/createNativeReviewCli\(\)/,
 		"the production extension must construct its native client from the packaged runtime module",
 	);
+});
+
+test("double-click installers are attached to the release only after the verified publication", () => {
+	const workflow = readFileSync(join(PACKAGE_ROOT, ".github", "workflows", "publish.yml"), "utf8");
+	const job = workflow.match(/^ {2}installers:\n([\s\S]*?)(?=^ {2}[A-Za-z0-9_-]+:\n|(?![\s\S]))/m)?.[1];
+	assert.ok(job, "publish.yml has an installers job");
+	assert.match(job, /^ {4}needs: publish$/m, "installers wait for the verified npm publication");
+	assert.match(job, /^ {4}if: github\.repository == 'Gentleman-Programming\/gentle-shell'$/m);
+	assert.match(job, /^ {6}contents: write$/m, "only this job may write the release");
+	assert.match(job, /ref: \$\{\{ github\.sha \}\}/, "the installers come from the verified release commit");
+	assert.match(job, /persist-credentials: false/);
+	assert.match(job, /node scripts\/build-installer-bundles\.mjs --out "\$\{RUNNER_TEMP\}\/installers"/);
+	assert.match(job, /RELEASE_TAG: \$\{\{ needs\.publish\.outputs\.tag \}\}/, "the tag the publish job verified, not the raw input");
+	assert.match(job, /package-manager-cache: false/);
+	assert.match(workflow, /^ {4}outputs:\n {6}tag: \$\{\{ steps\.release\.outputs\.tag \}\}$/m, "publish exports its verified tag");
+	assert.match(job, /gh release upload "\$\{RELEASE_TAG\}" "\$\{RUNNER_TEMP\}"\/installers\/\* --repo "\$\{GITHUB_REPOSITORY\}" --clobber/);
+	const publish = workflow.match(/^ {2}publish:\n([\s\S]*?)(?=^ {2}installers:\n)/m)?.[1];
+	assert.ok(publish);
+	assert.doesNotMatch(publish, /contents: write/, "the npm publication job keeps read-only contents");
 });
 
 test("npm publication is bound to the exact package tag and triggering commit", () => {
@@ -1654,7 +1673,7 @@ test("global model routing uses PI_CODING_AGENT_DIR for package-installed agents
 test("normal and forced installation copy generic agents with complete role contracts", () => {
 	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
 	const expectedTools = {
-		"gentle-ai-explore": ["read", "grep", "find", "codegraph"],
+		"gentle-ai-explore": ["read", "grep", "find", "codegraph", "web_enable", "web_search", "source_check", "fetch_content", "get_search_content"],
 		"gentle-ai-verify": ["read", "grep", "find", "bash"],
 	} as const;
 

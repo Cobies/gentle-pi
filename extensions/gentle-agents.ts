@@ -15,7 +15,7 @@ import os from "node:os";
 import { join, resolve, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLocalBashOperations, keyHint, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createJobRegistry, type JobExecOperations, type JobRecord } from "../lib/background-jobs.ts";
+import { createJobRegistry, isStandaloneSleep, type JobExecOperations, type JobRecord } from "../lib/background-jobs.ts";
 import { JOB_GLYPH, JOB_NOTICE_TYPE, jobDetails, jobNoticeText, monitorEventsText, monitorStoppedText, registerBackgroundJobTools } from "../lib/background-jobs-tools.ts";
 import { createMonitorController, mergeMonitorBatches, type MonitorNotice } from "../lib/background-monitor.ts";
 import { JobsView } from "../lib/jobs-view.ts";
@@ -44,10 +44,12 @@ import { AgentsView } from "../lib/agents-view.ts";
 import { withOverlayRepaint } from "../lib/overlay-repaint.ts";
 import { PresencePublisher, sanitizeDisplayLabel, listPresence, sessionHash } from "../lib/orchestrator-presence.ts";
 import { incomingMessageCard, outgoingMessageCall, outgoingMessageResult, type OrchestratorMessageDetails } from "../lib/orchestrator-message-card.ts";
+import { orchestratorToolRenderers } from "../lib/orchestrator-tool-card.ts";
 import { discoverOrchestrators } from "../lib/orchestrator-discovery.ts";
 import { consultPublishedMetadata, unavailableMetadata, type MetadataReceipt } from "../lib/orchestrator-consultation.ts";
 import { HelperCostPermission } from "../lib/orchestrator-helper-consent.ts";
 import { OrchestratorStateCache } from "../lib/orchestrator-state.ts";
+import { normalizeTaskSubject } from "../lib/orchestrator-alias.ts";
 import { decodeWorkDescriptor } from "../lib/orchestrator-work.ts";
 import { validateWorkFilter, searchPublishedWork } from "../lib/orchestrator-work-search.ts";
 import { OrchestratorScopeCache, type RepositoryFact } from "../lib/orchestrator-scope.ts";
@@ -310,6 +312,20 @@ function ownedChildIpc(env: NodeJS.ProcessEnv, candidate: IpcEndpoint | undefine
 	return candidate;
 }
 
+// Catalog declarations are routing hints, not proof of child availability.
+// Filter non-name entries such as `"*": false`, but do not claim that a
+// syntactically valid name is registered. Empty declarations omit --tools and
+// use Pi defaults. The runner adds parent messaging separately.
+const TOOL_NAME = /^[A-Za-z0-9_.:-]+$/;
+
+function declaredToolInventory(agent: AgentDefinition): string {
+	const usable = agent.tools.filter((name) => TOOL_NAME.test(name));
+	if (usable.length > 0) return `[declared tools (not verified): ${usable.join(", ")}]`;
+	return agent.tools.length === 0
+		? "[declared tools: Pi defaults (no allowlist)]"
+		: "[declared tools: no tool names declared]";
+}
+
 // Pi drops unknown --tools names without a diagnostic (#1690), so the child
 // reports them once through the one notify the parent keeps. The check runs
 // at the first before_agent_start, not session_start: Pi runs session_start
@@ -340,7 +356,7 @@ function registerChildMessaging(pi: ExtensionAPI, ipc: IpcEndpoint): void {
 		label: "Agent parent message",
 		description: "Send a bounded notification or correlated query to this subagent's parent.",
 		parameters: { type: "object", additionalProperties: false, required: ["message"], properties: { kind: { type: "string", enum: ["notification", "query"] }, message: { type: "string" } } } as never,
-		async execute(_id, params) {
+		async execute(_id, params): Promise<ToolText> {
 			const input = params as { kind?: unknown; message?: unknown };
 			if (typeof input.message !== "string") throw new Error("parent messages require text");
 			if (input.kind === undefined || input.kind === "notification") {
@@ -793,6 +809,23 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		schedule: (fn, ms) => deps.schedule(fn, ms),
 		now: deps.now,
 		deliver: (notice) => queueJobNotice(notice),
+	});
+	// A parent that sleeps while background work runs only burns the turn: each
+	// completion already arrives as a session message (#1903). bash_background
+	// and monitor stay allowed because they are the sanctioned way to wait.
+	pi.on("tool_call", (event) => {
+		if (event.toolName !== "bash") return undefined;
+		const command = (event.input as { command?: unknown }).command;
+		if (typeof command !== "string" || !isStandaloneSleep(command)) return undefined;
+		const sessionId = activeSessionId();
+		// Same active-task predicate as publishActivity.
+		const tasks = store.list(sessionId).filter((task) => ownedTaskIds.has(task.id) && !isFinished(task.status) && !restoredTaskIds.has(task.id)).length;
+		const running = jobs.list(sessionId ?? "").filter((job) => job.status === "running").length;
+		if (tasks + running === 0) return undefined;
+		return {
+			block: true,
+			reason: `Standalone sleep is blocked while background work is active (${tasks} task(s), ${running} job(s)). End the turn now; each completion arrives automatically as a session message and starts a new turn.`,
+		};
 	});
 	let activeAgentRuns = 0;
 	// ExtensionAPI has no idle probe; ctx.isIdle() is the only one. It is live
@@ -1836,9 +1869,10 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	pi.registerTool({
 		name: "orchestrator_session_id",
 		label: "Orchestrator session ID",
-		description: "Return this host session's stable routing ID and current display alias. When starting a task or delegation, declare a short recognizable subject here; do not query all peers. Names never authenticate. Existing Pi names and human renames are preserved. Use a concise non-sensitive label, not a prompt. Optionally publish owner-curated state (2048 UTF-8 bytes total); null withdraws, omission leaves unchanged. Never include credentials, internal instructions, or raw prompts. Historical notes are not consent or an owner reply.",
+		description: "Return this host session's stable routing ID, Initial alias (FIRST TASK), Current alias (CURRENT TASK), and separate human Session name. Explicit subjects update Current even when named; Initial stays the first declared branch topic, unknown for legacy history. Before delegation or cross-session coordination, declare a short recognizable subject here. Do not require a subject declaration for small direct tasks; do not query all peers. Names never authenticate. Existing Pi names and human renames are preserved. Use a concise non-sensitive label, not a prompt. For work beyond small direct tasks, publish subject and current/next status here; refresh at task changes/completion. Owner-curated state (2048 UTF-8 bytes total): null withdraws, omission leaves unchanged. Never include credentials, internal instructions, or raw prompts. Historical notes are not consent or an owner reply.",
+		...orchestratorToolRenderers("session", expandHint),
 		parameters: { type: "object", additionalProperties: false, properties: {
-			subject: { type: "string", maxLength: 120, description: "Optional short task subject; names only an unnamed Pi session." },
+			subject: { type: "string", maxLength: 120, description: "Optional short task subject; updates task aliases independently of human names. Also names an unnamed Pi session." },
 			state: { anyOf: [{ type: "null" }, { type: "object", additionalProperties: false, properties: {
 				objective: { type: "string" }, progress: { type: "string" }, decisions: { type: "string" }, blockers: { type: "string" },
 				work: { type: "object", additionalProperties: false,
@@ -1856,20 +1890,22 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			const transport = activeTransportFor(ctx);
 			if (!transport) return text("Error: session messaging is not ready.", { error: "not ready" });
 			const { subject, state } = params as { subject?: unknown; state?: unknown };
-			if (state !== undefined) stateCache.publish(ctx.sessionManager, state, (type, data) => pi.appendEntry(type, data));
-			if (typeof subject === "string" && !ctx.sessionManager.getSessionName?.()) {
-				const declared = sanitizeDisplayLabel(subject);
-				if (declared) pi.setSessionName(declared);
-			}
+			const declared = normalizeTaskSubject(subject);
+			if (state !== undefined || declared) stateCache.publish(ctx.sessionManager, state, (type, data) => pi.appendEntry(type, data), Date.now(), declared);
+			if (activeTransportFor(ctx) !== transport) throw new Error("stale-published-state");
+			if (declared && !ctx.sessionManager.getSessionName?.()) pi.setSessionName(declared);
 			const alias = sanitizeDisplayLabel(ctx.sessionManager.getSessionName?.() ?? "");
-			if (state !== undefined) publishActivity();
+			const aliases = stateCache.get(ctx.sessionManager)?.aliases;
+			if (state !== undefined || declared) publishActivity();
 			presence?.refreshLabel();
-			return text(`Active session ID: ${transport.sessionId}\nCurrent alias: ${alias || "unnamed"}`, { gentleAgents: { senderSessionId: transport.sessionId, alias } });
+			return text(`Active session ID: ${transport.sessionId}\nCurrent alias (CURRENT TASK): ${aliases?.currentAlias ?? "unknown"}\nInitial alias (FIRST TASK): ${aliases?.initialAlias ?? "unknown"}\nSession name: ${alias || "unnamed"}`,
+				{ gentleAgents: { senderSessionId: transport.sessionId, alias, sessionName: alias, initialAlias: aliases?.initialAlias ?? null, currentAlias: aliases?.currentAlias ?? null } });
 		},
 	});
 	pi.registerTool({
 		name: "orchestrator_consult",
 		label: "Consult published context",
+		...orchestratorToolRenderers("consult", expandHint),
 		description: "Read published metadata (default), request bounded helper reasoning with explicit UI model-cost permission and a question, or revoke-reasoning for an exact target. Never an owner reply, consent or private context access.",
 		parameters: { type: "object", additionalProperties: false, required: ["recipient_session_id"], properties: {
 			kind: { type: "string", enum: ["metadata", "reasoning", "revoke-reasoning"] },
@@ -1919,6 +1955,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	pi.registerTool({
 		name: "orchestrator_list",
 		label: "List orchestrators",
+		...orchestratorToolRenderers("list", expandHint),
 		description: "List other sessions advertised by the trusted local profile. Optional filter searches only published classified work with bounded, non-exhaustive coverage, no authority and unknown reachability. Omit filter for the existing session list.",
 		parameters: Type.Object({
 			recipient_session_id: Type.Optional(Type.String({ description: "Exact routing ID of the peer to inspect." })),
@@ -1967,7 +2004,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 					? `repository: ${fact.root} · clone: ${fact.cloneHash} · Git resolved at: ${fact.resolvedAt} (${fact.source})`
 					: "repository: unknown";
 				const rows = peers.map(peer => {
-					const context = peer.freshness === "recent" ? ` · ${peer.label || "unnamed"} · recorded workspace: ${peer.workspace || "unknown"}` : " · context: unknown";
+					const context = peer.freshness === "recent" ? ` · ${peer.aliases?.currentAlias || peer.label || "unnamed"} · Session name: ${peer.label || "unnamed"} · Current alias (CURRENT TASK): ${peer.aliases?.currentAlias ?? "unknown"} · Initial alias (FIRST TASK): ${peer.aliases?.initialAlias ?? "unknown"} · recorded workspace: ${peer.workspace || "unknown"}` : " · context: unknown";
 					const tasks = peer.tasks?.map(task => `\n  - ${task.label || task.id} [${task.status}] · launch workspace: ${task.workspace || "unknown"} · ${repository(peer.scope?.tasks.find(t => t.id === task.id)?.repository)}`).join("") ?? "";
 					const registered = peer.scope?.registered.map(fact => `\n  registered: ${repository(fact)}`).join("") ?? "";
 					const gaps = peer.scope && !peer.scope.complete ? `\n  (scope incomplete: ${peer.scope.omittedTasks} tasks, ${peer.scope.omittedRegistered} registered roots omitted)` : "";
@@ -2056,9 +2093,9 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		},
 	});
 
-	tool("list_agents", "List the subagents defined for this project and user, with their descriptions.", { properties: {} }, async (_params, ctx) => {
+	tool("list_agents", "List the subagents defined for this project and user, with their descriptions and declared tool inventory.", { properties: {} }, async (_params, ctx) => {
 		const { agents, errors } = discoverAgents(roots(ctx));
-		const lines = agents.map((agent) => `- ${agent.name} (${agent.scope}): ${agent.description || "no description"}`);
+		const lines = agents.map((agent) => `- ${agent.name} (${agent.scope}): ${agent.description || "no description"} ${declaredToolInventory(agent)}`);
 		const problems = errors.map((error) => `! ${error}`);
 		return text(lines.length === 0 ? "No subagents defined." : [...lines, ...problems].join("\n"));
 	});

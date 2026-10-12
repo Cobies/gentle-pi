@@ -2709,6 +2709,7 @@ test("explicit child roots launch and continue in the actual cwd, persist withou
 	await h.fire("session_start", ctx);
 	const run = h.tools.get("subagent_run")!;
 	await assert.rejects(run.execute("bad", { agent: "explore", task: "Map", workspace_root: "/other-clone", mode: "background" }, undefined, undefined, ctx), /same Git clone/);
+	await assert.rejects(run.execute("bad", { agent: "explore", task: "Map", workspace_root: "/other-clone", mode: "background" }, undefined, undefined, ctx), /subagent_run with repository_root/);
 	assert.deepEqual(launched, []);
 	const result = await run.execute("one", { agent: "explore", task: "Map /other-clone mentioned in prose", workspace_root: childRoot, mode: "background" }, undefined, undefined, ctx);
 	await tick();
@@ -3251,6 +3252,35 @@ test("while pi-subagents-j0k3r is still installed the tools stay unregistered an
 	const ctx = { hasUI: true, ui: { notify: (message: string, level: string) => notices.push(`${level}:${message}`) } } as unknown as ExtensionContext;
 	await fire("session_start", ctx);
 	assert.match(notices[0] ?? "", /^warning:❀ Gentle Agents is waiting: remove the old package first with "pi remove npm:pi-subagents-j0k3r"/);
+});
+
+test("subagent_list_agents publishes each agent's declared tool inventory so routing can check capabilities", async () => {
+	const fixture = mkdtempSync(join(tmpdir(), "capability-catalog-"));
+	const agentHome = join(fixture, "agent-home");
+	mkdirSync(join(agentHome, ".pi", "agent", "agents"), { recursive: true });
+	writeFileSync(join(agentHome, ".pi", "agent", "agents", "explore.md"), "---\ndescription: maps things\ntools: [read, grep, find, codegraph]\n---\nYou map things.");
+	writeFileSync(join(agentHome, ".pi", "agent", "agents", "open.md"), "---\ndescription: no allowlist\n---\nYou are open.");
+	writeFileSync(join(agentHome, ".pi", "agent", "agents", "unknown.md"), "---\ndescription: unverified name\ntools: [glob]\n---\nYou explore.");
+	writeFileSync(join(agentHome, ".pi", "agent", "agents", "lens.md"), "---\ndescription: review lane\ntools:\n  - \"*\": false\n  - read\n  - grep\n  - gentle_review_scope\n---\nYou review.");
+	writeFileSync(join(agentHome, ".pi", "agent", "agents", "denied.md"), "---\ndescription: only a wildcard\ntools:\n  - \"*\": false\n---\nYou are denied.");
+	try {
+		const h = fakePi(), runtime = deps();
+		runtime.deps.home = agentHome;
+		gentleAgents(h.pi, {}, runtime.deps);
+		const { ctx } = fakeContext();
+		await h.fire("session_start", ctx);
+		const listed = await h.tools.get("subagent_list_agents")!.execute("c0", {}, undefined, undefined, ctx);
+		assert.match(listed.content[0].text, /- explore \(global\): maps things \[declared tools \(not verified\): read, grep, find, codegraph\]/);
+		// gentle-shell#1269: a definition without an allowlist keeps Pi's default
+		// tool set, so the catalog must never render it as having no tools at all.
+		assert.match(listed.content[0].text, /- open \(global\): no allowlist \[declared tools: Pi defaults \(no allowlist\)\]/);
+		// The review lane declares the `"*": false` wildcard, which Pi drops: it is
+		// not a capability and must not appear as one in the routing surface.
+		assert.match(listed.content[0].text, /- lens \(global\): review lane \[declared tools \(not verified\): read, grep, gentle_review_scope\]/);
+		assert.doesNotMatch(listed.content[0].text, /false/);
+		assert.match(listed.content[0].text, /- unknown \(global\): unverified name \[declared tools \(not verified\): glob\]/);
+		assert.match(listed.content[0].text, /- denied \(global\): only a wildcard \[declared tools: no tool names declared\]/);
+	} finally { rmSync(fixture, TEST_DIR_REMOVAL); }
 });
 
 test("subagent_list_agents and subagent_run in task mode launch a child with the resolved profile and return its answer", async () => {
@@ -4084,6 +4114,72 @@ test("session transport startup failure cleans the constructed Windows-capable t
 	assert.match((await h.tools.get("orchestrator_session_id")!.execute("id", {}, undefined, undefined, ctx)).content[0].text, /not ready/);
 });
 
+test("registered task aliases persist independently of human names and curated state", async () => {
+	const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+	const profile = realpathSync(mkdtempSync(join(root, "aliases-runtime-")));
+	runtime.deps.agentHome = profile;
+	const peer = { version: 1 as const, sessionId: "s1", endpoint: "/fixture/aliases.sock", createdAt: 1 };
+	const registry = { list: async () => [], listActivations: async () => [peer] };
+	runtime.deps.sessionTransport = {
+		createRegistry: async () => registry,
+		createListener: () => ({ registry, record: peer, start: async () => {}, close: async () => {} }),
+		createClient: () => ({ close() {}, sendNotification: async () => { throw new Error("unexpected message"); } }),
+	};
+	let name = "Human label";
+	Object.assign(h.pi, { setSessionName: () => { throw new Error("named session must not be renamed"); } });
+	let branch = h.entries;
+	Object.assign(ctx.sessionManager, { getSessionName: () => name, getBranch: () => branch });
+	gentleAgents(h.pi, {}, runtime.deps);
+	await h.fire("session_start", ctx);
+	const tool = h.tools.get("orchestrator_session_id")!;
+	const declare = (params: unknown = {}, context = ctx) => tool.execute("aliases", params, undefined, undefined, context);
+	const aliases = () => readDiscovery(profile, listPresence(profile).entries[0])?.aliases;
+	const first = await declare({ subject: "Task A", state: { progress: "Starting", work: { area: "Auth" } } });
+	const initial = h.entries.at(-1)!;
+	assert.deepEqual(aliases(), { initialAlias: "Task A", currentAlias: "Task A" });
+	assert.match(first.content[0].text, /Current alias \(CURRENT TASK\): Task A/);
+	assert.match(first.content[0].text, /Initial alias \(FIRST TASK\): Task A/);
+	const recordedAt = readDiscovery(profile, listPresence(profile).entries[0])?.state?.recordedAt;
+	const second = await declare({ subject: "Task B" });
+	assert.equal(readDiscovery(profile, listPresence(profile).entries[0])?.state?.recordedAt, recordedAt);
+	assert.equal(readDiscovery(profile, listPresence(profile).entries[0])?.state?.state?.progress, "Starting");
+	assert.deepEqual(aliases(), { initialAlias: "Task A", currentAlias: "Task B" });
+	assert.match(second.content[0].text, /Session name: Human label/);
+	assert.equal((second.details.gentleAgents as { senderSessionId: string }).senderSessionId, "s1");
+	assert.equal(listPresence(profile).entries[0].label, name);
+	const list = await h.tools.get("orchestrator_list")!.execute("list", {}, undefined, undefined, ctx);
+	assert.match(list.content[0].text, /Task A/);
+	assert.match(list.content[0].text, /Task B/);
+	const consult = await h.tools.get("orchestrator_consult")!.execute("consult", { recipient_session_id: "s1" }, undefined, undefined, ctx);
+	assert.deepEqual(JSON.parse(consult.content[0].text).snapshot.aliases, aliases());
+	const filtered = await h.tools.get("orchestrator_list")!.execute("filter", { filter: { text: "Task B" } }, undefined, undefined, ctx);
+	assert.equal(JSON.parse(filtered.content[0].text).matches[0].label, "Task B");
+	name = "Human rename";
+	await declare({ state: { progress: "Replacement" } });
+	await declare({ state: null });
+	const writes = h.entries.length;
+	await declare();
+	assert.equal(h.entries.length, writes);
+	assert.deepEqual(aliases(), { initialAlias: "Task A", currentAlias: "Task B" });
+	await h.fire("session_start", ctx, { reason: "resume" });
+	assert.deepEqual(aliases(), { initialAlias: "Task A", currentAlias: "Task B" });
+	branch = [initial];
+	await h.fire("session_tree", ctx);
+	assert.deepEqual(aliases(), { initialAlias: "Task A", currentAlias: "Task A" });
+	branch = [{ ...initial, data: { ...(initial.data as object), aliases: undefined } }];
+	// An actual legacy envelope has no alias field, not a malformed undefined field.
+	delete (branch[0].data as { aliases?: unknown }).aliases;
+	await h.fire("session_start", ctx, { reason: "reload" });
+	assert.equal(aliases(), undefined);
+	await declare({ subject: "Legacy current" });
+	assert.deepEqual(aliases(), { initialAlias: null, currentAlias: "Legacy current" });
+	const replacement = fakeContext().ctx;
+	await h.fire("session_start", replacement);
+	assert.match((await declare({ subject: "Stale" }, ctx)).content[0].text, /not ready/);
+	assert.equal(aliases(), undefined);
+	assert.equal(runtime.spawned.length + h.sent.length + h.userMessages.length, 0);
+});
+
 test("registered session identity declares subjects and refreshes canonical idle renames", async (t) => {
 	const h = fakePi();
 	const runtime = deps();
@@ -4123,10 +4219,10 @@ test("registered session identity declares subjects and refreshes canonical idle
 	const result = await declare("\u001b[31m Fix\n auth\u202e ");
 	assert.equal(name, "Fix auth");
 	assert.match(result.content[0].text, /Active session ID: s1.*\n.*Fix auth/);
-	assert.deepEqual(result.details.gentleAgents, { senderSessionId: "s1", alias: "Fix auth" });
+	assert.deepEqual(result.details.gentleAgents, { senderSessionId: "s1", alias: "Fix auth", sessionName: "Fix auth", initialAlias: "Fix auth", currentAlias: "Fix auth" });
 	const before = listPresence(profile).entries[0]!;
 	assert.equal(before.label, "Fix auth");
-	assert.equal(readDiscovery(profile, before)?.state, undefined, "no implicit summary");
+	assert.equal(readDiscovery(profile, before)?.state?.state, null, "no implicit summary");
 	Object.assign(ctx.sessionManager, { getBranch: () => h.entries });
 	const work = { area: "Auth", topic: "Login", tags: ["Review"], refs: [
 		{ kind: "issue", repository: "github.com/Owner/Repo", id: "12" },
@@ -4541,6 +4637,17 @@ test("session transport selects a peer for outbound delivery and rejects stale c
 	assert.equal(closed, 2, "replacement closes the old client and listener before activating its successor");
 	await assert.rejects(original({ id: "late", senderSessionId: "alpha", message: "late callback" }), /stale session transport/);
 	await h.fire("session_shutdown", ctx);
+});
+
+test("all orchestrator tools own compact and expanded card rendering", () => {
+	const h = fakePi();
+	gentleAgents(h.pi, {}, deps().deps);
+	for (const name of ["orchestrator_session_id", "orchestrator_consult", "orchestrator_list", "orchestrator_send_message"]) {
+		const tool = h.tools.get(name)!;
+		assert.equal(tool.renderShell, "self", name);
+		assert.equal(typeof tool.renderCall, "function", name);
+		assert.equal(typeof tool.renderResult, "function", name);
+	}
 });
 
 // Issue #1364: user consent before cross-orchestrator communication
@@ -5832,6 +5939,41 @@ function fakeJobShell() {
 const jobIo = () => new Promise((done) => setTimeout(done, 50));
 const toolText = (result: { content: Array<{ text?: string }> }) => result.content.map((part) => part.text ?? "").join("\n");
 
+test("standalone bash sleep is blocked only while background work is active (#1903)", async () => {
+	const { pi, tools, fire, sent } = fakePi();
+	const jobs = fakeJobShell();
+	gentleAgents(pi, {}, { ...deps().deps, jobShell: jobs.shell, jobOutputDir: () => jobs.dir });
+	const { ctx } = fakeContext();
+	const call = async (toolName: string, command: string) =>
+		(await fire("tool_call", ctx, { toolCallId: "t", toolName, input: { command } })).find((result) => result !== undefined) as { block?: boolean; reason?: string } | undefined;
+	try {
+		await fire("session_start", ctx);
+		// Without background work, sleep is ordinary shell use.
+		assert.equal(await call("bash", "sleep 10"), undefined);
+
+		await tools.get("bash_background")!.execute("b1", { command: "gh run watch 42 --exit-status", label: "CI" }, undefined, undefined, ctx);
+		for (const command of ["sleep 10", "  sleep 2m  ", "sleep 0.5;", "sleep 5 && sleep 5"]) {
+			const blocked = await call("bash", command);
+			assert.equal(blocked?.block, true, command);
+			assert.match(blocked!.reason!, /background work is active/);
+			assert.match(blocked!.reason!, /End the turn/);
+		}
+		// Real wait conditions, mixed commands and the sanctioned background tools stay allowed.
+		for (const command of ["until curl -s x; do sleep 1; done", "sleep 5 && gh run view 42", "for i in 1 2; do sleep 1; echo $i; done", "sleep $N"]) {
+			assert.equal(await call("bash", command), undefined, command);
+		}
+		assert.equal(await call("bash_background", "sleep 100"), undefined);
+		assert.equal(await call("monitor", "sleep 100"), undefined);
+
+		jobs.runs[0]!.exit(0);
+		await eventually(() => sent.some((entry) => entry.message.customType === "gentle-jobs.notice"), "the job must settle before sleep is allowed again");
+		assert.equal(await call("bash", "sleep 10"), undefined, "sleep is allowed again once background work settles");
+	} finally {
+		await fire("session_shutdown", ctx);
+		jobs.cleanup();
+	}
+});
+
 test("bash_background returns at once, and an idle parent gets one stored exit notice and one wake", async () => {
 	const { pi, tools, fire, sent, userMessages, delivery, renderers } = fakePi();
 	const jobs = fakeJobShell();
@@ -5847,7 +5989,10 @@ test("bash_background returns at once, and an idle parent gets one stored exit n
 		assert.equal(sent.length, 0, "nothing reaches the parent while the job runs");
 		jobs.runs[0]!.onData(Buffer.from("check build: fail\n"));
 		jobs.runs[0]!.exit(1);
-		await jobIo();
+		await eventually(
+			() => sent.some((entry) => entry.message.customType === "gentle-jobs.notice") && userMessages.length > 0,
+			"the closed job log must deliver its exit notice and wake before assertions",
+		);
 		const notices = sent.filter((entry) => entry.message.customType === "gentle-jobs.notice");
 		assert.equal(notices.length, 1, "the exit is reported exactly once");
 		assert.deepEqual(notices[0]!.options, { triggerTurn: false }, "an idle parent stores the notice without a direct turn");

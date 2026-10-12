@@ -6,11 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext, type SlashCommandInfo, type SourceInfo } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, visibleWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, matchesKey, visibleWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import installGentleShell, { buildShellBarModel, createActiveProfileReader, changesShortcut, devBinaryCard, extractQueuedText, fetchCodexUsage, fetchNanUsage, loadFileDiff, shellGitRunner, openInExternalEditor, usageShortcut, GentlePromptEditor } from "../extensions/gentle-shell.ts";
 import { CODEX_USAGE_URL, NAN_QUOTA_URL, USAGE_SOURCE_EVENT, USAGE_SOURCE_SCHEMA } from "../lib/shell-usage.ts";
 import { bindSessionProfile, clearSessionProfileBinding, resetSessionProfileBindingsForTesting } from "../lib/session-profile-binding.ts";
-import { createVimEditorAdapter } from "../lib/vim-editor-adapter.ts";
+import { createVimEditorAdapter, isAuditedPiEditorVersion } from "../lib/vim-editor-adapter.ts";
 import { buildCommandPaletteGroups } from "../lib/command-palette-catalog.ts";
 import { CHANGE_STATUS } from "../lib/shell-changes.ts";
 import { sidebarPart, sidebarState, type SidebarRail } from "../lib/shell-sidebar.ts";
@@ -25,11 +25,13 @@ import { resolveVisualSettings, writeVisualSettings } from "../lib/visual-custom
 import { resolveAnimationPolicy } from "../lib/animation-policy.ts";
 import { resolveVimPolicy, writeVimPolicy } from "../lib/vim-policy.ts";
 import { resolveHistoryCapturePolicy, writeHistoryCapturePolicy } from "../lib/history-capture-policy.ts";
+import { setBundledInstallForTesting } from "../lib/gentle-shell-bundled.ts";
 import { readBannerConfig } from "../extensions/startup-banner.ts";
 import { listVisualProfiles, saveVisualProfile } from "../lib/visual-profiles.ts";
 import { oddPhaseRegistry } from "../lib/odd-phase.ts";
 import { CARD_STYLE, cardStyle, setCardStyle } from "../lib/shell-card.ts";
 import { resolveCardStyle, writeCardStyle } from "../lib/card-style-policy.ts";
+import { CARD_CONTENT, cardContent, resolveCardContent, setCardContent, writeCardContent } from "../lib/card-content-policy.ts";
 import { claimNotificationOwner } from "../lib/notification-service.ts";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "../lib/notification-policy.ts";
 
@@ -166,7 +168,7 @@ async function fire(handlers: Map<string, Array<(event: unknown, ctx: ExtensionC
 	for (const handler of handlers.get(event) ?? []) await handler({}, ctx);
 }
 
-function fakeContext(options: { hasUI?: boolean; entries?: unknown[]; oauth?: boolean; pending?: boolean; idle?: boolean; editorFactory?: unknown; token?: string; select?: (title: string, options: string[]) => Promise<string | undefined> } = {}): { ctx: ExtensionContext; ui: FakeUi; overlayReady: Promise<void> } {
+function fakeContext(options: { theme?: typeof plainTheme & { getBgAnsi?(): string }; hasUI?: boolean; entries?: unknown[]; oauth?: boolean; pending?: boolean; idle?: boolean; editorFactory?: unknown; token?: string; select?: (title: string, options: string[]) => Promise<string | undefined> } = {}): { ctx: ExtensionContext; ui: FakeUi; overlayReady: Promise<void> } {
 	const ui: FakeUi = { footerFactory: undefined, editorFactory: options.editorFactory, widgets: new Map(), widgetSets: 0, workingVisible: undefined, notices: [], overlay: undefined, overlayView: undefined, closeOverlay: undefined };
 	let resolveOverlay: () => void;
 	const overlayReady = new Promise<void>((resolve) => { resolveOverlay = resolve; });
@@ -187,7 +189,7 @@ function fakeContext(options: { hasUI?: boolean; entries?: unknown[]; oauth?: bo
 		modelRegistry: { isUsingOAuth: () => options.oauth ?? true, getApiKeyForProvider: async () => options.token },
 		getContextUsage: () => ({ tokens: 122_400, contextWindow: 272_000, percent: 45 }),
 		ui: {
-			theme: plainTheme,
+			theme: options.theme ?? plainTheme,
 			getAllThemes: () => [{ name: "dark", path: undefined }, { name: "light", path: undefined }],
 			getTheme: (name: string) => name === "dark" || name === "light" ? { name } : undefined,
 			setTheme: (name: string) => ({ success: name === "dark" || name === "light" }),
@@ -281,6 +283,63 @@ test("buildShellBarModel shortens the home directory and hides effort for non-re
 	assert.equal(built.cwd, "~/work/gentle-pi");
 	assert.equal(built.effort, undefined);
 	assert.equal(built.branch, null);
+});
+
+test("buildShellBarModel reports auto effort for NaN models that manage their own depth", () => {
+	const { pi } = fakePi();
+	const { ctx } = fakeContext();
+	const model = ctx.model as unknown as { id: string; provider: string };
+	model.provider = "nan";
+	model.id = "deepseek-v4-flash";
+	const footerData = {
+		getGitBranch: () => null,
+		getExtensionStatuses: () => new Map(),
+		getAvailableProviderCount: () => 1,
+		onBranchChange: () => () => {},
+	};
+	assert.equal(buildShellBarModel(pi, ctx, footerData, { home: "/home/alan" }).effort, "auto");
+	// A NaN model that honors the level keeps reporting the selected one.
+	model.id = "glm5.3";
+	assert.equal(buildShellBarModel(pi, ctx, footerData, { home: "/home/alan" }).effort, "medium");
+});
+
+test("a self-managing NaN model announces its automatic depth once per session", async () => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, {});
+	const { ctx, ui } = fakeContext();
+	const adaptive = { id: "qwen3.8-flash", provider: "nan", name: "Qwen 3.8 Flash", reasoning: true };
+	const budget = { id: "glm5.3", provider: "nan", name: "GLM 5.3", reasoning: true };
+	(ctx as unknown as { model: unknown }).model = adaptive;
+	const emit = async (event: string, payload: unknown) => {
+		for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
+	};
+	await emit("thinking_level_select", { type: "thinking_level_select", level: "high", previousLevel: "medium" });
+	assert.deepEqual(ui.notices.filter((notice) => notice.includes("automatically")), [
+		"Qwen 3.8 Flash chooses its reasoning depth automatically; the selected thinking level is accepted but does not change it.",
+	]);
+	// Re-selecting the same model or level never repeats the notice.
+	await emit("model_select", { type: "model_select", model: adaptive, previousModel: budget, source: "set" });
+	assert.equal(ui.notices.filter((notice) => notice.includes("automatically")).length, 1);
+	// A model that applies the level never announces.
+	(ctx as unknown as { model: unknown }).model = budget;
+	await emit("model_select", { type: "model_select", model: budget, previousModel: adaptive, source: "set" });
+	assert.equal(ui.notices.filter((notice) => notice.includes("automatically")).length, 1);
+});
+
+test("a session that starts on a self-managing NaN model announces it once", async () => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, {});
+	const { ctx, ui } = fakeContext();
+	const adaptive = { id: "mimo-v2.6-flash", provider: "nan", name: "MiMo V2.6 Flash", reasoning: true };
+	(ctx as unknown as { model: unknown }).model = adaptive;
+	for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
+	assert.deepEqual(ui.notices.filter((notice) => notice.includes("automatically")), [
+		"MiMo V2.6 Flash chooses its reasoning depth automatically; the selected thinking level is accepted but does not change it.",
+	]);
+	// A session that starts on a model which honors the level stays silent.
+	(ctx as unknown as { model: unknown }).model = { id: "gemma4", provider: "nan", name: "Gemma 4", reasoning: true };
+	for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
+	assert.equal(ui.notices.filter((notice) => notice.includes("automatically")).length, 1);
 });
 
 test("gentleShell installs the footer on session_start when a UI exists", () => {
@@ -1577,6 +1636,49 @@ test("GentlePromptEditor keeps visual selection when autocomplete offers printab
 	} finally { editor.dispose(); }
 });
 
+// gentle-shell#1565: in ordinary editing the Gentle Agents alt+a shortcut
+// must win over prompt select-all, for empty and non-empty drafts alike.
+test("GentlePromptEditor gives extension shortcuts precedence over selection chords", () => {
+	const { pi, handlers } = fakePi(); gentleShell(pi, {});
+	const { ctx, ui } = fakeContext(); const editor = installedPrompt(ctx, ui, handlers);
+	try {
+		const seen: string[] = [];
+		editor.onExtensionShortcut = (data) => { seen.push(data); return matchesKey(data, "alt+a"); };
+		for (const altA of ["\x1ba", "\x1b[97;3u", "\x1b[97;3:1u"]) {
+			seen.length = 0;
+			editor.setText("");
+			editor.handleInput(altA);
+			assert.deepEqual(seen, [altA], "empty draft dispatches the shortcut");
+			seen.length = 0;
+			editor.setText("abc\ndef");
+			editor.handleInput(altA);
+			assert.deepEqual(seen, [altA], "non-empty draft dispatches the shortcut");
+			assert.doesNotMatch(editor.render(40).join("\n"), /\x1b\[7mabc/);
+			editor.handleInput("\x7f");
+			assert.equal(editor.getText(), "abc\nde", "the draft was not selected");
+		}
+		// alt+e is the dedicated select-all chord while alt+a belongs to Agents.
+		editor.setText("abc\ndef");
+		editor.handleInput("\x1be");
+		assert.match(editor.render(40).join("\n"), /\x1b\[7mabc/);
+		editor.handleInput("\x7f");
+		assert.equal(editor.getText(), "");
+	} finally { editor.dispose(); }
+});
+
+test("GentlePromptEditor keeps alt+a select-all when no extension claims it", () => {
+	const { pi, handlers } = fakePi(); gentleShell(pi, {});
+	const { ctx, ui } = fakeContext(); const editor = installedPrompt(ctx, ui, handlers);
+	try {
+		editor.onExtensionShortcut = () => false;
+		editor.setText("abc\ndef");
+		editor.handleInput("\x1ba");
+		assert.match(editor.render(40).join("\n"), /\x1b\[7mabc/);
+		editor.handleInput("\x7f");
+		assert.equal(editor.getText(), "");
+	} finally { editor.dispose(); }
+});
+
 test("VISUAL autocomplete leaves app shortcut ownership ahead of c and p", () => {
 	const { pi, handlers } = fakePi(); gentleShell(pi, {});
 	const { ctx, ui } = fakeContext(); const editor = installedPrompt(ctx, ui, handlers);
@@ -1911,8 +2013,7 @@ test("GentlePromptEditor autocomplete respects narrow frame widths", () => {
 test("registered prompt stays transparent while idle, working, and queued", () => {
 	const { pi, handlers, tools } = fakePi();
 	gentleShell(pi, {});
-	const { ctx, ui } = fakeContext();
-	ctx.ui.theme = { ...plainTheme, getBgAnsi: () => "\x1b[44m" } as typeof ctx.ui.theme;
+	const { ctx, ui } = fakeContext({ theme: { ...plainTheme, getBgAnsi: () => "\x1b[44m" } });
 	const editor = installedPrompt(ctx, ui, handlers);
 	try {
 		for (const state of ["idle", "working", "queued"]) {
@@ -1973,8 +2074,8 @@ test("visual customization and Vim register once and remain independently discov
 	assert.equal(JSON.parse(readFileSync(join(home, "vim.json"), "utf8")).policy, "on");
 });
 
-test("actual Pi 1.0.0 enables a live prompt and enters NORMAL without a compatibility fallback", async () => {
- assert.equal(INSTALLED_PI, "1.0.0", "the shell audit must run against actual installed Pi 1.0.0");
+test(`actual Pi ${INSTALLED_PI} enables a live prompt and enters NORMAL without a compatibility fallback`, async () => {
+ assert.ok(isAuditedPiEditorVersion(INSTALLED_PI), `actual installed Pi ${INSTALLED_PI} must be audited`);
  const configHome = mkdtempSync(join(tmpdir(), "gentle-vim-shell-"));
  const { pi, handlers, commands } = fakePi();
  gentleShell(pi, { GENTLE_PI_CONFIG_HOME: configHome });
@@ -3019,7 +3120,7 @@ test("customize Cards rows persist the card style and switch live conversation c
 	const pending = commands.get("gentle:customize")!.handler("", ctx);
 	await overlayReady;
 	assert.ok(findCustomizeRow(ui, "Card style: float (current)"));
-	assert.match(ui.overlayView!.render(90).join("\n"), /Cards · 2\/2/);
+	assert.match(ui.overlayView!.render(90).join("\n"), /Cards · 2\/4/);
 	assert.ok(findCustomizeRow(ui, "Card style: neon"));
 	assert.ok(!ui.overlayView!.render(90).some((line) => line.includes("▸ Card style: neon (current)")), "neon is not current without a saved preference");
 	assert.equal(existsSync(join(home, "card-style.json")), false, "highlighting never applies");
@@ -3040,6 +3141,32 @@ test("customize Cards rows persist the card style and switch live conversation c
 	await customizeAction(ui, "Card style: float");
 	assert.equal(resolveCardStyle({ gentlePiConfigHome: home }).style, "float");
 	assert.equal(cardStyle(), CARD_STYLE.FLOAT);
+	ui.overlayView!.handleInput("\x1b"); await pending;
+});
+
+test("customize Cards rows persist the card content level and switch the live quiet tools", async (t) => {
+	const home = scopedDoubleEscCancelConfigHome(t);
+	const previous = cardContent();
+	t.after(() => setCardContent(previous));
+	const { pi, commands } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home });
+	assert.equal(cardContent(), CARD_CONTENT.DEFAULT, "no preference file means default");
+	const { ctx, ui, overlayReady } = fakeContext();
+	const pending = commands.get("gentle:customize")!.handler("", ctx);
+	await overlayReady;
+	assert.ok(findCustomizeRow(ui, "Card content: default (current)"));
+	assert.ok(findCustomizeRow(ui, "Card content: minimal"));
+	assert.equal(existsSync(join(home, "card-content.json")), false, "highlighting never applies");
+	await customizeAction(ui, "Card content: minimal");
+	await new Promise<void>(resolve => setImmediate(resolve));
+	assert.equal(resolveCardContent({ gentlePiConfigHome: home }).content, "minimal");
+	assert.equal(cardContent(), CARD_CONTENT.MINIMAL, "the live slot follows the choice");
+	assert.match(ui.notices.at(-1)!, /Card content: minimal/);
+	assert.ok(findCustomizeRow(ui, "Card content: minimal (current)"));
+	assert.ok(findCustomizeRow(ui, "Card content: default"));
+	await customizeAction(ui, "Card content: default");
+	assert.equal(resolveCardContent({ gentlePiConfigHome: home }).content, "default");
+	assert.equal(cardContent(), CARD_CONTENT.DEFAULT);
 	ui.overlayView!.handleInput("\x1b"); await pending;
 });
 
@@ -3163,6 +3290,20 @@ test("the saved card style applies at startup and on every session start", async
 	const { ctx } = fakeContext({ hasUI: false });
 	for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
 	assert.equal(cardStyle(), CARD_STYLE.FLOAT);
+});
+
+test("the saved card content applies at startup and on every session start", async (t) => {
+	const home = scopedDoubleEscCancelConfigHome(t);
+	const found = cardContent();
+	t.after(() => setCardContent(found));
+	writeCardContent("minimal", { gentlePiConfigHome: home });
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home });
+	assert.equal(cardContent(), CARD_CONTENT.MINIMAL);
+	writeCardContent("default", { gentlePiConfigHome: home });
+	const { ctx } = fakeContext({ hasUI: false });
+	for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
+	assert.equal(cardContent(), CARD_CONTENT.DEFAULT);
 });
 
 test("customize Cards rows refuse to overwrite a malformed preference", async (t) => {
@@ -4579,6 +4720,7 @@ test("same-session explicit registration after bootstrap does not claim Changes"
 	await register.execute("after", { path: "/repo" }, undefined, undefined, ctx);
 	await register.execute("dedup", { path: "/repo" }, undefined, undefined, ctx);
 	await assert.rejects(register.execute("foreign", { path: "/foreign" }, undefined, undefined, ctx), /same Git clone/);
+	await assert.rejects(register.execute("foreign", { path: "/foreign" }, undefined, undefined, ctx), /subagent_run with repository_root/);
 	assert.equal(ctx.sessionManager, manager);
 	assert.equal(ctx.sessionManager.getEntries().length, 1);
 	await commands.get("gentle:changes")!.handler("", ctx);
@@ -4718,7 +4860,7 @@ test("loadFileDiff asks git for a HEAD diff, or a no-index diff for untracked fi
 
 test("shell Git runner hides initial and repeated background polling children", async () => {
 	const calls: Array<{ command: string; args: readonly string[]; options: Record<string, unknown> }> = [];
-	const run = ((command: string, args: readonly string[], options: Record<string, unknown>, callback: (error: Error | null, stdout: string) => void) => {
+	const run = ((command: string, args: readonly string[], options: Record<string, unknown>, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
 		calls.push({ command, args, options });
 		callback(null, "", "");
 	}) as typeof import("node:child_process").execFile;
@@ -5190,6 +5332,28 @@ test("gentleShell records SSE rate-limit headers from provider responses", async
 	}
 	assert.match(renderFooter(ui), /claude 5h ▰▰▱▱▱▱▱▱ 25% · week 90%/);
 	assert.doesNotMatch(renderFooter(ui), /codex/);
+});
+
+test("gentleShell ignores incomplete Codex headers and retains the last real quota without assuming 5h", async () => {
+	const { pi, handlers } = fakePi();
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { fetch: fakeFetch({}, false).fetchFn, now: () => 0 });
+	const { ctx, ui } = fakeContext();
+	await fire(handlers, "session_start", ctx);
+	const respond = (headers: Record<string, string>) => {
+		for (const handler of handlers.get("after_provider_response") ?? []) handler({ status: 200, headers }, ctx);
+	};
+	respond({ "x-codex-primary-used-percent": "0" });
+	assert.doesNotMatch(renderFooter(ui), /codex|0m/, "missing duration is not a real quota");
+	respond({ "x-codex-secondary-used-percent": "31", "x-codex-secondary-window-minutes": "10080" });
+	const valid = renderFooter(ui);
+	assert.match(valid, /codex week .*31%/);
+	assert.doesNotMatch(valid, /5h|0m/);
+	for (const minutes of [undefined, "0", "invalid"]) {
+		const headers: Record<string, string> = { "x-codex-primary-used-percent": "0" };
+		if (minutes !== undefined) headers["x-codex-primary-window-minutes"] = minutes;
+		respond(headers);
+		assert.equal(renderFooter(ui), valid, "a malformed response must not replace the known weekly quota");
+	}
 });
 
 test("gentleShell registers /gentle:usage and opens the subscriptions overlay", async () => {
@@ -5998,3 +6162,103 @@ test("active profile reader keeps the pin label when a different session is boun
 	clearSessionProfileBinding("session-other");
 	resetSessionProfileBindingsForTesting();
 });
+
+test("an explicit session binding routes the Usage scope ahead of the pin and the global layers", async (t) => {
+	const home = mkdtempSync(join(tmpdir(), "shell-usage-session-"));
+	const commonDir = mkdtempSync(join(tmpdir(), "shell-usage-session-git-"));
+	t.after(() => {
+		rmSync(home, { recursive: true, force: true });
+		rmSync(commonDir, { recursive: true, force: true });
+	});
+	mkdirSync(join(commonDir, "gentle-ai"), { recursive: true });
+	// Every shared layer points at openai-codex (the pin wins over the global
+	// active profile), while the session binds nan explicitly: the Usage panel
+	// must refresh the binding's provider, not the layers underneath it.
+	writeProfilesStore(home, {
+		team: { reviewer: { model: "openai-codex/gpt-5.5" } },
+		solo: { reviewer: { model: "openai-codex/gpt-5.5" } },
+		bound: { reviewer: { model: "nan/glm5.3" } },
+	}, "team");
+	writeFileSync(join(commonDir, "gentle-ai", "profile-pin.json"), JSON.stringify({ kind: "gentle-pi.agent_model_profile_pin", version: 1, profile: "solo" }));
+	resetSessionProfileBindingsForTesting();
+	bindSessionProfile("shell-session", "bound", { reviewer: { model: "nan/glm5.3" } });
+	try {
+		const { pi, commands } = fakePi();
+		gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { fetch: fakeFetch(NAN_QUOTA_PAYLOAD).fetchFn, now: () => 1_788_600_000_000, resolveWorktree: () => ({ root: "/repo", commonDir }) });
+		const { ctx, ui } = fakeContext({ token: JWT });
+		const opened = commands.get("gentle:usage")!.handler("", ctx);
+		await settle();
+		const lines = openPanelLines(ui).join("\n");
+		assert.ok(lines.split("\n").some((line) => /^│ nan ·/.test(line)), "the Usage panel refreshes the session binding's nan provider");
+		assert.ok(!lines.split("\n").some((line) => /^│ openai-codex ·/.test(line)), "the pinned codex route stays out of the bound session's Usage scope");
+		ui.closeOverlay?.();
+		await opened;
+	} finally {
+		resetSessionProfileBindingsForTesting();
+	}
+});
+
+// S9: the config home each of these reads resolves, per case. The OS home is
+// a temporary folder in every case, so no case can reach the real one.
+// "unset" and "empty" are exactly as before: an empty GENTLE_PI_CONFIG_HOME
+// names the current folder. "bundled" stands in for this package running from
+// a bundled install (testing overlay) whose prefix the launcher passed; the
+// user's own GENTLE_PI_CONFIG_HOME is then not this install's.
+type ConfigHomeCase = "unset" | "empty" | "bundled";
+function configHomeCase(t: { after: (fn: () => void) => void }, kind: ConfigHomeCase): { env: NodeJS.ProcessEnv; dir: string; userConfig: string } {
+	const base = realpathSync(mkdtempSync(join(tmpdir(), `config-home-${kind}-`)));
+	const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, GENTLE_PI_CONFIG_HOME: process.env.GENTLE_PI_CONFIG_HOME, GENTLE_SHELL_PREFIX: process.env.GENTLE_SHELL_PREFIX };
+	const cwd = process.cwd();
+	process.env.HOME = join(base, "home");
+	process.env.USERPROFILE = join(base, "home");
+	delete process.env.GENTLE_PI_CONFIG_HOME;
+	delete process.env.GENTLE_SHELL_PREFIX;
+	t.after(() => {
+		process.chdir(cwd);
+		setBundledInstallForTesting(undefined);
+		for (const [name, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+		rmSync(base, { recursive: true, force: true });
+	});
+	const userConfig = join(base, "user-config");
+	if (kind === "unset") return { env: {}, dir: join(base, "home", ".pi", "gentle-ai"), userConfig };
+	if (kind === "empty") {
+		mkdirSync(join(base, "cwd"));
+		process.chdir(join(base, "cwd"));
+		return { env: { GENTLE_PI_CONFIG_HOME: "" }, dir: join(base, "cwd"), userConfig };
+	}
+	const prefix = join(base, "prefix");
+	mkdirSync(prefix);
+	setBundledInstallForTesting({ root: prefix });
+	return { env: { GENTLE_SHELL_PREFIX: prefix, GENTLE_PI_CONFIG_HOME: userConfig }, dir: join(prefix, "config", "gentle-ai"), userConfig };
+}
+
+function profileStore(dir: string, active: string, names: string[]) {
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "profiles.json"), JSON.stringify({ kind: "gentle-pi.agent_model_profiles", version: 1, active, profiles: Object.fromEntries(names.map((name) => [name, {}])) }));
+}
+
+for (const kind of ["unset", "empty", "bundled"] as const) {
+	test(`the profile reader reads the global store from the ${kind} config home`, (t) => {
+		const { env, dir, userConfig } = configHomeCase(t, kind);
+		// The user's own store names another profile: only the bundled case must ignore it.
+		profileStore(userConfig, "team", ["team"]);
+		profileStore(dir, "other", ["team", "other"]);
+		assert.equal(createActiveProfileReader(env)(), "other");
+	});
+
+	test(`the bound profile reader resolves pins against the ${kind} config home`, (t) => {
+		const { env, dir, userConfig } = configHomeCase(t, kind);
+		profileStore(userConfig, "team", ["team"]);
+		profileStore(dir, "team", ["team", "other"]);
+		const repo = join(dir, "..", `repo-${kind}`);
+		mkdirSync(join(repo, ".pi", "gentle-ai"), { recursive: true });
+		writeFileSync(join(repo, ".pi", "gentle-ai", "profile.json"), JSON.stringify({ kind: "gentle-pi.agent_model_profile_pin", version: 1, profile: "other" }));
+		const read = createActiveProfileReader(env);
+		read.bind(repo, () => ({ root: repo, commonDir: join(repo, ".git-common") }));
+		read.refresh();
+		assert.equal(read(), "other (repo)", "the pinned profile exists only in that config home's store");
+	});
+}
