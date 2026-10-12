@@ -4,7 +4,7 @@ import {
 	INSTALLER_VERSION,
 	GENTLE_AI_WINDOWS_MINIMUM_GO_VERSION,
 } from "./gentle-ai-installer.mjs";
-import { goPinVersion } from "./installer-downloads.mjs";
+import { artifactFor, goPinVersion } from "./installer-downloads.mjs";
 
 // Read package metadata only: never import the launcher or execute postinstall.
 const metadata = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -15,7 +15,8 @@ function minimum(range) {
 export const requirements = Object.freeze({
 	node: minimum(metadata.engines.node),
 	pi: minimum(metadata.peerDependencies["@earendil-works/pi-coding-agent"]),
-	pnpm: metadata.packageManager.replace(/^pnpm@/, ""),
+	// pnpm pack can omit packageManager; acquisition still has a verified pin.
+	pnpm: metadata.packageManager?.replace(/^pnpm@/, "") ?? artifactFor("pnpm").version,
 	shell: metadata.version,
 	gentleAi: INSTALLER_VERSION,
 	go: GENTLE_AI_WINDOWS_MINIMUM_GO_VERSION,
@@ -35,7 +36,7 @@ export const PI_INSTALL_VERSION = "1.0.0";
 export const persistencePins = Object.freeze({ node: "24.21.0", npm: "11.19.0", pnpm: requirements.pnpm });
 
 /** Go the installer downloads only to build Gentle AI, when a build needs Go and
- * the user's Go is missing or older than requirements.go (installer-downloads.mjs).
+ * the user's Go is missing, older than requirements.go or unchecked (installer-downloads.mjs).
  */
 export const goAcquisition = Object.freeze({ version: goPinVersion });
 
@@ -81,7 +82,9 @@ const probeNames = ["node", "pnpm", "pi", "shell", "gentleAi", "go", "globalBin"
  * pnpm may add found: the stable version of the older or incompatible one on the
  * user's PATH that the bootstrap left in place; a pnpm probe for the user's own
  * pnpm in `$PNPM_HOME/bin` (where persisting pnpm writes) adds inGlobalBin:true
- * and reports that pnpm itself, never as found. globalBin returns { available, path, writable, onPath } for
+ * and reports that pnpm itself, never as found, or, when that pnpm is never run
+ * (untrusted:true) or reports no stable version (unchecked:true), the bootstrap's
+ * pnpm in its place with persistent:true. globalBin returns { available, path, writable, onPath } for
  * pnpmGlobalBin's `$PNPM_HOME/bin` directory; setup returns boolean, or
  * { available: true, recoverable: true } for the pinned stack this pnpm installed
  * whose setup did not finish (only its setup is then planned).
@@ -219,6 +222,11 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 	// packageManager pins the acquisition choice, not a minimum supported pnpm.
 	// Existing versions require explicit engine/capability evidence from the probe.
 	record("pnpm", classify(inventory.pnpm, "0.0.0", (o) => o.compatible), requirements.pnpm);
+	// A user's pnpm in $PNPM_HOME/bin that could not be checked is left as it is while
+	// the bootstrap's pnpm runs the installer; the plan copy says so before consent.
+	if (tools.pnpm.status === "reusable" && inventory.pnpm.inGlobalBin === true && inventory.pnpm.unchecked === true) {
+		tools.pnpm = { ...tools.pnpm, unchecked: true };
+	}
 	// An older Node or an incompatible pnpm on the user's PATH is left as it is: the
 	// bootstrap acquired its pinned copy, which the probe reports (bootstrap-only)
 	// with the user's stable version as `found`. That copy runs the installer and
@@ -239,16 +247,16 @@ export function planPreflight(inventory, { channel = "release" } = {}) {
 	// Windows release update needs Go like an installation; main always does.
 	const windowsBuild = platform === "win32" && (update !== null || (needsNative && !npmCurrent));
 	const goStatus = windowsBuild || main ? classify(inventory.go, requirements.go) : "not-required";
-	if (goStatus === "unavailable" || goStatus === "incompatible") {
-		// A missing or older Go is left as it is: the build gets the installer's
-		// pinned Go, downloaded after consent only when a build actually runs.
+	if (goStatus === "unavailable" || goStatus === "incompatible" || goStatus === "unknown") {
+		// A missing, older or unreadable Go is left as it is: the build gets the
+		// installer's pinned Go, first on PATH, downloaded after consent only when
+		// a build actually runs.
 		const found = goStatus === "incompatible" ? versionParts(inventory.go.version).join(".") : null;
-		tools.go = { status: "needs-acquire", required: requirements.go, version: goAcquisition.version, ...(found ? { found } : {}) };
+		tools.go = { status: "needs-acquire", required: requirements.go, version: goAcquisition.version, ...(found ? { found } : {}),
+			...(goStatus === "unknown" ? { unchecked: true } : {}) };
 	} else {
 		record("go", goStatus, requirements.go);
 	}
-	// A Go that cannot be checked is neither missing nor older: main still blocks.
-	if (main && tools.go.status === "unknown") blockers.push({ code: "main-requires-go", tool: "go" });
 	const bin = inventory.globalBin;
 	const binKnown = bin?.available === true && typeof bin.path === "string" && bin.path.trim().length > 0 &&
 		bin.writable === true && typeof bin.onPath === "boolean";

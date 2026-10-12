@@ -7,10 +7,12 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { exitCodeFor, openBrowser, openerFor, redirectPage, runnerEnvironment, upgradeEnvironment, writeRedirect } from "../bin/gentle-shell-install.mjs";
+import { exitCodeFor, openBrowser, openerFor, redirectPage, runnerEnvironment, upgradeEnvironment, wizardHandlers, writeRedirect } from "../bin/gentle-shell-install.mjs";
 import { planPreflight, requirements } from "../scripts/installer-preflight.mjs";
 import { PI_INSTALL_VERSION, blockedReasons, failedSteps } from "../scripts/installer-runner.mjs";
 import { createInstallerServer, guidance } from "../scripts/installer-server.mjs";
+import { distributionAsset, prefixLayout } from "../scripts/bundled-install.mjs";
+import { bundledBlockedReasons, bundledFailedSteps, bundledPlan } from "../scripts/bundled-wizard.mjs";
 
 type Response = { status: number; headers: Record<string, string | string[] | undefined>; body: string };
 type Plan = ReturnType<typeof planPreflight>;
@@ -391,6 +393,36 @@ test("/api/plan says before consent which Go is downloaded, only to build, with 
 	}
 });
 
+test("/api/plan says before consent that a pnpm in $PNPM_HOME/bin that could not be checked is left as it is", async () => {
+	const note = "The pnpm in the pnpm global bin directory could not be checked, so it was left as it is, and the installer uses its own verified pnpm for this installation.";
+	const pnpm = { available: true, version: requirements.pnpm, usable: true, compatible: true, persistent: true, inGlobalBin: true, unchecked: true };
+	const cases = [
+		[{ available: true, version: "24.18.0", usable: true, persistent: true, npm: true }, [], `No runtime needs to be installed under $PNPM_HOME. ${note}`],
+		[{ available: true, version: "24.21.0", usable: true, persistent: false, npm: false }, ["node", "npm"], null],
+	] as const;
+	for (const [node, tools, exact] of cases) {
+		const { host, port, login, runs } = await start({ collect: async () => collected({ node, pnpm }) });
+		try {
+			const view = await plan(port, await login());
+			assert.deepEqual(view.blockers, []);
+			assert.equal(view.ready, false);
+			assert.deepEqual(view.persistence.tools, tools);
+			if (exact) assert.equal(view.persistence.description, exact);
+			else assert.ok(view.persistence.description.endsWith(` ${note}`), view.persistence.description);
+			assert.deepEqual(runs, []);
+		} finally {
+			await host.close("test");
+		}
+	}
+	// A checked pnpm there adds nothing.
+	const checked = await start({ collect: async () => collected({ pnpm: { ...pnpm, unchecked: undefined } }) });
+	try {
+		assert.doesNotMatch((await plan(checked.port, await checked.login())).persistence.description, /could not be checked/);
+	} finally {
+		await checked.host.close("test");
+	}
+});
+
 test("/api/plan explains a pnpm in $PNPM_HOME/bin that the installer will not replace, with how to update it", async () => {
 	const inGlobalBin = (pnpm: object) => ({ pnpm: { ...pnpm, inGlobalBin: true } });
 	const cases = [
@@ -578,15 +610,17 @@ test("installing a main plan re-checks the computer on the main channel", async 
 	}
 });
 
-test("/api/plan explains that the main channel cannot use a Go it cannot check", async () => {
+test("/api/plan offers the pinned Go on the main channel for a Go it cannot check", async () => {
 	const { host, port, login } = await start({ collect: async (channel) => collectedFor(channel, { pi: { available: false }, shell: { available: false }, go: { available: null } }) });
 	try {
 		const cookie = await login();
 		const view = JSON.parse((await send(port, { path: "/api/plan?channel=main", headers: { cookie, ...API } })).body);
-		const blocker = view.blockers.find((item: { code: string }) => item.code === "main-requires-go");
-		assert.equal(blocker.guidance, "The `main` channel builds Gentle AI with Go, but `go version` did not report a version this installer can check. " +
-			"Make sure `go version` works in a terminal, or choose the release channel, then select Check again.");
-		assert.deepEqual(view.actions, []);
+		assert.equal(view.blockers.some((item: { tool: string }) => item.tool === "go"), false);
+		const ids = view.actions.map((action: { id: string }) => action.id);
+		assert.equal(ids.indexOf("verify-go"), ids.indexOf("acquire-go") + 1);
+		assert.equal(view.actions.find((action: { id: string }) => action.id === "acquire-go").description, "The Go on this computer did not report a version this installer can check, so the installer downloads Go 1.25.14 " +
+			"from go.dev, verifies its pinned SHA-256 checksum and uses it only to build Gentle AI. It is kept in the installer's own folder " +
+			"(~/.pi/gentle-ai/tools/go); your Go, PATH and shell profile are not changed.");
 	} finally {
 		await host.close("test");
 	}
@@ -1034,9 +1068,9 @@ test("guidance covers every runner blocked reason and failed step", () => {
 	assert.ok(blockedReasons.length >= 13 && failedSteps.length >= 14);
 	for (const reason of blockedReasons) assert.ok(typeof guidance.blocked[reason] === "string" && guidance.blocked[reason].length > 20, reason);
 	for (const step of failedSteps) assert.ok(typeof guidance.failed[step] === "string" && guidance.failed[step].length > 20, step);
-	// No stale guidance for a reason or step the runner no longer has.
-	assert.deepEqual(Object.keys(guidance.blocked).sort(), [...blockedReasons].sort());
-	assert.deepEqual(Object.keys(guidance.failed).sort(), [...failedSteps].sort());
+	// No stale guidance for a reason or step the runners (standard and bundled) no longer have.
+	assert.deepEqual(Object.keys(guidance.blocked).sort(), [...new Set([...blockedReasons, ...bundledBlockedReasons])].sort());
+	assert.deepEqual(Object.keys(guidance.failed).sort(), [...new Set([...failedSteps, ...bundledFailedSteps])].sort());
 	for (const code of ["unsupported-target", "unknown-tool", "incompatible-tool"]) assert.ok(guidance.blockers[code].length > 20, code);
 	assert.ok(guidance.fallback.length > 20);
 	assert.ok(Object.isFrozen(guidance) && Object.isFrozen(guidance.blocked) && Object.isFrozen(guidance.failed));
@@ -1353,4 +1387,160 @@ test("upgradeEnvironment isolates TEMP, TMP and pnpm's folders in a private Wind
 	assert.equal(isolated.Path.split(";")[0], "C:\\go\\bin");
 	assert.deepEqual(upgradeEnvironment({ platform: "win32", env, pnpmHome: { available: true, path: W_PRIVATE, source: "user" } }), env);
 	assert.deepEqual(upgradeEnvironment({ platform: "linux", env: { PATH: "/usr/bin" }, pnpmHome: null }), { PATH: "/usr/bin" });
+});
+
+// T1c: the bundled plan's copy, before consent.
+const bundledDistribution = { status: "published", manifest: { shell: "4.1.0", pi: "1.0.2" }, lockfile: "lock" };
+const bundledLine = 'export PATH="/home/u/.gentle-shell/bin:$PATH" # gentle-shell bundled install';
+function bundledCollected(path: Record<string, unknown>, platform = "linux"): Collected {
+	const layout = platform === "win32" ? prefixLayout({ platform, env: { LOCALAPPDATA: "C:\\L" }, home: "C:\\U" }) : prefixLayout({ platform, env: {}, home: "/home/u" });
+	return { inventory: { ...cleanInventory, platform }, plan: bundledPlan({ platform, distribution: bundledDistribution, layout, path }) as never };
+}
+test("/api/plan describes the bundled install: its own pinned runtimes, the user's tools untouched and npm's network settings respected", async () => {
+	const { host, port, login } = await start({ collect: async () => bundledCollected({ kind: "profile", path: "/home/u/.bashrc", line: bundledLine, create: false }) });
+	try {
+		const view = await plan(port, await login());
+		assert.equal(view.bundled, true);
+		assert.deepEqual(view.actions.map((action: { id: string }) => action.id),
+			["bundled-prefix", "bundled-runtime", "bundled-version", "bundled-activate", "bundled-path", "bundled-setup"]);
+		const text = view.actions.map((action: { description: string }) => action.description).join("\n");
+		assert.match(text, /\/home\/u\/\.gentle-shell/);
+		assert.match(text, /Node\.js 24\.21\.0 with its npm and pnpm 11\.1\.1/);
+		assert.match(text, /Gentle Shell 4\.1\.0 with Pi 1\.0\.2/);
+		assert.match(text, /--frozen-lockfile/);
+		assert.match(text, /\/home\/u\/\.bashrc/);
+		assert.match(text, /gentle-shell setup/);
+		assert.deepEqual(view.persistence.tools, ["node", "npm", "pnpm"]);
+		assert.equal(view.persistence.pnpmHome, "/home/u/.gentle-shell");
+		assert.match(view.persistence.description, /Your own Node\.js, npm, pnpm, Go and Pi are not used or changed/);
+		assert.match(view.persistence.description, /npm registry, authentication and proxy settings/);
+		assert.equal(view.profileChange.changesProfile, true);
+		assert.equal(view.profileChange.command, null);
+		assert.equal(view.profileChange.binDir, "/home/u/.gentle-shell/bin");
+		assert.match(view.profileChange.description, /\/home\/u\/\.bashrc/);
+	} finally {
+		await host.close("test");
+	}
+	// T3: a migration's plan names the old package's removal with its own manager, last.
+	const migrating = bundledCollected({ kind: "none" });
+	migrating.plan = bundledPlan({ platform: "linux", distribution: bundledDistribution, layout: prefixLayout({ platform: "linux", env: {}, home: "/home/u" }),
+		path: { kind: "none" }, migrate: { manager: "npm", removal: "plan" } }) as never;
+	const server = await start({ collect: async () => migrating });
+	try {
+		const view = await plan(server.port, await server.login());
+		assert.equal(view.actions.at(-1).id, "remove-global-shell");
+		assert.match(view.actions.at(-1).description, /`npm uninstall -g gentle-pi`/);
+		assert.match(view.actions.at(-1).description, /reports Gentle Shell 4\.1\.0 with Pi 1\.0\.2/);
+		assert.match(view.actions.at(-1).description, /Your Pi and ~\/\.gentle-shell\/agent are not changed/);
+	} finally {
+		await server.host.close("test");
+	}
+	const cases: [Record<string, unknown>, RegExp, boolean, string?][] = [
+		[{ kind: "none" }, /already finds/, false],
+		[{ kind: "symlink", path: "/home/u/.local/bin/gentle-shell", target: "/home/u/.gentle-shell/bin/gentle-shell" }, /\/home\/u\/\.local\/bin\/gentle-shell/, true],
+		[{ kind: "manual", path: "/home/u/.zshrc", line: bundledLine, reason: "symlink" }, /add this line to \/home\/u\/\.zshrc yourself/, false],
+		[{ kind: "registry", key: "HKCU\\Environment", name: "Path", entry: "C:\\L\\gentle-shell\\bin" }, /user PATH/, true, "win32"],
+	];
+	for (const [path, description, changes, platform] of cases) {
+		const server = await start({ collect: async () => bundledCollected(path, platform) });
+		try {
+			const view = await plan(server.port, await server.login());
+			assert.match(view.profileChange.description, description, String(path.kind));
+			assert.equal(view.profileChange.changesProfile, changes, String(path.kind));
+			if (path.kind === "manual") assert.ok(view.profileChange.description.includes(bundledLine));
+			if (platform === "win32") {
+				assert.deepEqual(view.persistence.tools, ["node", "npm", "pnpm", "go"]);
+				assert.match(view.actions[1].description, /Go 1\.25\.14/);
+			}
+		} finally {
+			await server.host.close("test");
+		}
+	}
+});
+
+test("bundled outcomes: every bundled step has guidance, pnpm's error line is shown, and a manual PATH line is returned to copy", async () => {
+	for (const step of bundledFailedSteps) assert.equal(typeof guidance.failed[step], "string", step);
+	const cases: [Record<string, unknown>, (view: Record<string, unknown>) => void][] = [
+		[{ outcome: "failed", failedStep: "install-version", completed: ["claim-prefix"], detail: "ERR_PNPM_FETCH_401 GET https://npm.acme.dev/x: Unauthorized" },
+			(view) => { assert.equal(view.detail, "ERR_PNPM_FETCH_401 GET https://npm.acme.dev/x: Unauthorized"); assert.equal(view.guidance, guidance.failed["install-version"]); }],
+		[{ outcome: "terminal-action-required", action: "add-path-line", pathLine: { file: "/home/u/.zshrc", line: bundledLine }, completed: [] },
+			(view) => {
+				assert.equal(view.action, "add-path-line");
+				assert.deepEqual(view.pathLine, { file: "/home/u/.zshrc", line: bundledLine });
+				assert.equal(view.guidance, guidance.outcomes["add-path-line"]);
+			}],
+		[{ outcome: "terminal-action-required", action: "add-path-line", pathLine: { file: "/home/u/.zshrc\u001b[2J", line: 7 }, completed: [] },
+			(view) => { assert.equal("pathLine" in view, false); }],
+		// T3: a failed removal keeps the install and names the exact command; anything else is not shown.
+		[{ outcome: "terminal-action-required", action: "open-new-terminal", completed: [], removeGlobal: { status: "failed", command: "npm uninstall -g gentle-pi" } },
+			(view) => {
+				assert.equal(view.removeCommand, "npm uninstall -g gentle-pi");
+				assert.match(String(view.guidance), /old global gentle-pi could not be removed/);
+			}],
+		[{ outcome: "ready", completed: [], removeGlobal: { status: "failed", command: "rm -rf ~" } }, (view) => { assert.equal("removeCommand" in view, false); }],
+		[{ outcome: "ready", completed: [], removeGlobal: { status: "removed", command: "pnpm remove -g gentle-pi" } },
+			(view) => { assert.equal("removeCommand" in view, false); assert.equal(view.guidance, guidance.outcomes.ready); }],
+		[{ outcome: "failed", failedStep: "verify-launcher", completed: [], detail: "Error: no Pi" },
+			(view) => { assert.equal(view.detail, "Error: no Pi"); assert.match(String(view.guidance), /old global Gentle Shell was kept/); }],
+		// B3: a migration's failed bundled step shows its detail; a new install's sends none, so nothing changes there.
+		[{ outcome: "failed", failedStep: "claim-prefix", completed: [], detail: "Unsafe bundled prefix: ~/.gentle-shell" },
+			(view) => { assert.equal(view.detail, "Unsafe bundled prefix: ~/.gentle-shell"); assert.equal(view.guidance, guidance.failed["claim-prefix"]); }],
+		[{ outcome: "failed", failedStep: "claim-prefix", completed: [] }, (view) => { assert.equal("detail" in view, false); }],
+	];
+	for (const [result, check] of cases) {
+		const { host, port, login } = await start({ runInstall: async () => result as never });
+		try {
+			const cookie = await login();
+			const { planId } = await plan(port, cookie);
+			assert.equal((await post(port, "/api/install", cookie, { planId, consent: true })).status, 202);
+			await waitFor(() => host.outcome() !== null);
+			check(host.outcome() as Record<string, unknown>);
+		} finally {
+			await host.close("test");
+		}
+	}
+});
+
+// Simulates Linux against the real filesystem (profile files), so it runs on the POSIX runners only.
+test("wizardHandlers plans the bundled install only when the gate says so, and routes its plan to the bundled runner",
+	{ skip: process.platform === "win32" ? "simulated Linux paths need a POSIX filesystem" : false }, async () => {
+	const home = mkdtempSync(join(tmpdir(), "gentle-wizard-handlers-"));
+	try {
+		const asset = distributionAsset({ shell: requirements.shell, pi: "1.0.2" }, "lock");
+		const urls: string[] = [];
+		const download = (published: boolean) => async ({ url }: { url: string }) => {
+			urls.push(url);
+			if (!published) throw Object.assign(new Error("Download responded 404"), { status: 404 });
+			return Buffer.from(url.endsWith(".json") ? asset : "lock");
+		};
+		const env = { HOME: home, PATH: "/usr/bin", SHELL: "/bin/bash" };
+		const handlers = (published: boolean, inventory = cleanInventory) => wizardHandlers({ platform: "linux", arch: "x64", env, run: async () => ({}), fs: {},
+			download: download(published), inventory: async () => structuredClone(inventory) });
+		const bundled = await handlers(true).collectPlan("release");
+		assert.equal(bundled.plan.bundled.shell, requirements.shell);
+		assert.equal(bundled.plan.bundled.root, join(home, ".gentle-shell"));
+		assert.equal(bundled.plan.bundled.path.kind, "profile");
+		assert.deepEqual(urls, [`https://github.com/Gentleman-Programming/gentle-shell/releases/download/v${requirements.shell}/gentle-shell-distribution.json`,
+			`https://github.com/Gentleman-Programming/gentle-shell/releases/download/v${requirements.shell}/gentle-shell-distribution-lock.yaml`]);
+		// Without the assets (v4.0.0 today), on main, or with an existing Gentle Shell: the standard plan, unchanged.
+		urls.length = 0;
+		assert.deepEqual((await handlers(false).collectPlan("release")).plan, planPreflight(cleanInventory));
+		assert.deepEqual((await handlers(true).collectPlan("main")).plan, planPreflight(cleanInventory, { channel: "main" }));
+		// T3: an existing Gentle Shell that pnpm or npm owns moves to the bundled install and its old package is removed last.
+		const existing = { ...cleanInventory, shell: { available: true, version: requirements.shell, usable: true, global: true, owner: "pnpm" } };
+		const migration = (await handlers(true, existing).collectPlan("release")).plan;
+		assert.deepEqual(migration.bundled.migrate, { manager: "pnpm", command: "pnpm remove -g gentle-pi", removal: "plan" });
+		assert.equal(migration.actions.at(-1).id, "remove-global-shell");
+		// An npm link (no owner) or a release without the assets: the standard plan, unchanged.
+		const linked = { ...existing, shell: { available: true, version: requirements.shell, usable: true, global: true } };
+		assert.deepEqual((await handlers(true, linked).collectPlan("release")).plan, planPreflight(linked));
+		assert.deepEqual((await handlers(false, existing).collectPlan("release")).plan, planPreflight(existing));
+		assert.equal(urls.length, 4, "only the release check of a new or migrating installation asks for the assets");
+		// The bundled plan goes to the bundled runner, which needs consent like the standard one.
+		const routed = handlers(true);
+		const { plan: consented } = await routed.collectPlan("release");
+		assert.deepEqual(await routed.runInstall({ plan: consented, consent: false }, () => {}), { outcome: "blocked", reason: "consent-required", completed: [] });
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
 });

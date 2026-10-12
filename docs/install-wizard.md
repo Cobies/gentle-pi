@@ -61,7 +61,7 @@ Current requirements come from `package.json` and
 Pi ≥0.99.1, pnpm acquisition 11.1.1, Gentle Shell package 4.0.0 and package-local
 Gentle AI 4.0.0. Windows native source builds require Go ≥1.25.10 when the
 required usable native binary is missing. A reusable binary does not require Go.
-When a build needs Go and the user's Go is missing or older, the installer uses
+When a build needs Go and the user's Go is missing, older or unchecked, the installer uses
 its own [pinned Go](#pinned-go) instead of blocking.
 Pins change with the repository; the API reads the metadata rather than copying
 these values into a second installer.
@@ -127,9 +127,10 @@ setup add no separate `unknown` blocker then, because they are only checked for
 the pinned Shell. When Node.js, Pi, Gentle Shell or Go is simply older than its
 minimum, the wizard's guidance names the found and required versions (for the
 Shell, also the pnpm commands that update or remove it); other blockers keep
-their fixed guidance. A missing or older Go is not a blocker: `tools.go` is
+their fixed guidance. A missing, older or unchecked Go is not a blocker: `tools.go` is
 `needs-acquire` with `required`, the pinned `version` and the older `found`
-version, and the plan acquires the [pinned Go](#pinned-go). An
+version (or `unchecked: true` when `go version` reported no version it can
+check), and the plan acquires the [pinned Go](#pinned-go). An
 older Node.js or an incompatible pnpm on the user's PATH is not a blocker when
 the bootstrap's pinned copy runs the wizard: the probe reports that copy
 (bootstrap-only) with the user's stable version as `found`, and `tools.node` or
@@ -139,9 +140,15 @@ only for a new installation of Gentle Shell: with an existing Shell (updated or
 current) the replaced runtime is an `incompatible-tool` blocker before consent,
 except for a setup recovery, which persists nothing. A user's pnpm in
 `$PNPM_HOME/bin`, where persisting pnpm writes, is never reported as `found`:
-the probe reports that pnpm itself with `inGlobalBin: true` (unknown without a
-version, always on Windows), so an older or newer-major one blocks and the
-guidance names both versions and, for an older one, `pnpm self-update <pin>`. An older Pi is not a blocker: one that pnpm or npm owns is
+the probe reports that pnpm itself with `inGlobalBin: true`, so an older or
+newer-major one blocks and the guidance names both versions and, for an older
+one, `pnpm self-update <pin>`. One whose shim is not recognized, or whose
+`--version` does not report a stable version, is never run again: the probe
+reports the bootstrap's pnpm in its place with `inGlobalBin: true`,
+`unchecked: true` and `persistent: true` (on every platform), so it does not
+block and nothing is persisted over it; `tools.pnpm` records `unchecked: true`
+and the plan says before consent that it was left as it is and that the
+installer uses its own verified pnpm. An older Pi is not a blocker: one that pnpm or npm owns is
 `needs-update`, and one neither owns is `needs-install` (see
 [Existing installations](#existing-installations)). A Pi or Shell command on PATH that pnpm does not manage
 stays `unknown` (never replaced), and its probe adds `outsidePnpm: true` so the
@@ -155,7 +162,7 @@ A clean target receives these intents in dependency order:
 
 1. Acquire and verify Node, then pnpm; prepare the usable global-bin environment.
 2. When a build needs Go (the main channel, or a Windows Gentle Shell install or
-   update whose postinstall may build Gentle AI) and Go is missing or older,
+   update whose postinstall may build Gentle AI) and Go is missing, older or unchecked,
    `acquire-go` and `verify-go` come next, before every persistence and install
    step, so a failed Go download leaves the computer as it was.
 3. Persist only what is missing. A bootstrap-only reusable Node gets the full
@@ -248,7 +255,7 @@ the listing; truncated, nonzero, signalled or timed-out output is unknown.
 | Probe | Evidence |
 | --- | --- |
 | `node` | The first `node` on the user's real PATH (Go `exec.LookPath` order, PATHEXT on Windows), else the bootstrap one. `persistent` says which. `npm` is the runner's usable-npm proof in the user's real PATH with `$PNPM_HOME/bin` first, so a bootstrap npm never counts. A Windows `.cmd`/`.bat` cannot run with `shell:false`: a Node that resolves to one is unknown, and npm is run through what its shim runs ([Windows command shims](#windows-command-shims)). |
-| `pnpm` | The runner's invocation (bootstrap handoff, or a POSIX `pnpm` on PATH). `compatible` requires a successful run (pnpm checks its Node engine at startup) at the pinned major and at least the pin, because the runner's argv is verified for pnpm 11 only. `persistent` is whether any `pnpm` resolves on the real PATH. A Windows user pnpm in `$PNPM_HOME\bin` whose shim or target fails the storage walk is never run: the bootstrap's pnpm is reported in its place with `inGlobalBin: true`, `untrusted: true` and `persistent: true`, so it does not block and nothing is persisted over it. |
+| `pnpm` | The runner's invocation (bootstrap handoff, or a POSIX `pnpm` on PATH). `compatible` requires a successful run (pnpm checks its Node engine at startup) at the pinned major and at least the pin, because the runner's argv is verified for pnpm 11 only. `persistent` is whether any `pnpm` resolves on the real PATH. A Windows user pnpm in `$PNPM_HOME\bin` whose shim or target fails the storage walk is never run: the bootstrap's pnpm is reported in its place with `inGlobalBin: true`, `untrusted: true` and `persistent: true`, so it does not block and nothing is persisted over it. A user pnpm in `$PNPM_HOME/bin` whose shim is not recognized, or whose `--version` does not report a stable version, is handled the same way with `unchecked: true` instead, on every platform. |
 | `pi`, `shell` | pnpm-global entries from the listing. A package that is not pnpm-global but whose command (`pi`, `gentle-shell`) resolves on the real PATH is unknown, never absent, so another installation is not duplicated. On Windows a `pi.cmd` or `gentle-shell.cmd` is run, and its package found, through what the shim runs; an unknown shim is never run. Shell is `usable` only when `$PNPM_HOME/bin/gentle-shell` (`.cmd` on Windows) exists. |
 | `gentleAi` | Absent without gentle-pi or without its package-native binary. Otherwise compatible only for this package version, a listed path that resolves inside PNPM_HOME and `verifyGentleAi` (default `packageNativeGentleAi`) success; anything else is unknown. |
 | `go` | `go version` from the real PATH; `go1.22` normalizes to `1.22.0`; devel and release-candidate builds are unknown. |
@@ -259,6 +266,101 @@ the listing; truncated, nonzero, signalled or timed-out output is unknown.
 A failed, empty or unparseable listing makes Pi, Shell, Gentle AI and setup
 unknown, which blocks planning. A package listed in two projects is ambiguous
 and unknown.
+
+## Bundled installation
+
+A new installation can install Gentle Shell as one self-contained product
+instead: its own pinned Node.js (with the npm in the same archive), pnpm, Pi,
+and Go on Windows. The user's Node.js, npm, pnpm, Go and Pi are not used or
+changed. The building blocks are in [bundled install](bundled-install.md);
+`scripts/bundled-wizard.mjs` wires them into the wizard.
+
+### When the wizard uses it
+
+`bundledGate` decides, as a pure function, after the usual preflight. The
+bundled plan is used only when all of these hold:
+
+- The channel is `release`.
+- The target is macOS, Linux or Windows on x64 or arm64.
+- Preflight found no Gentle Shell (`shell.available === false`). An existing
+  one that a global pnpm or npm owns migrates instead (`migrationGate`, see
+  [Migration from a global install](bundled-install.md#migration-from-a-global-install)).
+  Any other existing or unknown one keeps the current path.
+- This package's own release, `v<package version>`, publishes both
+  [distribution assets](bundled-install.md#release-distribution-assets), and
+  `readDistribution` accepts them.
+
+The assets are fetched from
+`https://github.com/Gentleman-Programming/gentle-shell/releases/download/v<version>/`:
+
+- The download asks for the identity encoding.
+- It is bounded to 64 KiB for the manifest and 8 MiB for the lockfile.
+- It follows a redirect only to an https GitHub asset host.
+
+| Fetch result | Plan |
+|---|---|
+| Both assets read | Bundled |
+| 404 for either asset (v4.0.0 has none) | Standard, unchanged |
+| Network failure, or assets that do not read | Standard, unchanged |
+
+The main channel, and existing installations that neither pnpm nor npm owns,
+keep the standard runner.
+
+### Plan and steps
+
+The plan has the standard plan's shape, with no tools or blockers, plus
+`bundled`. That field holds:
+
+- the exact versions and the lockfile's sha256;
+- the prefix and its `bin` folder;
+- the pinned runtimes;
+- the single PATH change, from `pathEntryPlan`.
+
+The review screen says, before consent, that the user's own tools are not used
+or changed and that their npm registry, authentication and proxy settings are
+respected.
+
+`runBundledInstall` checks that the consented plan matches the fetched assets.
+It then runs and logs these steps, in this order:
+
+| Step | What it does |
+|---|---|
+| `claim-prefix` | `claimPrefix`: `~/.gentle-shell`, or the Windows private folder. |
+| `copy-npm-settings` | Writes the filtered copy of the user's npmrc (S12) into the prefix. |
+| `install-runtime` | `ensureRuntime`: our Node with its npm, and pnpm. Go too on Windows. |
+| `install-version` | `installVersion` from the release lockfile, `--frozen-lockfile`. |
+| `activate-version` | `activateVersion`. |
+| `write-launcher` | `ensureLauncher`. |
+| `bundled-path` | `applyPathEntry`, only for a link, a profile line or the HKCU user Path. The change is planned again first; one that differs from the consented plan is not applied. |
+| `shell-setup` | `gentle-shell setup` in `setupEnvironment`: the launcher on POSIX, and our Node with the same entry on Windows. |
+
+A migration plan adds `verify-launcher` (the launcher's `--version` must print
+both exact versions) before `bundled-path`, and ends with `remove-global-shell`.
+The wizard's progress list (`expectedSteps`) follows the same order.
+
+| PATH change | Outcome |
+|---|---|
+| None, or a link into a folder already on PATH | `ready` |
+| A profile line or the user Path | `terminal-action-required` with `open-new-terminal` |
+| A profile the installer may not edit | `terminal-action-required` with `add-path-line`; the outcome screen shows the exact line to copy and the file to add it to |
+
+A failed `install-version` or `shell-setup` reports its last error line.
+
+On Windows the user Path is edited by `windowsPathRegistry`:
+
+- Windows PowerShell reads `HKCU\Environment\Path` without expanding its
+  `%VARIABLES%`, and keeps its value kind.
+- The entry is added once, compared without case or a trailing backslash.
+- A `WM_SETTINGCHANGE` broadcast lets new terminals see the change.
+
+### What this path does not change yet
+
+- Preflight still probes the user's tools, as it does today. T5 removes those probes.
+- On POSIX, gentle-pi 4.0.0's postinstall and `gentle-shell setup` run `go version`
+  from the user's PATH, which follows ours. Observed in a local run; Go is never
+  used for the POSIX release path.
+- Gentle AI's Engram step in `gentle-shell setup` runs on its own terms. On macOS
+  it ran `brew install engram`. T4 (S9) owns that.
 
 ## Standard installation runner
 
@@ -555,8 +657,9 @@ Pi but never reinstalls or downgrades it, and nothing changes before consent.
 | A Node.js older than the minimum with a stable version (mise, nvm, Homebrew, an old installer) | Left unchanged. The POSIX bootstrap acquires its verified Node 24.21.0 as when Node is absent, and the plan persists it (`persist-node`, `persist-package-managers`, `configure-npm-prefix`). The plan says so before consent. An unknown or prerelease version still blocks. Windows: `bootstrap.cmd` does the same, and also acquires its Node for a user Node whose storage it cannot trust (nvm-windows' symlink, fnm's junction), which it never runs. |
 | A pnpm of another major, older than 11.1.1, or whose engine rejects the bootstrap's Node | Left unchanged. Both bootstraps acquire the verified pnpm 11.1.1 as when pnpm is absent, and the plan persists it (`persist-pnpm`, or `persist-package-managers` with npm). The plan says so before consent. Unknown evidence still blocks. |
 | That pnpm in `$PNPM_HOME/bin` itself (where persisting pnpm writes) | Blocked before consent, never replaced or downgraded. The guidance names the found and required versions; an older one is updated with `pnpm self-update 11.1.1`, a newer major is never downgraded. |
+| A pnpm in `$PNPM_HOME/bin` whose shim is not recognized or whose `pnpm --version` reports no stable version | Left unchanged and never run again. The bootstrap's verified pnpm runs the installer and nothing is persisted over it (no `persist-pnpm`). The plan says so before consent. |
 | An older Node.js or incompatible pnpm next to an existing Gentle Shell (updated or current) | Blocked before consent: runtimes are persisted only while installing Gentle Shell. A setup recovery is not blocked and persists nothing. |
-| A Go missing or older than the minimum (main channel, or a Windows build) | Left unchanged. The installer downloads its [pinned Go](#pinned-go) only for the build, and the plan says so before consent with the found version (or missing). An unknown Go still blocks. A release install on macOS or Linux never downloads Go. |
+| A Go missing or older than the minimum (main channel, or a Windows build) | Left unchanged. The installer downloads its [pinned Go](#pinned-go) only for the build, and the plan says so before consent with the found version (or missing). A Go whose version cannot be checked gets the pinned Go the same way, and is never run for the build. A release install on macOS or Linux never downloads Go. |
 
 Ownership comes from real paths ([`installOwner`](../scripts/main-channel.mjs)):
 pnpm when the package lives under PNPM_HOME, npm only when it is
@@ -667,8 +770,8 @@ publishes main builds, so main is built on this computer
 ([`scripts/main-channel.mjs`](../scripts/main-channel.mjs)):
 
 - Preflight reuses a Go ≥ the Windows minimum on every platform; a missing or
-  older Go gets the [pinned Go](#pinned-go), and a Go whose version cannot be
-  checked blocks with `main-requires-go`. Main steps are added only when the
+  older Go, or one whose version cannot be checked, gets the
+  [pinned Go](#pinned-go), first on the build's PATH. Main steps are added only when the
   plan installs or completes setup; a stack that is already set up switches with
   `gentle-shell upgrade --channel main`, or the wizard's update plan below.
 - After the release stack is installed and `verify-gentle-ai` passed, the runner:
@@ -696,11 +799,13 @@ publishes main builds, so main is built on this computer
      "shellCommit":…,"gentleAiCommit":…}` to `<config home>/channel.json`.
 - `shell-setup` then runs from the main package. The config home is
   `GENTLE_PI_CONFIG_HOME` or `~/.pi/gentle-ai`, as for the dev-binary override.
-- `gentle-shell upgrade --channel main` builds with the user's Go when it meets
-  the minimum (or its version is unknown, as before), otherwise with the pinned Go
-  an earlier installer run published under `<config home>/tools/go`. It never
-  downloads Go itself: with an older Go and no pinned copy it stops with
-  `main-requires-tools`, naming both versions.
+- `gentle-shell upgrade --channel main` builds with the user's Go only when it
+  reports a stable version that meets the minimum. Otherwise (missing, older, or
+  a version it cannot check) it builds with the pinned Go under
+  `<config home>/tools/go`, downloading and verifying it there with the same
+  `acquireGo` as the wizard when no earlier run published it, and only when
+  Gentle AI is rebuilt. A failed download stops with `main-requires-tools`
+  before anything is built; the user's Go is never run for the build.
 - Trust: Gentle AI source is verified by Go's checksum database; the Gentle Shell
   source is fetched over TLS from GitHub by exact commit SHA, with no pinned
   digest. Main builds are development builds.
