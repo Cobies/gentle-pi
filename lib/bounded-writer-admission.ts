@@ -109,18 +109,48 @@ export function tryNormalizeInRepoAbsolutePath(candidate: string, targetRoot: st
 		if (isMatch) {
 			const rel = collapsedCandPath.slice(prefixWithSlash.length);
 			if (rel.length > 0 && rel !== "." && !rel.startsWith("/")) {
-				try {
-					const realCandidate = realpathSync(candidate).replace(/\\/g, "/");
-					const realRoots = roots.map((r) => {
-						try { return realpathSync(r).replace(/\\/g, "/"); } catch { return r.replace(/\\/g, "/"); }
-					});
-					const escapes = !realRoots.some((r) => {
-						const rWithSlash = r.endsWith("/") ? r : r + "/";
-						return realCandidate.startsWith(rWithSlash) || realCandidate.toLowerCase().startsWith(rWithSlash.toLowerCase());
-					});
-					if (escapes) return undefined;
-				} catch {
-					// File does not exist yet (normal for planned edits)
+				// Verify symlinks do not escape target root when the root exists on disk.
+				// If the candidate or a segment of it does not exist yet, resolve its
+				// nearest existing ancestor within the root and verify it does not escape.
+				const existingRealRoots: string[] = [];
+				for (const r of roots) {
+					try {
+						existingRealRoots.push(realpathSync(r));
+					} catch {
+						// Synthetic root in unit tests does not exist on disk
+					}
+				}
+
+				if (existingRealRoots.length > 0) {
+					let checkPath: string | undefined = candidate;
+					let realTarget: string | undefined;
+					while (checkPath) {
+						try {
+							realTarget = realpathSync(checkPath);
+							break;
+						} catch {
+							const parent = resolve(checkPath, "..");
+							if (parent === checkPath) {
+								break;
+							}
+							checkPath = parent;
+						}
+					}
+
+					if (realTarget) {
+						const escapes = !existingRealRoots.some((r) => {
+							const relToRoot = relative(r, realTarget!);
+							if (relToRoot === "" || (!relToRoot.startsWith("..") && !isAbsolute(relToRoot))) {
+								return true;
+							}
+							if (rootDriveMatch) {
+								const relLower = relative(r.toLowerCase(), realTarget!.toLowerCase());
+								return relLower === "" || (!relLower.startsWith("..") && !isAbsolute(relLower));
+							}
+							return false;
+						});
+						if (escapes) return undefined;
+					}
 				}
 				return rel;
 			}
