@@ -3311,7 +3311,7 @@ test("subagent_list_agents and subagent_run in task mode launch a child with the
 	const result = await running;
 	const runId = (result.details.gentleAgents as { taskId: string }).taskId;
 	assert.equal(result.content[0].text, `Subagent explore (task ${runId}, "map lib modules") finished.\n\nlib has three agent files.`, "the model sees the real task id and label, not only details");
-	assert.match(tools.get("subagent_run")!.renderResult(result as Parameters<Registered["renderResult"]>[0], { expanded: false }, plainTheme).render(80).map((line) => line.trimEnd()).join("\n"), /Subagent explore.*finished\./, "the collapsed card renders subagent completion");
+	assert.deepEqual(tools.get("subagent_run")!.renderResult(result as Parameters<Registered["renderResult"]>[0], { expanded: false }, plainTheme).render(80).map((line) => line.trimEnd()), ["│ lib has three agent files.                                                   │", "╰──────────────────────────────────────────────────────────────────────────────╯"], "the collapsed card still leads with the answer");
 	assert.equal((result.details.gentleAgents as { status: string }).status, "completed");
 	assert.match(widget()![1], /✓  explore  map lib modules/);
 	const orphan = tools.get("subagent_run")!.execute("c9", { agent: "explore", task: "Orphan", mode: "background" }, undefined, undefined, ctx);
