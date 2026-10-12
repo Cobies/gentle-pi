@@ -135,5 +135,9 @@ test("T17: the always-on Explore step delegates codebase exploration to gentle-a
 			step.includes("Codebase exploration across multiple files, architecture, or code flow MUST be delegated to gentle-ai-explore"),
 			"ODD Explore step must mandate delegation to gentle-ai-explore",
 		);
+		assert.ok(
+			step.includes("When understanding is not immediately obvious within 1-2 targeted reads, do not continue inline: stop and delegate to gentle-ai-explore."),
+			"ODD Explore step must stop inline drift after 1-2 targeted reads",
+		);
 	}
 });
