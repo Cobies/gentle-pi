@@ -125,6 +125,20 @@ test("renderGentleAgentResult formats errors prominently even when collapsed", (
 	assert.match(rendered, /╰─+╯/);
 });
 
+test("renderGentleAgentResult marks failed or cancelled terminal status as error even if options.isError is false", () => {
+	for (const terminalStatus of ["failed", "timed_out", "cancelled"]) {
+		const result = renderGentleAgentResult(
+			{
+				content: [{ type: "text", text: `Subagent execution ended with ${terminalStatus}` }],
+				details: { gentleAgents: { status: terminalStatus } },
+			},
+			{ isPartial: false, expanded: false, isError: false },
+			plainTheme,
+		);
+		assert.equal(result.tone, CARD_TONE.ERROR, `status ${terminalStatus} must render with ERROR tone`);
+	}
+});
+
 test("formatLiveTaskActivity formats in-flight tools and fallback steps", () => {
 	assert.equal(
 		formatLiveTaskActivity(

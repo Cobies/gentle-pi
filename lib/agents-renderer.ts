@@ -282,7 +282,9 @@ export function renderGentleAgentResult(
 	if (options.expanded !== true && options.isPartial !== true) {
 		text = stripCompletionHeader(text);
 	}
-	const isError = options.isError === true || context?.isError === true;
+	const status = (result.details as { gentleAgents?: { status?: unknown } } | undefined)?.gentleAgents?.status;
+	const failedStatus = !options.isPartial && typeof status === "string" && ["failed", "timed_out", "cancelled"].includes(status);
+	const isError = options.isError === true || context?.isError === true || failedStatus;
 	const tone = isError ? CARD_TONE.ERROR : options.isPartial ? CARD_TONE.WARNING : CARD_TONE.SUCCESS;
 	const state = getGentleAgentRenderState(context?.state);
 

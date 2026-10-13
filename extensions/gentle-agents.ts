@@ -1761,17 +1761,22 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		if (request.mode === AGENT_MODE.BACKGROUND) return text(`Started ${task.agent} in the background as task ${task.id}. Retain that id; completion is pushed automatically. Never sleep or periodically poll subagent_status/subagent_result for completion or cache maintenance. Inspect status only at a real orchestration decision boundary; never relaunch equivalent queued/running work.`, taskDetails(task));
 
 		let unsubscribeUpdates: (() => void) | undefined;
+		let lastUpdateKey: string | undefined;
 		if (onUpdate) {
 			unsubscribeUpdates = store.subscribe(task.id, (liveTask, thread) => {
 				const liveStep = formatLiveTaskActivity(liveTask, thread);
+				const gentleAgents = taskDetails(liveTask);
+				const updateKey = JSON.stringify({ gentleAgents, liveStep });
+				if (updateKey === lastUpdateKey) return;
 				try {
 					onUpdate({
 						content: [{ type: "text", text: liveStep }],
 						details: {
-							gentleAgents: taskDetails(liveTask),
+							gentleAgents,
 							liveStep,
 						},
 					});
+					lastUpdateKey = updateKey;
 				} catch {
 					// Safe: do not break execution if UI callback throws
 				}
