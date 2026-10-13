@@ -566,7 +566,8 @@ test("in-repository absolute paths are rejected with actionable suggestion and t
 		mkdirSync(fakeRepo);
 		mkdirSync(outsideDir);
 		const linkPath = join(fakeRepo, "escapelink");
-		symlinkSync(outsideDir, linkPath, "dir");
+		const linkType = process.platform === "win32" ? "junction" : "dir";
+		symlinkSync(outsideDir, linkPath, linkType);
 
 		// Non-existent file below an escaping symlink
 		const escapingFilePath = join(linkPath, "nonexistent-child.ts");

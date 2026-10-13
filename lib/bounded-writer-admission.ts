@@ -122,7 +122,9 @@ export function tryNormalizeInRepoAbsolutePath(candidate: string, targetRoot: st
 				}
 
 				if (existingRealRoots.length > 0) {
-					let checkPath: string | undefined = candidate;
+					// Use resolve(root, rel) rather than candidate directly to avoid
+					// POSIX resolving Windows-style drive paths (e.g. C:\...) relative to process.cwd()
+					let checkPath: string | undefined = resolve(root, rel);
 					let realTarget: string | undefined;
 					while (checkPath) {
 						try {
