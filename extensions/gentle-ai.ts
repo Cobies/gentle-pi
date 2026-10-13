@@ -1,6 +1,6 @@
 import { appendSystemPromptOnce } from "../lib/append-system-prompt.ts";
 import { pruneContextMessages } from "../lib/context-pruning.ts";
-import { recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
+import { dataArgumentRanges, recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
 import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, isHomeOrBroadUserDirectory, prepareBoundSessionRepository, rejectUnscopedBoundedWriterDispatch, resolveTargetRepositoryRoot, safeBootstrapDirectory, sourcePathWithinProject, tryNormalizeInRepoAbsolutePath } from "../lib/bounded-writer-admission.ts";
@@ -51,7 +51,7 @@ import {
 	type BackgroundSubagentsPolicy,
 	type BackgroundSubagentsResolution,
 } from "../lib/background-subagents-policy.ts";
-import { installPackageAssets, getPackageAssetOwner, hasPackageAssetOwnerInstallation, type PackageAssetOwner, isPackageManagedSddAsset, updatePackageManagedSddAgentOwnership } from "../lib/agent-assets.ts";
+import { installPackageAssets, getPackageAssetOwner, type PackageAssetOwner, isPackageManagedSddAsset, updatePackageManagedSddAgentOwnership } from "../lib/agent-assets.ts";
 import {
 	THINKING_LEVELS,
 	normalizeModelConfig,
@@ -1099,9 +1099,11 @@ function homeRootedRepository(cwd: string): string | undefined {
  * `NativeReviewModeStatus`) that the `/gentle:review-mode` command also
  * calls. Never throws and never hangs past `signal`'s deadline when one is
  * given: an absent binary, a timed-out/aborted process, or a native CLI
- * failure all resolve to `undefined`. `ctx` is optional and used only for a
- * one-shot (per process) UI notice when the read is swallowed, so a
- * sustained native outage is observable beyond the rendered "unknown" line.
+ * failure all resolve to `undefined` unless an earlier read for the same cwd
+ * succeeded, in which case that last known status is kept (gentle-shell#1029:
+ * the rendered line sits in the cached prompt prefix). `ctx` is optional and
+ * used only for a one-shot (per process) UI notice when the read is
+ * swallowed, so a sustained native outage is observable beyond the prompt.
  */
 async function resolveRddModeStatus(
 	nativeReviewCli: Pick<NativeReviewCli, "reviewMode"> | null | undefined,
@@ -1113,13 +1115,19 @@ async function resolveRddModeStatus(
 	const nowMs = now();
 	const cached = rddStatusMemo.get(cwd);
 	if (cached !== undefined && cached.expiresAt > nowMs) return cached.status;
-	const status = await readRddModeStatusOnce(nativeReviewCli, cwd, signal);
+	// gentle-shell#1029: the rendered line is part of the cached system-prompt
+	// prefix. A re-read that fails or times out keeps the last successfully
+	// read status instead of flipping the prompt to "unknown" and back, which
+	// would invalidate the provider's prefix cache for the whole conversation.
+	// Only a status the native reader actually reports replaces a known one.
+	const read = await readRddModeStatusOnce(nativeReviewCli, cwd, signal);
+	const status = read ?? cached?.status;
 	rddStatusMemo.set(cwd, { status, expiresAt: nowMs + RDD_STATUS_MEMO_TTL_MS });
-	if (status === undefined && !rddStatusUnavailableWarned) {
+	if (read === undefined && !rddStatusUnavailableWarned) {
 		rddStatusUnavailableWarned = true;
 		if (ctx?.hasUI) {
 			ctx.ui.notify(
-				"Gentle AI: receipt-driven-development status is unavailable (native review CLI absent, timed out, or failed). The parent prompt renders \"unknown\" until this recovers; this notice will not repeat this session.",
+				"Gentle AI: receipt-driven-development status is unavailable (native review CLI absent, timed out, or failed). The parent prompt keeps the last known status, or renders \"unknown\" when none was read; this notice will not repeat this session.",
 				"warning",
 			);
 		}
@@ -1307,6 +1315,14 @@ ${personaPrompt}
 
 ${languageBoundary}
 
+## Authorized work continuity
+
+An authorized outcome includes its necessary in-scope implementation, documentation and verification steps. Continue those steps without asking the human to approve each transition. Never end a turn merely announcing an immediately executable authorized next step; execute it instead. A progress update is not a request for permission.
+
+Stop only for an unresolved consequential scope/product decision, required explicit consent, a denied action, unavailable required proof, or the human's explicit stop. Do not infer permission for publishing, destructive actions, unrelated scope or native consent from this continuity rule. Report a concrete blocker and the exact decision needed rather than requesting a generic "continue".
+
+For background work, launch the bounded action and end the turn when no independent in-scope work remains. Retain its identity and resume the already-authorized continuation automatically on its completion event; do not ask the human to say "continue", poll, or claim completion while checks remain pending.
+
 Default workflow: Organic Driven Development (MANDATORY)
 Organic Driven Development (ODD) is the predefined workflow of this orchestrator. Every request enters it, without the user asking for a workflow, a plan, or task tracking. Never describe this workflow only when asked about it: run it. Run these steps in this order on every request:
 1. **Authorize.** Investigation, explanation, review, comparison, and proposal-only requests stay read-only: no writer, apply, or implementation artifacts. Ambiguous or conditional change intent gets one clarification; stop and wait. Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via \`repository_root\`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously.
@@ -1334,7 +1350,9 @@ ${getOrchestratorPrompt(cwd, activeTools, rddStatusLine, hostMode)}`;
 
 // Matches `git [global-flags] push` — tolerates flags like -C /repo or --work-tree=/tmp
 // between `git` and the subcommand. Short flags may be followed by a separate value token.
-const GIT_GLOBAL_FLAGS_SRC = String.raw`(?:\s+--?\S+(?:\s+[^-\s]\S*)?)* `;
+// gentle-shell#2172: `\s+` rather than a literal space, so a tab-separated
+// `git\tpush` is guarded like any other spelling.
+const GIT_GLOBAL_FLAGS_SRC = String.raw`(?:\s+--?\S+(?:\s+[^-\s]\S*)?)*\s+`;
 const GIT_PUSH_RE = new RegExp(String.raw`\bgit${GIT_GLOBAL_FLAGS_SRC}(push)\b`);
 
 const DENIED_BASH_PATTERNS: RegExp[] = [
@@ -1400,7 +1418,7 @@ interface LoadGuardrailsOptions {
 
 const GUARDED_KEY_PATTERNS: Record<GuardedCommandKey, RegExp> = {
 	gitPush: GIT_PUSH_RE,
-	gitRebase: /\bgit\s+(rebase)\b/,
+	gitRebase: new RegExp(String.raw`\bgit${GIT_GLOBAL_FLAGS_SRC}(rebase)\b`),
 	gitBranchDeleteForce: /\bgit\s+(branch)\s+(?:-[a-zA-Z]*D[a-zA-Z]*|-[a-zA-Z]*d[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*d[a-zA-Z]*|--delete\b[^\r\n;&|]*--force\b|--force\b[^\r\n;&|]*--delete\b)/,
 	npmPublish: /\bnpm\s+(publish)\b/,
 	piRemove: /\bpi\s+(remove)\b/,
@@ -1442,12 +1460,15 @@ function collectGuardedMatches(
 	config: RuntimeGuardrailsConfig,
 ): GuardMatch[] {
 	const matches: GuardMatch[] = [];
+	const dataRanges = dataArgumentRanges(command);
 	for (const [key, pattern] of Object.entries(GUARDED_KEY_PATTERNS) as [
 		GuardedCommandKey,
 		RegExp,
 	][]) {
 		const globalPattern = new RegExp(pattern.source, `${pattern.flags}g`);
 		for (const match of command.matchAll(globalPattern)) {
+			// gentle-shell#2174: text inside a data command's argument is not an operation.
+			if (inDataArgument(dataRanges, match.index)) continue;
 			const action = config.autonomousMode
 				? (config.guardedCommands[key] ?? AUTONOMOUS_DEFAULT_ACTIONS[key])
 				: "confirm";
@@ -1461,6 +1482,10 @@ function collectGuardedMatches(
 	return matches.sort((left, right) => left.triggerIndex - right.triggerIndex);
 }
 
+function inDataArgument(ranges: ReadonlyArray<readonly [number, number]>, index: number): boolean {
+	return ranges.some(([start, end]) => index >= start && index < end);
+}
+
 function evaluateGuardedCommand(
 	command: string,
 	config: RuntimeGuardrailsConfig,
@@ -1471,8 +1496,10 @@ function evaluateGuardedCommand(
 	if (hardDeny) return { action: "block", triggerIndex: hardDeny.triggerIndex, matches };
 
 	// Hard denies override every configured action across the complete command.
+	const dataRanges = dataArgumentRanges(command);
 	for (const pattern of DENIED_BASH_PATTERNS) {
-		const denied = pattern.exec(command);
+		const denied = [...command.matchAll(new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`))]
+			.find((candidate) => !inDataArgument(dataRanges, candidate.index));
 		if (!denied) continue;
 		const matchedAction = matches.find((match) =>
 			match.triggerIndex >= denied.index && match.triggerIndex < denied.index + denied[0].length,
@@ -1818,14 +1845,60 @@ function createHerdrConfirmationLifecycle(events: ExtensionAPI["events"]): Herdr
 	};
 }
 
-/** Conservative waiver surface: one plain push in the current repository, no shell/wrapper or destination-changing options. */
-function isOrdinaryYoloPush(command: string, evaluation: GuardEvaluation): boolean {
-	if (evaluation.action !== "confirm" || evaluation.dataLoss || evaluation.matches.length !== 1 || evaluation.key !== "gitPush") return false;
-	return /^git\s+push(?:\s+(?:-u|--set-upstream|[A-Za-z0-9_][A-Za-z0-9_./-]*))*\s*$/.test(command);
+// gentle-shell#2172: YOLO waives reversible delivery, not only one bare push.
+// A guarded segment is judged from its trigger word (`push`/`rebase`) to the
+// next command separator; a plain token or allow-listed option list is the
+// whole eligible grammar, so quotes, wrappers and unknown options fall back
+// to the ordinary confirmation. Everything that deletes or rewrites a remote
+// ref, publishes, or runs arbitrary commands is deliberately absent:
+// `--delete`/`-d`, `:dst` and `+src` refspecs, `--mirror`, `--prune`,
+// `--all`, every force spelling, `--receive-pack`/`--exec`, `--repo`, `-o`.
+const YOLO_WAIVABLE_KEYS: ReadonlySet<GuardedCommandKey> = new Set(["gitPush", "gitRebase"]);
+const YOLO_SEGMENT_END_RE = /&&|\|\||;|\||\n|\r/;
+// Text between the segment start and the `push`/`rebase` word: optional
+// variable assignments, `env`/`command` prefixes and the `git` word with at
+// most a `-C <path>`. Other global options (`-c key=value`, `--exec-path`,
+// `--git-dir`) can run or redirect code, so they keep the confirmation.
+const YOLO_GIT_PREFIX_RE = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s'"`$]*\s+|env\s+(?:-i\s+)?|command\s+)*git(?:\s+-C\s+[^\s'"`$;&|]+)?\s+$/;
+const YOLO_PUSH_SEGMENT_RE = /^push(?:\s+(?:-u|--set-upstream|-q|--quiet|-v|--verbose|--tags|--follow-tags|--no-verify|--porcelain|[A-Za-z0-9_][A-Za-z0-9_./-]*(?::[A-Za-z0-9_][A-Za-z0-9_./-]*)?))*\s*$/;
+const YOLO_REBASE_SEGMENT_RE = /^rebase(?:\s+(?:--onto\s+[A-Za-z0-9_][A-Za-z0-9_./~^-]*|--continue|--abort|--skip|--autostash|--no-autostash|[A-Za-z0-9_][A-Za-z0-9_./~^-]*))*\s*$/;
+
+function yoloGuardedSegment(command: string, triggerIndex: number): string {
+	const rest = command.slice(triggerIndex);
+	const end = rest.search(YOLO_SEGMENT_END_RE);
+	return end < 0 ? rest : rest.slice(0, end);
 }
 
-/** Preserve explicitly configured confirmations even when legacy env/autonomy resolution ignores them. */
-function yoloPushConfiguredRestriction(cwd: string, options: LoadGuardrailsOptions = {}): GuardAction | undefined {
+function yoloSegmentPrefix(command: string, triggerIndex: number): string {
+	const head = command.slice(0, triggerIndex);
+	const separators = [...head.matchAll(new RegExp(YOLO_SEGMENT_END_RE.source, "g"))];
+	const last = separators.at(-1);
+	return last === undefined ? head : head.slice(last.index + last[0].length);
+}
+
+/** Every guarded match and every recognized Git side effect must be a reversible push or non-interactive rebase. */
+function isReversibleYoloCommand(command: string, evaluation: GuardEvaluation): boolean {
+	if (evaluation.action !== "confirm" || evaluation.dataLoss || evaluation.matches.length === 0) return false;
+	for (const match of evaluation.matches) {
+		if (!YOLO_WAIVABLE_KEYS.has(match.key)) return false;
+		if (!YOLO_GIT_PREFIX_RE.test(yoloSegmentPrefix(command, match.triggerIndex))) return false;
+		const segment = yoloGuardedSegment(command, match.triggerIndex);
+		if (!(match.key === "gitPush" ? YOLO_PUSH_SEGMENT_RE : YOLO_REBASE_SEGMENT_RE).test(segment)) return false;
+	}
+	// The data-loss recognizer leaves non-hard Git effects (reset, stash drop,
+	// restore, checkout --) to the primary policy; under YOLO only a rebase that
+	// a guarded match already vetted may remain.
+	const rebaseTriggers = new Set(evaluation.matches.filter((match) => match.key === "gitRebase").map((match) => match.triggerIndex));
+	for (const effect of recognizeDestructiveCommands(command)) {
+		if (effect.hardDeny || effect.kind !== "git") return false;
+		const rebase = /^git(?:\s+(?:-C|-c|--git-dir|--work-tree|--namespace)\s+\S+|\s+-\S+)*\s+(rebase)\b/.exec(command.slice(effect.triggerIndex));
+		if (rebase === null || !rebaseTriggers.has(effect.triggerIndex + rebase.index + rebase[0].lastIndexOf("rebase"))) return false;
+	}
+	return true;
+}
+
+/** Preserve explicitly configured confirmations for the waivable keys present, even when legacy env/autonomy resolution ignores them. */
+function yoloConfiguredRestriction(cwd: string, keys: readonly GuardedCommandKey[], options: LoadGuardrailsOptions = {}): GuardAction | undefined {
 	let restriction: GuardAction | undefined;
 	for (const path of [join(options.gentlePiConfigHome ?? gentleAiConfigHome(), "runtime-guardrails.json"), join(cwd, ".pi", "gentle-ai", "runtime-guardrails.json")]) {
 		try {
@@ -1835,9 +1908,11 @@ function yoloPushConfiguredRestriction(cwd: string, options: LoadGuardrailsOptio
 				restriction ??= "confirm";
 				continue;
 			}
-			const action = isRecord(parsed.guardedCommands) ? parsed.guardedCommands.gitPush : undefined;
-			if (action === "block") return "block";
-			if (action !== undefined && action !== "allow") restriction = "confirm";
+			for (const key of keys) {
+				const action = isRecord(parsed.guardedCommands) ? parsed.guardedCommands[key] : undefined;
+				if (action === "block") return "block";
+				if (action !== undefined && action !== "allow") restriction = "confirm";
+			}
 		} catch { restriction ??= "confirm"; }
 	}
 	return restriction;
@@ -1856,8 +1931,9 @@ async function confirmCommand(
 	// Configuration provenance is distinct from legacy autonomy resolution, which
 	// can ignore confirmations when an environment override is present. Activation
 	// cannot waive a restriction from either user or project configuration layer.
-	const configuredRestriction = yoloActive && evaluation.matches.some((match) => match.key === "gitPush")
-		? yoloPushConfiguredRestriction(ctx.cwd) : undefined;
+	const waivableKeys = evaluation.matches.map((match) => match.key).filter((key) => YOLO_WAIVABLE_KEYS.has(key));
+	const configuredRestriction = yoloActive && waivableKeys.length > 0
+		? yoloConfiguredRestriction(ctx.cwd, waivableKeys) : undefined;
 	const classification = evaluation.action === "block" || configuredRestriction === "block"
 		? "block" : configuredRestriction ?? evaluation.action;
 
@@ -1893,7 +1969,7 @@ async function confirmCommand(
 	}
 
 	// Full T1 evaluation has already run. YOLO never changes persistent autonomy.
-	if (yoloActive && configuredRestriction === undefined && isOrdinaryYoloPush(command, evaluation)) return undefined;
+	if (yoloActive && configuredRestriction === undefined && isReversibleYoloCommand(command, evaluation)) return undefined;
 
 	// classification === "confirm"
 	if (!ctx.hasUI) {
@@ -9385,8 +9461,8 @@ export const __testing = {
 	guardedCommandPreview,
 	guardedCommandTitle,
 	loadRuntimeGuardrailsConfig,
-	isOrdinaryYoloPush,
-	yoloPushConfiguredRestriction,
+	isReversibleYoloCommand,
+	yoloConfiguredRestriction,
 	buildGentlePrompt,
 	nativeStatusUnsupported,
 	nativeStartRejection,
@@ -10057,7 +10133,8 @@ function createGentleAiExtensionForTesting(
 		// this branch, so no line is resolved or computed for them.
 		// resolveRddStatusLine never throws and never hangs past
 		// RDD_STATUS_TIMEOUT_MS: an absent/timed-out/aborted/failing native
-		// binary renders the fail-closed "unknown" line instead.
+		// binary keeps the last known line for this cwd, or renders the
+		// fail-closed "unknown" line when none was ever read (gentle-shell#1029).
 		const rddStatusSignal = AbortSignal.timeout(RDD_STATUS_TIMEOUT_MS);
 		// A startup read still in flight fills the memo: wait for it within the
 		// same deadline instead of spawning the same STATUS a second time.

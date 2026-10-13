@@ -215,7 +215,7 @@ This checkout declares `gentle-pi` `4.0.0` with a package-local Gentle AI `v4.1.
 
 ### Pi compatibility
 
-The current package requires Pi 0.99.1 or newer and Node >=22.19.0. Development tests resolve Pi through the open `>=1.0.0` development range. The private Vim editor adapter admits only the audited Pi `0.99.1`, `0.99.2`, `1.0.0`, and `1.1.0` releases; any other release keeps ordinary prompt editing until its editor is audited. Use the latest Pi release; gentle-pi does not update your installed Pi automatically. Children, including any `GENTLE_PI_AGENTS_PI` override, must emit `agent_settled`: `agent_end` records a run's output but is not completion because retries or queued continuations may follow.
+The current package requires Pi 1.2.0 or newer and Node >=22.19.0. Development tests resolve Pi through the open `>=1.0.0` development range. The private Vim editor adapter admits only the audited Pi `0.99.1`, `0.99.2`, `1.0.0`, `1.1.0`, and `1.2.0` releases; any other release keeps ordinary prompt editing until its editor is audited. Use the latest Pi release; gentle-pi does not update your installed Pi automatically. Children, including any `GENTLE_PI_AGENTS_PI` override, must emit `agent_settled`: `agent_end` records a run's output but is not completion because retries or queued continuations may follow.
 
 The [`v2.6.0` release](https://github.com/Gentleman-Programming/gentle-shell/releases/tag/v2.6.0) added persistent registered worktrees and grouped `/gentle:changes` views; fuller workspace interaction details are in the [Gentle Shell reference](gentle-shell.md). It also adds named atomic `/gentle:profiles`, native review intended-untracked selection and provider continuations, and opt-in custom ask responses. Pi recognizes its global Git-managed package path; subsystems install with explicit recovery guidance when npm lifecycle work was skipped. Windows keeps child consoles hidden and fixes ownership mode; Gentle Todo keeps the next pending task visible when collapsed.
 
@@ -322,7 +322,13 @@ gentle-shell self-uninstall [--dry-run] [--yes] [--include-shared]
 
 `gentle-shell install npm:<pkg>`, `gentle-shell remove ...`, `gentle-shell list`, `gentle-shell update ...`, `gentle-shell config`, and `gentle-shell auth ...` run pi's own commands against the resolved home — the `--isolated` home by default, or your own pi home with `--link`. A launcher flag before the subcommand (`--link`, `--isolated`, `--home <path>`) still selects which home the subcommand runs against. Running `gentle-shell install npm:gentle-pi` inside the isolated home is unnecessary: the launcher already loads the Gentle Shell package itself (see "Loading the package" below).
 
-`gentle-shell update` and `gentle-shell list` follow that same home selection, so they inspect and update packages in whichever home the effective flag or persisted `home` config points to.
+`gentle-shell list` and extension updates follow that same home selection. `gentle-shell update --extensions-only` preserves Pi's extension-only command; `--extensions`, package targets, and model updates also stay with Pi.
+
+`gentle-shell update` updates the selected Pi through its verified npm or pnpm global owner, avoiding Pi's self-update refusal for pnpm v11 linked stores. Ownership requires successful global listing JSON, an exact canonical listed package-root/CLI match, and binding to the selected runtime. An adjacent peer (the launcher's `bundled` runtime) is supplied by the exact listed `gentle-pi` package: that Shell package is reinstalled at its current version so the manager re-resolves the peer, and a separate global Pi is never the target, because updating it leaves the peer a Shell install runs unchanged. A `PATH` or `GENTLE_SHELL_PI` runtime is supplied only by its own listed global Pi package; when that executable is a package-manager shim (pnpm's POSIX shim, a `.cmd`), Shell follows the single `dist/bundle/cli.js` it names, relative to the shim's directory, and refuses shims naming none or several. Pi and Shell are never installed together in a comma group, and unrelated packages are never reinstalled. Merely residing under `PNPM_HOME` proves nothing. Adjacent peers resolve where the package manager places them: nested under the Shell package (npm), beside it in pnpm's linked store, or in the global group's own `node_modules`. npm source/link entries are rejected. pnpm updates additionally require that the actual old global group contains only the target top-level package: aggregated listings may contain other, separate groups, but shared groups are rejected because pnpm can remove the whole old group. Unknown, malformed, failed, or ambiguous ownership refuses before installation; update source checkouts and other unsupported layouts with their supplying package manager.
+
+After a successful install, Shell reads the supplied Pi version back from a fresh global listing and reports it, naming the previous version when it changed. An unchanged pnpm result also names pnpm's `minimumReleaseAge` setting: pnpm installs only releases older than that age (pnpm 11 defaults to 4320 minutes), so a very recent Pi release is picked up once it is old enough; Shell reports the rule rather than overriding it. Both the listing and the install run from the system temporary directory, so a project's `packageManager` pin in the current directory never changes which pnpm answers. When the version cannot be read back, the output says so and points at `gentle-shell --version`.
+
+Prefix-bundled installations keep their existing `gentle-shell upgrade` route for Pi. `update --all` updates the verified owner before forwarding extension updates; an ownership refusal stops without mutation. Shell's `upgrade` and `self-uninstall` ownership behavior is unchanged.
 
 ### `setup` subcommand
 
@@ -360,7 +366,7 @@ gentle-ai's managed Pi stack always declares `npm:gentle-pi` itself in the home'
 
 Adjacent resolution uses Pi's public ESM entry, then verifies the canonical package root, package name and declared `pi` bin. Only a genuinely absent optional peer permits PATH fallback; an invalid installed package fails rather than silently selecting another runtime. Pi AI and TUI are optional `"*"` host peers, not runtime dependencies, so managed extensions use the host's classes and registries. The launcher still gates the actual runtime version before home bootstrap. This is a one-time baseline upgrade, not an auto-updater.
 
-If none resolve, `gentle-shell` exits 1 naming all three options. Once a runtime is found, its `pi --version` must be at least `0.99.1` (the coding-agent peer minimum): an older version exits 1 naming the found and required versions, and unparsable `--version` output exits 1 naming the required minimum.
+If none resolve, `gentle-shell` exits 1 naming all three options. Once a runtime is found, its `pi --version` must be at least `1.2.0` (the coding-agent peer minimum): an older version exits 1 naming the found and required versions, and unparsable `--version` output exits 1 naming the required minimum.
 
 ### Environment variables
 
@@ -432,8 +438,8 @@ without it. If the installer cannot attribute the existing installation to npm
 or pnpm (for example, an `npm link` checkout), it leaves that installation
 untouched and explains why; see the [installation wizard](install-wizard.md).
 
-Do not substitute `gentle-shell update`: that is Pi's package update, not this
-Gentle Shell upgrade/bootstrap operation.
+Do not substitute `gentle-shell update`: that updates the selected Pi owner,
+not this Gentle Shell channel upgrade/bootstrap operation.
 
 #### Behavior on supporting builds
 
@@ -1055,12 +1061,14 @@ Both use the same shape, and both are a separate artifact from `profiles.json`:
 ```
 
 The fullscreen shell header and Status → Project → Profile show the effective profile for the session
-repository: `name (local)` for a clone-local pin, `name (repo)` for a repository declaration, or the
-global active name without a suffix. Invalid or stale pins fall through to the next valid layer.
-Changes made inside or outside the profiles panel appear within about two seconds while the UI
-session is active; the indicator is omitted if no valid profile remains.
+repository: `name (session)` for a profile selected in this session, `name (local)` for a clone-local
+pin, `name (repo)` for a repository declaration, or the global active name without a suffix. Invalid
+or stale pins fall through to the next valid layer. A session shows the profile it froze at startup
+(see **Session profile frozen at startup** below); a selection in this session, or any default change
+in `follow` mode, appears within about two seconds while the UI session is active. The indicator is
+omitted if no valid profile remains.
 
-For a given working directory the winner is the local pin, then the repository declaration, then no pin. With no pin at all the repository keeps the behavior described above and follows the globally active profile. `p` and `P` are toggles: pressing one on the profile that already holds that layer removes it, and either key pressed outside a Git worktree writes nothing and says so.
+For a given working directory the winner is the local pin, then the repository declaration, then the globally active profile. A session resolves these layers once, when it starts, and keeps the result. `p` and `P` are toggles: pressing one on the profile that already holds that layer removes it, and either key pressed outside a Git worktree writes nothing and says so.
 
 In a pinned repository the pinned profile governs subagent launches: the agents it names take its model and effort, and the agents it omits return to inherit (their own definition, then the default model). The globally active profile and writes made through `/gentle:models` do not reach those launches, which `/gentle:models` reports when it runs inside a pinned repository. `a` follows the same boundary: inside a pinned repository it re-pins that repository instead of writing the global routing, so a global apply can never move another repository's routing. `enter` writes nothing at all: it binds the profile to the current session, which outranks the pin for this session's launches. The panel states which layer won, names the file that holds it, and marks the profile with `(pinned)`.
 
@@ -1081,6 +1089,34 @@ A pin that cannot be honored never blocks work and is never destroyed by a read.
 The orchestrator sits deliberately outside the pin. Its `defaultProvider`, `defaultModel`, and `defaultThinkingLevel` live in Pi's global `settings.json`, and a pin never writes them. Pi supports project settings, where `.pi/settings.json` overrides the global file, so a per-repository orchestrator is possible in principle; it is not done here because it would make Pi treat the repository as having project settings and ask for trust at startup, and because it would only affect new sessions.
 
 One limitation is worth stating. When a pinned profile omits an agent, that agent's own frontmatter still applies, so a model that an earlier global apply materialized into a user agent's frontmatter can still be inherited. Frontmatter cannot be told apart from content an author wrote, so a pin does not clear it.
+
+### Session profile frozen at startup
+
+Every parent session uses one profile for its subagent launches, the footer and Status profile, and the Usage provider scope. All three read the same rule:
+
+1. The profile selected in this session (`name (session)`).
+2. Otherwise, the profile the session froze when it started.
+3. Otherwise, only in `follow` mode, the current defaults.
+
+A session that never selected a profile resolves the shared defaults once, at startup: the local pin (`p`), then the repository declaration (`P`), then the globally active profile in `profiles.json`. It keeps that profile's name, routing, and origin (`local`, `repo`, or `global`). Changing a pin, the repository declaration, the active profile, or the profile's content afterwards affects new sessions only, the same way Pi's "set as default" for the orchestrator model leaves open sessions alone. Outside a Git worktree the repository declaration is still read, as non-Git writer admission does.
+
+**Behavior change for unpinned sessions.** Without a pin or declaration, launches now use the globally active profile from `profiles.json`, replacing the materialized `subagents.json` routing wholesale like a pin does. Before, an unpinned launch read the materialized stores. When nothing is pinned and no profile is active, the session freezes "no profile" and keeps routing through the materialized stores, as before; a pin added later does not change it.
+
+**Drift notice.** On each subagent launch, a session with a frozen profile compares it with the current defaults of its own directory, without applying them. When they differ, it shows one line:
+
+```text
+el Gentleman: the default profile changed to "local" (local), this session keeps "frontier" (local). Press Enter on a profile in /gentle:profiles to adopt it.
+```
+
+The notice appears once per distinct change: further launches stay quiet until the defaults change again. The same profile reached through another layer is not a change; an edit of the profile's content is. Sessions with a profile selected in the session, `follow` sessions, and subagent children never show it.
+
+**Foreign repositories.** A selected or frozen profile belongs to the session and also routes launches into a foreign `repository_root`. A session frozen without a profile leaves a foreign repository on its own local pin and repository declaration; the globally active profile does not apply there.
+
+**`follow` mode.** Start Pi with `GENTLE_PI_PROFILE_FOLLOW=1` (CI and headless runs) to skip the freeze: every launch resolves the current defaults of its target, and no drift notice is shown. Any other value, or no value, freezes. Selecting a profile with Enter still makes it the session's profile. Limitation: the orchestrator model is chosen when the session starts and does not follow later default changes, so after one the orchestrator and the subagents can follow different profiles.
+
+**Subagent children** never freeze, compare, or warn: their model comes from the parent's launch.
+
+**Current limits.** The frozen profile is kept in memory for the life of the Pi process, so `/reload` keeps it. Resuming a session in a new process (`--resume`, `--continue`, `--session`), `/new`, and `/fork` freeze again from the defaults current at that moment, and the drift notice memory starts empty, so a pending change is announced once more. Persisting the frozen profile in the session file is planned.
 
 ## Commands
 
@@ -1209,7 +1245,7 @@ The frame labels INSERT, NORMAL, VISUAL (characterwise), or VISUAL LINE (linewis
 
 **Deliberate `/` divergence from Claude Code:** NORMAL `/` hands off to **Pi's native slash commands and skills**, enters INSERT, and inserts `/` at the existing cursor. Pi offers slash completion only at the start of the first line; elsewhere it inserts a literal slash without moving or replacing the draft. There is **no reverse prompt-history search**. Pi's explicit history shortcuts still work, transferring to INSERT first. Unknown NORMAL printable input, encoded text and bracketed paste do not silently insert; application shortcuts can transfer to INSERT before acting.
 
-This is a bounded command subset, not full Claude Code/Vim parity. The private editor adapter supports only the audited Pi coding-agent/TUI `0.99.1`, `0.99.2`, `1.0.0`, and `1.1.0` package pairs. The two 0.99 releases have byte-identical editor and undo-stack sources. Pi 1.0.0 and 1.1.0 are separately audited against the touched state, paste/history, cursor/layout, autocomplete and undo-snapshot contracts; current bundled and unbundled 1.1.0 tests prove identity, edit/undo, paste, selection, wrapping/scroll and autocomplete behavior, not old/new byte identity. Fabricated metadata tests preserve exact-version admission coverage for the older audited releases. Version metadata must come from a canonical candidate host package root whose actual `CustomEditor` and `Editor` classes match the loaded classes, never from the extension's local metadata or CLI path alone. Unknown versions, mismatched prototypes, or invalid layouts fail closed: a single compatibility warning is shown and the prompt continues with ordinary editing instead of silently entering inert NORMAL mode. Operations that would cross a registered collapsed paste marker, or encounter duplicate occurrences of a registered marker ID, are rejected without editing it. Visual highlighting relies on Pi's render layout and may be omitted if its geometry cannot be validated. No live-terminal proof of every layout or complete parity is claimed.
+This is a bounded command subset, not full Claude Code/Vim parity. The private editor adapter supports only the audited Pi coding-agent/TUI `0.99.1`, `0.99.2`, `1.0.0`, `1.1.0`, and `1.2.0` package pairs. The two 0.99 releases have byte-identical editor and undo-stack sources. Pi 1.0.0, 1.1.0 and 1.2.0 are separately audited against the touched state, paste/history, cursor/layout, autocomplete and undo-snapshot contracts. Pi 1.2.0's paired APC fake-cursor markers remain intact so the host can suppress software cursors when hardware cursors are visible; selection inversion and empty-prompt hints support both these markers and legacy SGR cursors. Current bundled and unbundled 1.2.0 tests prove identity, edit/undo, paste, selection, wrapping/scroll and autocomplete behavior, not old/new byte identity. Fabricated metadata tests preserve exact-version admission coverage for the older audited releases. Version metadata must come from a canonical candidate host package root whose actual `CustomEditor` and `Editor` classes match the loaded classes, never from the extension's local metadata or CLI path alone. Unknown versions, mismatched prototypes, or invalid layouts fail closed: a single compatibility warning is shown and the prompt continues with ordinary editing instead of silently entering inert NORMAL mode. Operations that would cross a registered collapsed paste marker, or encounter duplicate occurrences of a registered marker ID, are rejected without editing it. Visual highlighting relies on Pi's render layout and may be omitted if its geometry cannot be validated. No live-terminal proof of every layout or complete parity is claimed.
 
 Startup banner settings remain global in `banner.json` under `GENTLE_PI_CONFIG_HOME` (default `~/.pi/gentle-ai`). Existing `showRose` and `showTextLogo` opt-outs independently control the main startup artwork; both default to enabled. Changes apply on the next session or `/reload`. Color presets are `pink` (default), `cyan`, `yellow`, and `green`. The static sidebar heading is independent of these preferences and follows the active theme.
 
