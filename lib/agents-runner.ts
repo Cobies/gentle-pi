@@ -313,8 +313,13 @@ export function validateSpecializationSandbox(agent: AgentDefinition, specializa
 // The --tools value, or undefined when Pi keeps its default tools.
 function requestedTools(request: TaskRequest): string | undefined {
 	const extraTools = request.specialization?.extraTools ?? [];
+	// If base agent tools are empty and extraTools are present, we don't know Pi's full
+	// built-in tool suite, but we must not replace it unless extraTools is explicitly combined.
+	// However, if tools were defined on request.agent.tools, we merge them with extraTools.
 	const hasTools = request.agent.tools.length > 0 || extraTools.length > 0;
-	const tools = hasTools ? [...new Set([...request.agent.tools, ...extraTools, PARENT_NOTIFICATION_TOOL])] : DEFAULT_TOOLS;
+	if (!hasTools) return undefined;
+	const baseTools = request.agent.tools.length > 0 ? request.agent.tools : DEFAULT_TOOLS;
+	const tools = [...new Set([...baseTools, ...extraTools, PARENT_NOTIFICATION_TOOL])];
 	return tools.length > 0 ? tools.join(",") : undefined;
 }
 

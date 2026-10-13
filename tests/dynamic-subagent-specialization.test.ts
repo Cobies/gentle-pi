@@ -375,3 +375,37 @@ test("large base instructions or large specialization overlay triggers instructi
 	assert.ok(composedOverlayPrompt.includes("## DYNAMIC SPECIALIZATION OVERLAY"));
 	assert.ok(composedOverlayPrompt.includes("Heavy Overlay"));
 });
+
+test("AgentRunner.launch with oversized composed prompt writes instructions file and passes argument", () => {
+	let spawnedCommand = "";
+	let spawnedArgs: string[] = [];
+	const fake = fakeChild();
+	const deps: RunnerDeps = {
+		spawn: (cmd, args) => {
+			spawnedCommand = cmd;
+			spawnedArgs = args;
+			return fake.child;
+		},
+		now: () => 1000,
+		schedule: () => () => {},
+		pi: { command: "pi", args: [] },
+	};
+	const runner = new AgentRunner(new TaskStore(), { maxConcurrency: 1, stallTimeoutMs: 10_000 }, deps, {
+		askUser: async () => ({ value: "ok" }),
+	});
+
+	const heavyReq = baseRequest({
+		specialization: {
+			label: "Heavy Overlay",
+			instructionsOverlay: "Z".repeat(1200),
+		},
+	});
+
+	runner.run(heavyReq);
+
+	const promptArgIdx = spawnedArgs.indexOf("--append-system-prompt");
+	assert.ok(promptArgIdx >= 0, "--append-system-prompt must be present");
+	const filePath = spawnedArgs[promptArgIdx + 1];
+	assert.ok(filePath && filePath.endsWith("instructions.md"), `must pass instructions.md file path, got: ${filePath}`);
+});
+

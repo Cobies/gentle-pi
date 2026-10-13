@@ -1853,7 +1853,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 					? (specialization as { label?: unknown }).label
 					: undefined;
 				const specializationLabel = typeof rawLabel === "string"
-					? sanitizeTerminalText(rawLabel.trim()).trim()
+					? sanitizeTerminalText(rawLabel.replace(/[\r\n]+/g, " ").trim()).trim()
 					: "";
 				const agentTitle = params.agent
 					? `${params.agent}${specializationLabel ? ` ▸ [${specializationLabel}]` : ""}`
