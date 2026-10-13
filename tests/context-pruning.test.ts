@@ -365,6 +365,7 @@ test("PROTECTED_TOOL_NAMES are never pruned regardless of size or age", () => {
 		"subagent_status",
 		"subagent_list_tasks",
 		"subagent_continue",
+		"subagent_parent_message",
 		"gentle_review",
 		"gentle_review_capture",
 		"gentle_review_capture_group",
