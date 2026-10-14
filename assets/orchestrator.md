@@ -56,7 +56,7 @@ Mandatory Delegation Triggers — each mechanism turns on only by its own trigge
 2. **Evidence-budget rule** — understanding needs more than one read batch or >~5 sequential lookups → one `gentle-ai-explore`, handoff at most ~2k tokens with `path:line` evidence; one spot check only; never for reading before an inline write.
 3. **Verification rule** — high risk → independent `gentle-ai-verify` after the change's own checks (`orchestrator-verification.md`); otherwise checks run inline.
 4. **Track** — large task → feature document, Engram mirror, `todo`, work-unit commits (`orchestrator-tracking.md`, `orchestrator-memory.md`).
-5. **Writer rule** — never by file count or a large task alone; only for a reason (`orchestrator-writer.md`): 2+ independent units, disjoint files, each heavier than a subagent start, launched together in background, else inline; Context backstop.
+5. **Writer rule** — never by file count or a large task alone; only for a reason (`orchestrator-writer.md`): bounded units of a large feature with declared edit surfaces, 2+ independent units, disjoint files, each heavier than a subagent start, launched together in background, else inline; Context backstop.
 6. **Incident rule** — diagnose wrong cwd/worktree/git/tooling incidents separately before resuming.
 7. **Context backstop** — parent context past ~150k tokens → delegate the next bounded unit. Bound command output (counts, `--stat`, `tail`).
 
@@ -86,5 +86,5 @@ This package injects the mirrored provider-bundle review execution contract into
 - Never commit unless the user explicitly asks.
 - Ask before destructive git operations, publishing, or irreversible file changes.
 - Parallel writers only with disjoint Allowed edit surfaces (runtime-enforced) or isolated worktrees.
-- Keep session work inside the project root and registered same-clone worktrees; ask before any read or write outside it, naming the absolute path. Grants are per-target, per-session, never blanket: in-project scripts naming outside paths are not standing consent.
+- Keep session work inside project root and registered worktrees; ask before reads or writes outside it, naming the absolute path. Grants are per-target, per-session, never blanket.
 - Preserve human control: user decisions beat agent momentum.

@@ -95,7 +95,7 @@ const ANCHORS: readonly RoutingAnchor[] = [
 	},
 	{
 		label: "writer trigger fires only for a named reason (gentle-shell#1731)",
-		canonical: "**Writer trigger:** a writer is delegated only for a named reason, one bounded writer per unit",
+		canonical: "**Writer trigger:** a writer is delegated for a named reason, one bounded writer per unit",
 		mirrors: [
 			{ surface: DELEGATION, includes: "Delegate one bounded writer per unit only for a named reason" },
 			{ surface: CORE, includes: "only for a reason (`orchestrator-writer.md`)" },
@@ -103,7 +103,7 @@ const ANCHORS: readonly RoutingAnchor[] = [
 	},
 	{
 		label: "writer trigger never fires on size, a large task alone, or file count",
-		canonical: "Never delegate a writer for size, a large task alone, file count, or a price ratio; file count never fires this trigger",
+		canonical: "Never delegate a writer for size alone, file count, or a price ratio; file count never fires this trigger",
 		mirrors: [
 			{ surface: DELEGATION, includes: "**Writer trigger (Writer rule):** a large task alone never delegates, and file count never fires this trigger" },
 			{ surface: CORE, includes: "**Writer rule** — never by file count or a large task alone" },
