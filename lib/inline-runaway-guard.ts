@@ -5,8 +5,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export const READ_THRASHING_THRESHOLD = 5;
-export const EXPLORE_READ_BUDGET_THRESHOLD = 5;
+export const EXPLORE_READ_BUDGET_THRESHOLD = 4;
 export const TURN_TOOL_CALL_LIMIT = 25;
+
+/**
+ * Resolves current context tokens accurately, handling edge cases where
+ * `ctx.getContextUsage()` returns null (e.g. post-compaction or unmeasured proxy models)
+ * by falling back to the last recorded assistant message usage on the session branch.
+ */
+export function resolveCurrentContextTokens(ctx: {
+	getContextUsage?: () => { tokens: number | null } | undefined;
+	sessionManager?: { getBranch?: () => Array<{ type: string; message?: unknown }> };
+}): number | undefined {
+	const usageTokens = ctx.getContextUsage?.()?.tokens;
+	if (typeof usageTokens === "number" && usageTokens > 0) {
+		return usageTokens;
+	}
+	try {
+		const branch = ctx.sessionManager?.getBranch?.();
+		if (Array.isArray(branch)) {
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const entry = branch[i];
+				if (entry && entry.type === "message" && entry.message && typeof entry.message === "object") {
+					const msg = entry.message as {
+						role?: string;
+						usage?: { totalTokens?: number; input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+					};
+					if (msg.role === "assistant" && msg.usage) {
+						const total =
+							msg.usage.totalTokens ||
+							((msg.usage.input ?? 0) + (msg.usage.output ?? 0) + (msg.usage.cacheRead ?? 0) + (msg.usage.cacheWrite ?? 0));
+						if (total > 0) return total;
+					}
+				}
+			}
+		}
+	} catch {
+		// safe fallback
+	}
+	return undefined;
+}
 
 /**
  * Rejects direct inline code mutations (edit/write) when the primary session's
