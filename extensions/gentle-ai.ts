@@ -4,6 +4,7 @@ import { dataArgumentRanges, recognizeDestructiveCommands } from "../lib/destruc
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
 import { blockChildDestructiveCommand } from "./child-safety.ts";
 import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, isHomeOrBroadUserDirectory, prepareBoundSessionRepository, rejectUndocumentedWriterLaunch, rejectUnscopedBoundedWriterDispatch, resolveTargetRepositoryRoot, safeBootstrapDirectory, sourcePathWithinProject, tryNormalizeInRepoAbsolutePath } from "../lib/bounded-writer-admission.ts";
+import { EvidenceBudgetGuard, ReadThrashingGuard, TurnToolCallGuard, rejectContextBackstopInlineMutation } from "../lib/inline-runaway-guard.ts";
 import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProfiles, recordReviewMutation, type ReceiptSession } from "../lib/review-reminder-receipt.ts";
 import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
 import { StatusTimingDiagnostics } from "../lib/status-timing-diagnostics.ts";
@@ -9643,6 +9644,9 @@ function createGentleAiExtensionForTesting(
 	const resolveTelemetryTriggerBinary = dependencies.resolveTelemetryTriggerBinary ?? resolveGentleAiBinary;
 	const telemetryExecFileAdapter = dependencies.telemetryExecFileAdapter ?? createNodeExecFileAdapter();
 	return function gentleAi(pi: ExtensionAPI): void {
+	const evidenceBudgetGuard = new EvidenceBudgetGuard();
+	const readThrashingGuard = new ReadThrashingGuard();
+	const turnToolCallGuard = new TurnToolCallGuard();
 	declareReviewRelayHandshake(dependencies.processEnv ?? process.env);
 	const pendingReviewConsentFallbackKey = Symbol("pending-review-consent-fallback");
 	const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
@@ -10210,6 +10214,11 @@ function createGentleAiExtensionForTesting(
 		const isNamedAgent = isNamedAgentStartEvent(event);
 		const isChildSession = permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1";
 		const isPrimarySession = !isNamedAgent && !isChildSession;
+		if (isPrimarySession) {
+			evidenceBudgetGuard.reset();
+			readThrashingGuard.reset();
+			turnToolCallGuard.reset();
+		}
 		const subagentDepthKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
 		if (isNamedAgent || isChildSession) {
 			processAgentEndSubagentDepth.set(subagentDepthKey, (processAgentEndSubagentDepth.get(subagentDepthKey) ?? 0) + 1);
@@ -10295,6 +10304,9 @@ function createGentleAiExtensionForTesting(
 	// consent, or chooses a partial candidate. Durable own-mutation receipts
 	// gate STATUS and consume only the generation captured before that await.
 	pi.on("agent_end", async (_event, ctx) => {
+		evidenceBudgetGuard.reset();
+		readThrashingGuard.reset();
+		turnToolCallGuard.reset();
 		if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") return;
 		if (nativeReviewCli?.reviewMode === undefined || nativeReviewCli.targetStatus === undefined) return;
 		if (ctx.hasUI !== true || !reminderSessionActive) return;
@@ -10352,6 +10364,11 @@ function createGentleAiExtensionForTesting(
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
+		if (event.isError === false && (event.toolName === "write" || event.toolName === "edit")) {
+			if (isRecord(event.input) && typeof event.input.path === "string") {
+				readThrashingGuard.recordMutation(event.input.path);
+			}
+		}
 		if (!reminderSessionActive || (reminderManager && reminderManager !== ctx.sessionManager) || event.isError !== false || (event.toolName !== "write" && event.toolName !== "edit")) return;
 		if (!isRecord(event.input) || typeof event.input.path !== "string" || !event.input.path.trim()) return;
 		try {
@@ -10367,6 +10384,18 @@ function createGentleAiExtensionForTesting(
 
 	pi.on("tool_call", async (event, ctx) => {
 		const primaryToolCall = permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1" && (processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) === 0;
+		if (primaryToolCall) {
+			const contextBackstopDenied = rejectContextBackstopInlineMutation(event, {
+				contextTokens: ctx.getContextUsage?.()?.tokens,
+			});
+			if (contextBackstopDenied) return contextBackstopDenied;
+			const evidenceBudgetDenied = evidenceBudgetGuard.checkRead(event);
+			if (evidenceBudgetDenied) return evidenceBudgetDenied;
+			const readThrashingDenied = readThrashingGuard.checkRead(event);
+			if (readThrashingDenied) return readThrashingDenied;
+			const turnBudgetDenied = turnToolCallGuard.checkCall(event);
+			if (turnBudgetDenied) return turnBudgetDenied;
+		}
 		const yoloActive = primaryToolCall && await yolo.active(ctx);
 		const sensitivePathDenied = evaluateSensitivePathTool(
 			event.toolName,
@@ -10374,6 +10403,9 @@ function createGentleAiExtensionForTesting(
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
 		if (event.toolName === "subagent_run") {
+			evidenceBudgetGuard.recordDelegation();
+			readThrashingGuard.reset();
+			turnToolCallGuard.reset();
 			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input);
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
 			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(
