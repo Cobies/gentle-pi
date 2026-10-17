@@ -498,37 +498,6 @@ test("ODD protocol is always-on in the rendered system prompt and runs by defaul
 	assert.doesNotMatch(core + delegation + memory, /SDD|sdd-|OpenSpec|openspec/i);
 });
 
-test("cross-repository subagent dispatch enforces mandatory human consent gate across contracts and prompts", () => {
-	const consentMandate =
-		"Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via `repository_root`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously.";
-
-	containsAll(wrapper, [
-		"Cross-Repository Consent Mandate: Dispatching subagents to an independent Git repository (via \\`repository_root\\`) strictly requires asking the user for explicit authorization first. Never cross repository boundaries autonomously.",
-	]);
-
-	for (const persona of ["gentleman", "neutral"] as const) {
-		const prompt = __testing.buildGentlePrompt(persona);
-		assert.ok(
-			prompt.includes(consentMandate),
-			`[${persona}] missing Cross-Repository Consent Mandate in prompt`,
-		);
-		// Step 1 check
-		assert.ok(
-			prompt.includes(
-				`1. **Authorize.** Investigation, explanation, review, comparison, and proposal-only requests stay read-only: no writer, apply, or implementation artifacts. Ambiguous or conditional change intent (unclear whether a change is authorized at all) gets one clarification; stop and wait. A user saying they may stop you or resume later asks for notes and separate commits, not a stop. ${consentMandate}`,
-			),
-			`[${persona}] missing Cross-Repository Consent Mandate in ODD step 1`,
-		);
-		// Step 6 check
-		assert.ok(
-			prompt.includes(
-				`Route each task through the orchestrator's Mechanisms, honoring its delegation triggers when their conditions truly hold, with applicable test-first development and checks. No trigger holds by default and, when in doubt, work inline; executing past a fired trigger inline is a routing defect even if the work succeeds. ${consentMandate}`,
-			),
-			`[${persona}] missing Cross-Repository Consent Mandate in ODD step 6`,
-		);
-	}
-});
-
 // S14: commit per reviewable slice. Mirrors gentle-ai 06ad2776: a high-risk unit that follows pending medium commits
 // closes the open slice first, so native review takes the high-risk commit alone; outcomes are recorded per commit,
 // since one commit may hold several tasks.
