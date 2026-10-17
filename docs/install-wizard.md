@@ -59,7 +59,7 @@ it lets the window close.
 Current requirements come from `package.json` and
 [`gentle-ai-installer.mjs`](../scripts/gentle-ai-installer.mjs): Node ≥22.19.0,
 Pi ≥1.2.0, pnpm acquisition 11.1.1, Gentle Shell package 4.0.0 and package-local
-Gentle AI 4.1.1. Windows native source builds require Go ≥1.25.10 when the
+Gentle AI 4.2.0. Windows native source builds require Go ≥1.25.10 when the
 required usable native binary is missing. A reusable binary does not require Go.
 When a build needs Go and the user's Go is missing, older or unchecked, the installer uses
 its own [pinned Go](#pinned-go) instead of blocking.
@@ -787,9 +787,13 @@ publishes main builds, so main is built on this computer
      Gentleman-Programming/gentle-ai (GitHub API, raw SHA), runs
      `go install github.com/gentleman-programming/gentle-ai/v4/cmd/gentle-ai@<sha>`
      in a sealed Go environment (`GOPROXY=https://proxy.golang.org`,
-     `GOSUMDB=sum.golang.org`, `GOTOOLCHAIN=local`, `GOFLAGS=-modcacherw`), requires
-     the binary's version to end in that commit's first 12 characters, keeps it
-     under `<config home>/main/gentle-ai/<sha>/` and registers it as the
+     `GOSUMDB=sum.golang.org`, `GOTOOLCHAIN=local`, `GOFLAGS=-modcacherw`),
+     asks Go (`go list -m -json`, same environment) which module version that
+     commit is (a release tag such as `v4.2.0`, or a pseudo-version) and requires
+     its origin to be that exact commit, requires the binary to embed that module
+     version (`go version -m`) and to report it, all in the `.build` work
+     folder, and only then moves it to `<config home>/main/gentle-ai/<sha>/`
+     (a failed rebuild leaves an already registered build in place) and registers it as the
      `gentle-pi.dev-binary/v1` override, which never falls back to the pinned
      binary silently.
   2. `install-shell-main`: downloads the latest `main` commit's source tarball,
