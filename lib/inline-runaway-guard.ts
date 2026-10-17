@@ -163,19 +163,33 @@ export class ReadThrashingGuard {
  */
 export class TurnToolCallGuard {
 	private callCount = 0;
+	private budgetExceeded = false;
 
-	checkCall(event: { toolName: string }): { block: true; reason: string } | undefined {
-		// Meta-tools used for bookkeeping do not count towards runaway inline execution.
+	checkCall(event: { toolName: string; input?: unknown }): { block: true; reason: string } | undefined {
+		// Meta-tools and memory bookkeeping do not count towards runaway inline execution.
 		if (
 			event.toolName === "todo" ||
 			event.toolName === "gentle_odd_phase" ||
 			event.toolName === "orchestrator_session_id" ||
-			event.toolName === "subagent_run"
+			event.toolName === "subagent_run" ||
+			event.toolName.startsWith("mem_")
 		) {
 			return undefined;
 		}
+
+		// Editing non-development tracking surfaces (odd/tasks/*.md, docs, etc.) is bookkeeping.
+		if (
+			(event.toolName === "write" || event.toolName === "edit") &&
+			isRecord(event.input) &&
+			typeof event.input.path === "string" &&
+			!isDevelopmentSurface(event.input.path)
+		) {
+			return undefined;
+		}
+
 		this.callCount += 1;
 		if (this.callCount > TURN_TOOL_CALL_LIMIT) {
+			this.budgetExceeded = true;
 			return {
 				block: true,
 				reason: `Turn tool budget exceeded (${TURN_TOOL_CALL_LIMIT} tool calls in a single turn without delegation). Consolidate your progress in todo, summarize the outcome for the user, or delegate the next unit of work to a subagent (gentle-ai-explore or gentle-ai-worker).`,
@@ -184,7 +198,21 @@ export class TurnToolCallGuard {
 		return undefined;
 	}
 
+	isBudgetExceeded(): boolean {
+		return this.budgetExceeded || this.callCount > TURN_TOOL_CALL_LIMIT;
+	}
+
+	recordDelegation(): void {
+		this.callCount = 0;
+		this.budgetExceeded = false;
+	}
+
+	resetTurn(): void {
+		this.callCount = 0;
+	}
+
 	reset(): void {
 		this.callCount = 0;
+		this.budgetExceeded = false;
 	}
 }

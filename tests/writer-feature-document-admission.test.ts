@@ -59,6 +59,17 @@ test("S16: the measured context backstop admits a writer without a document", (t
 	assert.ok(rejectUndocumentedWriterLaunch(input, { root, contextTokens: null })?.block, "unknown context usage does not admit");
 });
 
+test("Turn budget exceeded admits a writer without a pre-existing feature document", (t) => {
+	const root = workspace(false);
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const input = { agent: "gentle-ai-worker", task: `Implement annual budgets.${surfaces}` };
+	assert.equal(
+		rejectUndocumentedWriterLaunch(input, { root, contextTokens: 20_000, turnBudgetExceeded: true }),
+		undefined,
+		"must admit worker when runaway turn budget is exceeded",
+	);
+});
+
 test("S16: previous behavior holds for non-writers and Judgment Day fix agents", (t) => {
 	const root = workspace(false);
 	t.after(() => rmSync(root, { recursive: true, force: true }));

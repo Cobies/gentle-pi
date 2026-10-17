@@ -10297,6 +10297,12 @@ function createGentleAiExtensionForTesting(
 		return undefined;
 	});
 
+	pi.on("turn_start", async (_event, _ctx) => {
+		if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1") {
+			turnToolCallGuard.resetTurn();
+		}
+	});
+
 	// gentle-pi#556 / gentle-ai#4051: with RDD enabled, the agent could finish
 	// an authorized implementation and report completion without ever running
 	// the review STATUS preflight or offering the consent question. This
@@ -10404,9 +10410,6 @@ function createGentleAiExtensionForTesting(
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
 		if (event.toolName === "subagent_run") {
-			evidenceBudgetGuard.recordDelegation();
-			readThrashingGuard.reset();
-			turnToolCallGuard.reset();
 			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input);
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
 			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(
@@ -10419,9 +10422,13 @@ function createGentleAiExtensionForTesting(
 				const selected = [launch.workspace_root, launch.repository_root].find((value): value is string => typeof value === "string" && value.trim() !== "");
 				const root = selected ? resolve(ctx.cwd, selected) : ctx.cwd;
 				const contextTokens = resolveCurrentContextTokens(ctx);
-				const undocumentedWriter = rejectUndocumentedWriterLaunch(event.input, { root, contextTokens });
+				const turnBudgetExceeded = turnToolCallGuard.isBudgetExceeded();
+				const undocumentedWriter = rejectUndocumentedWriterLaunch(event.input, { root, contextTokens, turnBudgetExceeded });
 				if (undocumentedWriter) return undocumentedWriter;
 			}
+			evidenceBudgetGuard.recordDelegation();
+			readThrashingGuard.reset();
+			turnToolCallGuard.recordDelegation();
 			try {
 				injectReviewCandidateView(event.input, candidateViews);
 				return undefined;

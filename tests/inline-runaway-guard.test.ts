@@ -128,18 +128,37 @@ test("TurnToolCallGuard bounds runaway turns without delegation", () => {
 		assert.equal(guard.checkCall({ toolName: "bash" }), undefined);
 	}
 
+	assert.equal(guard.isBudgetExceeded(), false);
+
 	// Next call: blocked
 	const blocked = guard.checkCall({ toolName: "bash" });
 	assert.ok(blocked?.block, "should block call exceeding limit");
 	assert.match(blocked.reason, /Turn tool budget exceeded/);
+	assert.equal(guard.isBudgetExceeded(), true);
 
-	// Meta-tools do not count and are never blocked
+	// Meta-tools and memory do not count and are never blocked
 	assert.equal(guard.checkCall({ toolName: "todo" }), undefined);
 	assert.equal(guard.checkCall({ toolName: "gentle_odd_phase" }), undefined);
+	assert.equal(guard.checkCall({ toolName: "mem_save", input: { title: "x", content: "y" } }), undefined);
 
-	// Reset restores budget
+	// Non-development tracking docs/tasks do not count and are never blocked
+	assert.equal(guard.checkCall({ toolName: "write", input: { path: "odd/tasks/feature.md", content: "# Spec" } }), undefined);
+	assert.equal(guard.checkCall({ toolName: "edit", input: { path: "docs/readme.md" } }), undefined);
+
+	// ResetTurn resets callCount but keeps isBudgetExceeded sticky until delegation
+	guard.resetTurn();
+	assert.equal(guard.isBudgetExceeded(), true);
+	// In the new turn, normal calls are permitted up to limit
+	assert.equal(guard.checkCall({ toolName: "bash" }), undefined);
+
+	// Delegating clears the exceeded state
+	guard.recordDelegation();
+	assert.equal(guard.isBudgetExceeded(), false);
+
+	// Reset restores budget completely
 	guard.reset();
 	assert.equal(guard.checkCall({ toolName: "bash" }), undefined);
+	assert.equal(guard.isBudgetExceeded(), false);
 });
 
 test("Gentle AI tool_call hook intercepts context backstop, evidence budget, and read thrashing live", async (t) => {

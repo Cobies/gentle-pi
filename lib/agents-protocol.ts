@@ -222,9 +222,9 @@ function terminalAssistant(messages: unknown): Omit<AgentEndEvent, "type"> {
 		if (stopReason === "error") return { text: "", outcome: "error", diagnostic: "assistant reported an error" };
 		if (stopReason === "aborted") return { text: "", outcome: "aborted", diagnostic: "assistant aborted" };
 		const text = contentText(message.content);
-		return text.length > 0
-			? { text, outcome: "success" }
-			: { text: "", outcome: "empty", diagnostic: "assistant returned no final report" };
+		if (text.length > 0) return { text, outcome: "success" };
+		// If the trailing assistant message has no text (e.g. tool call or empty turn),
+		// continue scanning backward to recover earlier findings instead of failing immediately.
 	}
 	return { text: "", outcome: "empty", diagnostic: "assistant returned no final report" };
 }

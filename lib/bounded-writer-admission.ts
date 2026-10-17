@@ -245,7 +245,7 @@ export const WRITER_CONTEXT_BACKSTOP_TOKENS = 150_000;
 // Do T2; S3.`), and comma-free forms (`.md T1 S1;`). A mention inside prose does not start the line.
 const FEATURE_DOCUMENT_TASK = /^[ \t]*(?:[-*+][ \t]+)?Spec:[ \t]*`?(odd\/tasks\/[^\s,`()]+\.md)`?[^\n]*?\bT\d+\b/gm;
 export const WRITER_FEATURE_DOCUMENT_REJECTION =
-	"Writers run only for a task of an existing ODD feature document (`Spec: odd/tasks/<feature>.md, T<n>` in the task) or when your measured context reaches the context backstop. This unit has neither: write this unit inline yourself now; do not retry the launch, and never create a feature document only to launch writers.";
+	"Writers run only for a task of an existing ODD feature document (`Spec: odd/tasks/<feature>.md, T<n>` in the task), or when turn tool budget is exceeded, or when your measured context reaches the context backstop. If this unit is a small task, write this unit inline yourself now; do not retry the launch, and never create a feature document only to launch writers for small tasks. For large tasks, initialize the ODD feature document under odd/tasks/ first.";
 
 function featureDocumentExists(root: string, relativePath: string): boolean {
 	// Resolve symlinks on both sides so a document linked from outside the root, or an odd/tasks directory linked
@@ -264,7 +264,11 @@ function featureDocumentExists(root: string, relativePath: string): boolean {
 
 export function rejectUndocumentedWriterLaunch(
 	input: unknown,
-	options: { root: string; contextTokens: number | null | undefined },
+	options: {
+		root: string;
+		contextTokens: number | null | undefined;
+		turnBudgetExceeded?: boolean;
+	},
 ): { block: true; reason: string } | undefined {
 	if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
 	const record = input as Record<string, unknown>;
@@ -276,6 +280,7 @@ export function rejectUndocumentedWriterLaunch(
 		}
 	}
 	if (typeof options.contextTokens === "number" && options.contextTokens >= WRITER_CONTEXT_BACKSTOP_TOKENS) return undefined;
+	if (options.turnBudgetExceeded === true) return undefined;
 	return { block: true, reason: WRITER_FEATURE_DOCUMENT_REJECTION };
 }
 
