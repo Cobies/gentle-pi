@@ -14,6 +14,7 @@ import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProf
 import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
 import { StatusTimingDiagnostics } from "../lib/status-timing-diagnostics.ts";
 import { isOddPhase, oddPhaseRegistry, ODD_PHASES } from "../lib/odd-phase.ts";
+import { inspectMcpConfigStatus, removeBuiltinMcpExclusion } from "../lib/mcp-config-guard.ts";
 import { shellEnabled } from "../lib/shell-bar.ts";
 import { resolveSessionWorktree } from "../lib/session-worktree-registry.ts";
 import { declareReviewRelayHandshake } from "../lib/review-relay-contract.ts";
@@ -10265,6 +10266,17 @@ function createGentleAiExtensionForTesting(
 					"info",
 				);
 			}
+
+			// Proactively check if built-in MCP is disabled while servers are configured.
+			if (ctx.hasUI) {
+				const mcpStatus = inspectMcpConfigStatus();
+				if (mcpStatus.isBuiltinMcpExcluded && mcpStatus.hasConfiguredServers) {
+					ctx.ui.notify(
+						`el Gentleman warning: Pi built-in MCP is disabled (-builtin:mcp in settings.json). Configured MCP servers (${mcpStatus.serverCount}) and the /mcp command are inactive. Run /gentle:mcp-repair to restore them.`,
+						"warning",
+					);
+				}
+			}
 		} catch (error) {
 			if (ctx.hasUI) {
 				const message =
@@ -10680,6 +10692,7 @@ function createGentleAiExtensionForTesting(
 			const modelConfig = await readSavedModelConfigAsync(ctx.cwd);
 			const engramActive = hasWritableEngramTool(pi);
 			const devBinary = await describeDevBinaryOverride();
+			const mcpStatus = inspectMcpConfigStatus();
 			const lines = [
 				"el Gentleman doctor",
 				...assetLines,
@@ -10688,6 +10701,9 @@ function createGentleAiExtensionForTesting(
 				`${modelConfig.status === "invalid" ? "fail" : "pass"}: Global model config ${modelConfig.status}`,
 				"pass: Sensitive-path guard active for read/write/edit tools",
 				`${engramActive ? "pass" : "warn"}: Engram memory tools ${engramActive ? "active" : "not active in this session"}`,
+				...(mcpStatus.isBuiltinMcpExcluded && mcpStatus.hasConfiguredServers
+					? ["fail: Pi built-in MCP is disabled (-builtin:mcp in settings.json) while mcp.json defines servers", `remedy: run /gentle:mcp-repair or remove "-builtin:mcp" from ${mcpStatus.settingsPath}`]
+					: ["pass: Pi built-in MCP runtime configuration healthy"]),
 				...(devBinary.state === "active" ? [`warn: ${devBinary.line}`] : []),
 				...(devBinary.state === "invalid" ? [`fail: ${devBinary.line}`, "remedy: fix the dev binary override or clear it with /gentle:dev-binary off (or unset GENTLE_PI_GENTLE_AI_DEV_BINARY)"] : []),
 			];
@@ -10702,6 +10718,26 @@ function createGentleAiExtensionForTesting(
 				lines.join("\n"),
 				lines.some((line) => line.startsWith("fail:")) || assetLines.some((line) => line.startsWith("warn:")) ? "warning" : "info",
 			);
+		},
+	});
+
+	pi.registerCommand("gentle:mcp-repair", {
+		description: "Check and repair Pi built-in MCP configuration (removes -builtin:mcp from settings.json).",
+		handler: async (_args, ctx) => {
+			const status = inspectMcpConfigStatus();
+			if (!status.isBuiltinMcpExcluded) {
+				ctx.ui.notify("Pi built-in MCP is not excluded in settings.json. Configuration is healthy.", "info");
+				return;
+			}
+			const fixed = removeBuiltinMcpExclusion();
+			if (fixed) {
+				ctx.ui.notify(
+					`Removed "-builtin:mcp" from ${status.settingsPath}. Please run /reload or restart Pi to re-enable MCP servers and the /mcp command.`,
+					"info",
+				);
+			} else {
+				ctx.ui.notify(`Failed to automatically update ${status.settingsPath}. Please remove "-builtin:mcp" manually.`, "error");
+			}
 		},
 	});
 
