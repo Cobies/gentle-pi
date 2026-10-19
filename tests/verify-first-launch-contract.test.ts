@@ -126,18 +126,14 @@ test("T17b: the core Evidence-budget rule never fires to prepare an inline write
 	assert.ok(rule.includes("never for reading before an inline write"), "Evidence-budget rule must exclude reading for an inline write");
 });
 
-test("T17: the always-on Explore step delegates codebase exploration to gentle-ai-explore", () => {
+test("T17: the always-on Explore step delegates exploration only for a map the parent needs", () => {
 	for (const persona of ["gentleman", "neutral"] as const) {
 		const prompt = __testing.buildGentlePrompt(persona);
 		const step = prompt.split("\n").find((line) => line.startsWith("2. **Explore.**"));
 		assert.ok(step, "ODD step 2 Explore is missing");
-		assert.ok(
-			step.includes("Codebase exploration across multiple files, architecture, or code flow MUST be delegated to gentle-ai-explore"),
-			"ODD Explore step must mandate delegation to gentle-ai-explore",
-		);
-		assert.ok(
-			step.includes("When understanding is not immediately obvious within 1-2 targeted reads, do not continue inline: stop and delegate to gentle-ai-explore."),
-			"ODD Explore step must stop inline drift after 1-2 targeted reads",
-		);
+		containsAll(step, [
+			"Do not delegate exploration of files you will read anyway to work inline",
+			"explore only for a map you need to decide or route",
+		], "ODD Explore step");
 	}
 });
