@@ -7,6 +7,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export const READ_THRASHING_THRESHOLD = 5;
 export const EXPLORE_READ_BUDGET_THRESHOLD = 4;
 export const TURN_TOOL_CALL_LIMIT = 25;
+export const SUBAGENT_POLL_LIMIT = 2;
 
 /**
  * Resolves current context tokens accurately, handling edge cases where
@@ -84,28 +85,71 @@ export class EvidenceBudgetGuard {
 	private totalReads = 0;
 
 	checkRead(event: { toolName: string; input: unknown }): { block: true; reason: string } | undefined {
-		if (event.toolName !== "read") return undefined;
-		if (!isRecord(event.input) || typeof event.input.path !== "string") return undefined;
+		return this.checkExploration(event);
+	}
 
-		const normalized = event.input.path.replace(/\\/g, "/");
-		// Ignore reading tracking/odd tasks, documentation, non-development surfaces, or tests
-		if (
-			normalized.startsWith("odd/") ||
-			normalized.startsWith("docs/") ||
-			normalized.endsWith(".md") ||
-			!isDevelopmentSurface(normalized) ||
-			/(?:^|\/)(?:tests?|__tests?__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(normalized)
-		) {
+	checkExploration(event: { toolName: string; input: unknown }): { block: true; reason: string } | undefined {
+		// Handle read tool calls
+		if (event.toolName === "read") {
+			if (!isRecord(event.input) || typeof event.input.path !== "string") return undefined;
+
+			const normalized = event.input.path.replace(/\\/g, "/");
+			// Ignore reading tracking/odd tasks, documentation, non-development surfaces, or tests
+			if (
+				normalized.startsWith("odd/") ||
+				normalized.startsWith("docs/") ||
+				normalized.endsWith(".md") ||
+				!isDevelopmentSurface(normalized) ||
+				/(?:^|\/)(?:tests?|__tests?__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(normalized)
+			) {
+				return undefined;
+			}
+
+			this.distinctReads.add(normalized);
+			this.totalReads += 1;
+		} else if (event.toolName === "grep") {
+			if (!isRecord(event.input)) return undefined;
+			const targetPath = typeof event.input.path === "string" ? event.input.path.replace(/\\/g, "/") : "";
+			if (targetPath.startsWith("odd/") || targetPath.startsWith("docs/") || targetPath.endsWith(".md")) {
+				return undefined;
+			}
+			const pattern = typeof event.input.pattern === "string" ? event.input.pattern : "grep";
+			this.distinctReads.add(`grep:${pattern}:${targetPath}`);
+			this.totalReads += 1;
+		} else if (event.toolName === "find") {
+			if (!isRecord(event.input)) return undefined;
+			const targetPath = typeof event.input.path === "string" ? event.input.path.replace(/\\/g, "/") : "";
+			if (targetPath.startsWith("odd/") || targetPath.startsWith("docs/")) return undefined;
+			const pattern = typeof event.input.pattern === "string" ? event.input.pattern : "find";
+			this.distinctReads.add(`find:${pattern}:${targetPath}`);
+			this.totalReads += 1;
+		} else if (event.toolName === "bash") {
+			if (!isRecord(event.input) || typeof event.input.command !== "string") return undefined;
+			const cmd = event.input.command.trim();
+
+			// Intercept internal session JSONL or temp edit artifacts introspection loops
+			if (/(?:\.pi\/agent\/sessions|\/tmp\/edit_[\w.-]+\.json)/.test(cmd)) {
+				return {
+					block: true,
+					reason: `Session introspection blocked: Do not inspect internal session JSONL or temp edit artifacts via bash. Focus on the requested task or delegate to gentle-ai-explore or gentle-ai-worker.`,
+				};
+			}
+
+			// Intercept shell-based code searches (git grep, git log, git show, cat, sed -n)
+			if (/\b(?:git\s+(?:grep|log|show)|grep\s+|find\s+|cat\s+|sed\s+-n)\b/.test(cmd) && !/\b(?:odd\/|docs\/|\.md\b)/.test(cmd)) {
+				this.distinctReads.add(`bash:${cmd.slice(0, 45)}`);
+				this.totalReads += 1;
+			} else {
+				return undefined;
+			}
+		} else {
 			return undefined;
 		}
-
-		this.distinctReads.add(normalized);
-		this.totalReads += 1;
 
 		if (this.distinctReads.size > EXPLORE_READ_BUDGET_THRESHOLD || this.totalReads > EXPLORE_READ_BUDGET_THRESHOLD + 2) {
 			return {
 				block: true,
-				reason: `Evidence-budget rule triggered: You have performed ${this.totalReads} sequential reads across ${this.distinctReads.size} source files inline. Codebase exploration across multiple files MUST be delegated to gentle-ai-explore to protect parent reasoning context. Stop inline reading and delegate exploration now.`,
+				reason: `Evidence-budget rule triggered: You have performed ${this.totalReads} sequential exploration lookups across ${this.distinctReads.size} sources inline. Codebase exploration across multiple files MUST be delegated to gentle-ai-explore to protect parent reasoning context. Stop inline reading/searching and delegate exploration now.`,
 			};
 		}
 		return undefined;
@@ -228,5 +272,40 @@ export class TurnToolCallGuard {
 	reset(): void {
 		this.callCount = 0;
 		this.budgetExceeded = false;
+	}
+}
+
+/**
+ * Bounds reactive polling loops where the parent orchestrator repeatedly checks
+ * subagent_status or subagent_result in the same turn instead of waiting for
+ * the background completion notification event.
+ */
+export class SubagentPollingGuard {
+	private pollCount = 0;
+
+	checkPoll(event: { toolName: string; input?: unknown }): { block: true; reason: string } | undefined {
+		if (event.toolName !== "subagent_status" && event.toolName !== "subagent_result") {
+			return undefined;
+		}
+		this.pollCount += 1;
+		if (this.pollCount > SUBAGENT_POLL_LIMIT) {
+			return {
+				block: true,
+				reason: `Subagent polling blocked: Do not poll subagent_status or subagent_result in a tight loop (${this.pollCount} calls this turn). End your turn and wait for the completion notification event, or launch subagents with mode: "task" for synchronous delegation.`,
+			};
+		}
+		return undefined;
+	}
+
+	resetTurn(): void {
+		this.pollCount = 0;
+	}
+
+	recordDelegation(): void {
+		this.pollCount = 0;
+	}
+
+	reset(): void {
+		this.pollCount = 0;
 	}
 }

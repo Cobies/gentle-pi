@@ -9,7 +9,7 @@ import { appendContextBackstopNotice, createContextBackstopSignal } from "../lib
 import { blockChildDestructiveCommand } from "./child-safety.ts";
 import { allowedEditSurfaces as hasTaskScopedAllowedEditSurfaces, bindSessionRepositoryPreparation, captureBoundSessionRepositoryAuthority, isHomeOrBroadUserDirectory, prepareBoundSessionRepository, rejectUndocumentedWriterLaunch, rejectUnscopedBoundedWriterDispatch, resolveTargetRepositoryRoot, safeBootstrapDirectory, sourcePathWithinProject, tryNormalizeInRepoAbsolutePath } from "../lib/bounded-writer-admission.ts";
 import { rejectUnriskedVerifierLaunch } from "../lib/verifier-admission.ts";
-import { EvidenceBudgetGuard, ReadThrashingGuard, TurnToolCallGuard, rejectContextBackstopInlineMutation, resolveCurrentContextTokens } from "../lib/inline-runaway-guard.ts";
+import { EvidenceBudgetGuard, ReadThrashingGuard, SubagentPollingGuard, TurnToolCallGuard, rejectContextBackstopInlineMutation, resolveCurrentContextTokens } from "../lib/inline-runaway-guard.ts";
 import { consumeReviewMutation, pendingReviewMutation, pendingReviewMutationProfiles, recordReviewMutation, type ReceiptSession } from "../lib/review-reminder-receipt.ts";
 import { createReviewSidebarPublisher } from "../lib/review-sidebar-state.ts";
 import { StatusTimingDiagnostics } from "../lib/status-timing-diagnostics.ts";
@@ -9723,6 +9723,7 @@ function createGentleAiExtensionForTesting(
 	const evidenceBudgetGuard = new EvidenceBudgetGuard();
 	const readThrashingGuard = new ReadThrashingGuard();
 	const turnToolCallGuard = new TurnToolCallGuard();
+	const subagentPollingGuard = new SubagentPollingGuard();
 	declareReviewRelayHandshake(dependencies.processEnv ?? process.env);
 	const pendingReviewConsentFallbackKey = Symbol("pending-review-consent-fallback");
 	const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
@@ -10389,6 +10390,7 @@ function createGentleAiExtensionForTesting(
 			turnToolCallGuard.resetTurn();
 			evidenceBudgetGuard.resetTurn();
 			readThrashingGuard.resetTurn();
+			subagentPollingGuard.resetTurn();
 		}
 	});
 
@@ -10513,6 +10515,8 @@ function createGentleAiExtensionForTesting(
 			if (evidenceBudgetDenied) return evidenceBudgetDenied;
 			const readThrashingDenied = readThrashingGuard.checkRead(event);
 			if (readThrashingDenied) return readThrashingDenied;
+			const subagentPollingDenied = subagentPollingGuard.checkPoll(event);
+			if (subagentPollingDenied) return subagentPollingDenied;
 			const turnBudgetDenied = turnToolCallGuard.checkCall(event);
 			if (turnBudgetDenied) return turnBudgetDenied;
 		}
@@ -10552,6 +10556,7 @@ function createGentleAiExtensionForTesting(
 			evidenceBudgetGuard.recordDelegation();
 			readThrashingGuard.reset();
 			turnToolCallGuard.recordDelegation();
+			subagentPollingGuard.recordDelegation();
 			try {
 				injectReviewCandidateView(event.input, candidateViews);
 				return undefined;

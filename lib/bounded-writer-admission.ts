@@ -292,6 +292,14 @@ export function rejectUndocumentedWriterLaunch(
 	if (contextBackstopReached(options.contextUsage, options.env)) return undefined;
 	if (typeof options.contextTokens === "number" && options.contextTokens >= WRITER_CONTEXT_BACKSTOP_TOKENS) return undefined;
 	if (options.turnBudgetExceeded === true) return undefined;
+	// Multi-surface tasks (3+ distinct development surfaces) explicitly scoped via ## Allowed edit surfaces
+	// are substantial units that should be delegated to prevent catastrophic orchestrator context inflation.
+	if (typeof record.task === "string") {
+		const surfaces = allowedEditSurfaces(record.task);
+		if (surfaces && surfaces.filter(isDevelopmentSurface).length >= 3) {
+			return undefined;
+		}
+	}
 	return { block: true, reason: WRITER_FEATURE_DOCUMENT_REJECTION };
 }
 

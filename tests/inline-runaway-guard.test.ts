@@ -12,6 +12,7 @@ import {
 	READ_THRASHING_THRESHOLD,
 	ReadThrashingGuard,
 	rejectContextBackstopInlineMutation,
+	SubagentPollingGuard,
 	TURN_TOOL_CALL_LIMIT,
 	TurnToolCallGuard,
 } from "../lib/inline-runaway-guard.ts";
@@ -231,4 +232,52 @@ test("Gentle AI tool_call hook intercepts context backstop, evidence budget, and
 	await turnStart({}, ctxNormal);
 	const allowedNextTurn = await toolCall({ toolName: "read", input: { path: "src/file6.ts" } }, ctxNormal);
 	assert.equal(allowedNextTurn, undefined, "turn_start must reset evidence budget for next turn");
+});
+
+test("EvidenceBudgetGuard audits grep, find and bash code searches and blocks session introspection", () => {
+	const guard = new EvidenceBudgetGuard();
+
+	// Session introspection in bash is blocked immediately
+	const introspectionBlocked = guard.checkRead({
+		toolName: "bash",
+		input: { command: "python3 -c 'import json; p = \"/home/user/.pi/agent/sessions/abc.jsonl\"'" },
+	});
+	assert.ok(introspectionBlocked?.block, "must block bash inspecting session jsonl");
+	assert.match(introspectionBlocked.reason, /Session introspection blocked/);
+
+	const editArtifactBlocked = guard.checkRead({
+		toolName: "bash",
+		input: { command: "cat /tmp/edit_476_0.json" },
+	});
+	assert.ok(editArtifactBlocked?.block, "must block bash reading temp edit artifact");
+
+	// Grep and bash code searches count towards evidence budget
+	const freshGuard = new EvidenceBudgetGuard();
+	assert.equal(freshGuard.checkRead({ toolName: "grep", input: { pattern: "borrador", path: "src/app/" } }), undefined);
+	assert.equal(freshGuard.checkRead({ toolName: "find", input: { pattern: "*.service.ts", path: "src/app/" } }), undefined);
+	assert.equal(freshGuard.checkRead({ toolName: "bash", input: { command: "git grep -n 'canProcessOC' src/app/" } }), undefined);
+	assert.equal(freshGuard.checkRead({ toolName: "bash", input: { command: "git log -n 5 internal/ports.go" } }), undefined);
+
+	// 5th distinct exploration call: blocked (> 4 distinct threshold)
+	const blocked = freshGuard.checkRead({ toolName: "read", input: { path: "src/app/core/pedido.ts" } });
+	assert.ok(blocked?.block, "must block 5th exploration call (> 4 distinct threshold)");
+	assert.match(blocked.reason, /Evidence-budget rule triggered/);
+});
+
+test("SubagentPollingGuard bounds reactive status polling loops in a turn", () => {
+	const guard = new SubagentPollingGuard();
+
+	// Up to limit (2 calls): permitted
+	assert.equal(guard.checkPoll({ toolName: "subagent_status", input: { task_id: "t1" } }), undefined);
+	assert.equal(guard.checkPoll({ toolName: "subagent_result", input: { task_id: "t1" } }), undefined);
+
+	// 3rd call: blocked
+	const blocked = guard.checkPoll({ toolName: "subagent_status", input: { task_id: "t1" } });
+	assert.ok(blocked?.block, "must block 3rd consecutive poll");
+	assert.match(blocked.reason, /Subagent polling blocked/);
+	assert.match(blocked.reason, /Do not poll subagent_status or subagent_result in a tight loop/);
+
+	// Reset on next turn
+	guard.resetTurn();
+	assert.equal(guard.checkPoll({ toolName: "subagent_status", input: { task_id: "t1" } }), undefined);
 });
