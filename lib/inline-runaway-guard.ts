@@ -88,8 +88,14 @@ export class EvidenceBudgetGuard {
 		if (!isRecord(event.input) || typeof event.input.path !== "string") return undefined;
 
 		const normalized = event.input.path.replace(/\\/g, "/");
-		// Ignore reading tracking/odd tasks or documentation
-		if (normalized.startsWith("odd/") || normalized.startsWith("docs/") || normalized.endsWith(".md")) {
+		// Ignore reading tracking/odd tasks, documentation, non-development surfaces, or tests
+		if (
+			normalized.startsWith("odd/") ||
+			normalized.startsWith("docs/") ||
+			normalized.endsWith(".md") ||
+			!isDevelopmentSurface(normalized) ||
+			/(?:^|\/)(?:tests?|__tests?__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(normalized)
+		) {
 			return undefined;
 		}
 
@@ -106,6 +112,10 @@ export class EvidenceBudgetGuard {
 	}
 
 	recordDelegation(): void {
+		this.reset();
+	}
+
+	resetTurn(): void {
 		this.reset();
 	}
 
@@ -150,6 +160,10 @@ export class ReadThrashingGuard {
 	recordMutation(path: string): void {
 		const normalized = path.replace(/\\/g, "/");
 		this.readCounts.delete(normalized);
+	}
+
+	resetTurn(): void {
+		this.reset();
 	}
 
 	reset(): void {

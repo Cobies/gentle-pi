@@ -10387,6 +10387,8 @@ function createGentleAiExtensionForTesting(
 	pi.on("turn_start", async (_event, _ctx) => {
 		if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1") {
 			turnToolCallGuard.resetTurn();
+			evidenceBudgetGuard.resetTurn();
+			readThrashingGuard.resetTurn();
 		}
 	});
 

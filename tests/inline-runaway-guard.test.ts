@@ -88,6 +88,14 @@ test("EvidenceBudgetGuard blocks extensive inline multi-file exploration", () =>
 	assert.equal(guard.checkRead({ toolName: "read", input: { path: "odd/tasks/feature.md" } }), undefined);
 	assert.equal(guard.checkRead({ toolName: "read", input: { path: "docs/README.md" } }), undefined);
 
+	// Config files and test files are also exempt (do not count as codebase architecture exploration)
+	assert.equal(guard.checkRead({ toolName: "read", input: { path: "package.json" } }), undefined);
+	assert.equal(guard.checkRead({ toolName: "read", input: { path: "tests/foo.test.ts" } }), undefined);
+
+	// resetTurn clears the budget for the new turn
+	guard.resetTurn();
+	assert.equal(guard.checkRead({ toolName: "read", input: { path: "src/mod1.rs" } }), undefined);
+
 	// Record delegation clears the guard
 	guard.recordDelegation();
 	assert.equal(guard.checkRead({ toolName: "read", input: { path: "src/mod1.rs" } }), undefined);
@@ -217,4 +225,10 @@ test("Gentle AI tool_call hook intercepts context backstop, evidence budget, and
 	const blockedExplore = await toolCall({ toolName: "read", input: { path: "src/file6.ts" } }, ctxNormal);
 	assert.ok(blockedExplore?.block, "hook must block 6th distinct source read");
 	assert.match(blockedExplore.reason, /Evidence-budget rule triggered/);
+
+	// turn_start resets the evidence budget for the next turn
+	const turnStart = handlers.get("turn_start")!;
+	await turnStart({}, ctxNormal);
+	const allowedNextTurn = await toolCall({ toolName: "read", input: { path: "src/file6.ts" } }, ctxNormal);
+	assert.equal(allowedNextTurn, undefined, "turn_start must reset evidence budget for next turn");
 });
