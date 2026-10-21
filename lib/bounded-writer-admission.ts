@@ -246,7 +246,7 @@ export function rejectUnscopedBoundedWriterDispatch(input: unknown, defaultRoot?
 const FEATURE_DOCUMENT_TASK = /^[ \t]*(?:[-*+][ \t]+)?Spec:[ \t]*`?(odd\/tasks\/[^\s,`()]+\.md)`?[^\n]*?\bT\d+\b/gm;
 export const WRITER_CONTEXT_BACKSTOP_TOKENS = CONTEXT_BACKSTOP_TOKENS;
 export const WRITER_FEATURE_DOCUMENT_REJECTION =
-	"Writers run only for a task of an existing ODD feature document (`Spec: odd/tasks/<feature>.md, T<n>` in the task), or when turn tool budget is exceeded, or when your measured context reaches the context backstop. If this unit is a small task, write this unit inline yourself now; do not retry the launch, and never create a feature document only to launch writers for small tasks. For large tasks, initialize the ODD feature document under odd/tasks/ first.";
+	"ODD Protocol Requirement: Generic writers run only for a task of an existing ODD feature document (`Spec: odd/tasks/<feature>.md, T<n>` in the task), or when turn tool budget is exceeded, or when measured context reaches the context backstop. If this task is large or touches multiple files, follow ODD Step 5 immediately: create `odd/tasks/<feature-name>.md` with numbered specs (S#) and task breakdown (T#), sync Engram/todo, and then delegate to gentle-ai-worker referencing `Spec: odd/tasks/<feature-name>.md, T#`. If this unit is genuinely a small task (1-2 files, contained risk, resumable from diff), write this unit inline yourself now; do not retry the launch, and never create a feature document only to launch writers for small tasks.";
 
 function featureDocumentExists(root: string, relativePath: string): boolean {
 	// Resolve symlinks on both sides so a document linked from outside the root, or an odd/tasks directory linked
@@ -292,14 +292,6 @@ export function rejectUndocumentedWriterLaunch(
 	if (contextBackstopReached(options.contextUsage, options.env)) return undefined;
 	if (typeof options.contextTokens === "number" && options.contextTokens >= WRITER_CONTEXT_BACKSTOP_TOKENS) return undefined;
 	if (options.turnBudgetExceeded === true) return undefined;
-	// Multi-surface tasks (3+ distinct development surfaces) explicitly scoped via ## Allowed edit surfaces
-	// are substantial units that should be delegated to prevent catastrophic orchestrator context inflation.
-	if (typeof record.task === "string") {
-		const surfaces = allowedEditSurfaces(record.task);
-		if (surfaces && surfaces.filter(isDevelopmentSurface).length >= 3) {
-			return undefined;
-		}
-	}
 	return { block: true, reason: WRITER_FEATURE_DOCUMENT_REJECTION };
 }
 
