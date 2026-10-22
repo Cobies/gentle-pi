@@ -9,6 +9,9 @@ import codeGraphTools, {
 	createCodeGraphTool,
 	codeGraphNodeScript,
 	findCodeGraphNodeScriptOnPath,
+	registerCodeGraphTool,
+	resolveDefaultInitTimeoutMs,
+	DEFAULT_CODEGRAPH_INIT_TIMEOUT_MS,
 	type CodeGraphRunner,
 } from "../extensions/codegraph-tools.ts";
 
@@ -72,6 +75,34 @@ test("CodeGraph query timeout is reported distinctly from user abort and never b
 	const init = await slowInit.execute("test", { operation: "init" }, undefined, undefined, ctx);
 	assert.deepEqual(init.content, [{ type: "text", text: "indexed" }]);
 	assert.equal(initSignal, undefined);
+});
+
+test("CodeGraph init timeout can be bounded and configured via environment or options", async (t) => {
+	const cwd = workspace(t);
+	const ctx = { cwd } as ExtensionContext;
+
+	// resolveDefaultInitTimeoutMs resolution rules
+	assert.equal(resolveDefaultInitTimeoutMs({}), DEFAULT_CODEGRAPH_INIT_TIMEOUT_MS);
+	assert.equal(resolveDefaultInitTimeoutMs({ CODEGRAPH_INIT_TIMEOUT_MS: "60000" }), 60_000);
+	assert.equal(resolveDefaultInitTimeoutMs({ CODEGRAPH_INIT_TIMEOUT_MS: "0" }), undefined);
+	assert.equal(resolveDefaultInitTimeoutMs({ CODEGRAPH_INIT_TIMEOUT_MS: "invalid" }), DEFAULT_CODEGRAPH_INIT_TIMEOUT_MS);
+
+	// Bounded init times out cleanly and offers read/grep fallback
+	const hanging: CodeGraphRunner = (_args, options) => new Promise((_resolve, reject) => {
+		options.signal?.addEventListener("abort", () => reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError", code: "ABORT_ERR" })), { once: true });
+	});
+	const boundedInit = createCodeGraphTool(hanging, { initTimeoutMs: 20 });
+	const timedOut = await boundedInit.execute("test", { operation: "init" }, undefined, undefined, ctx);
+	assert.match(timedOut.content[0].text, /CodeGraph timed out after 20 ms/);
+	assert.match(timedOut.content[0].text, /Use read, grep, and find/);
+	assert.equal((timedOut.details as { status: string }).status, "failed");
+
+	// registerCodeGraphTool registers tool with default or overridden initTimeoutMs
+	let registeredTool: any;
+	const mockPi = { registerTool: (tool: any) => { registeredTool = tool; } } as unknown as ExtensionAPI;
+	registerCodeGraphTool(mockPi, { initTimeoutMs: 50 });
+	assert.ok(registeredTool);
+	assert.equal(registeredTool.name, "codegraph");
 });
 
 test("CodeGraph tool runs only fixed cwd-scoped init, query, and explore commands", async (t) => {

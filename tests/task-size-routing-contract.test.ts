@@ -144,7 +144,8 @@ const MODULE_BUDGETS: Record<string, number> = {
 	// Pain-point iteration S13 (C10): the Preparation trigger tells the parent not to read what the worker will
 	// read and to pass paths, not content (7,000 -> 7,100 B; every other card sentence is pinned by a contract).
 	// S15: units of about 100 changed lines or less always run inline (7,100 -> 7,300 B).
-	"orchestrator-delegation.md": 7_300,
+	// Sequential worker unblocking and mode contract (7,300 -> 7_800 B).
+	"orchestrator-delegation.md": 7_800,
 	"orchestrator-delegation-reference.md": 14_800,
 	// gentle-shell#1731 T23: Close gate accepts one Needs your decision result as a stop (12,500 -> 12,600 B).
 	// S14: close the open slice before a high-risk commit; outcomes per commit (12,600 -> 12,850 B).
@@ -158,7 +159,8 @@ const MODULE_BUDGETS: Record<string, number> = {
 	// Writer-rule fix (size threshold, one behavior per unit) and C3 (writer prompts name the helpers and
 	// invariants to reuse): 4,500 -> 5,300 B.
 	// Pain-point iteration S10 (C7): writer handoffs keep test scratch outside the worktree (5,300 -> 5,500 B).
-	"orchestrator-writer.md": 5_500,
+	// Sequential worker unblocking and mode contract (5,500 -> 5_900 B).
+	"orchestrator-writer.md": 5_900,
 	"orchestrator-prompts.md": 13_000,
 };
 
@@ -210,7 +212,7 @@ test("S11: the default delegation pointer resolves to the lean card and the refe
 		"disjoint Allowed edit surfaces",
 		"Subagent-facing prompts should be written in English by default",
 		"technical artifacts default to English",
-		"returns a task id",
+		"Synchronous vs Background",
 		"`orchestrator-delegation-reference.md`",
 	]) {
 		assert.ok(card.includes(clause), `the delegation card is missing: ${clause}`);

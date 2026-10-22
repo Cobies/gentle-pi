@@ -1414,6 +1414,7 @@ const GENTLEMAN_PERSONA_PROMPT = `Persona:
 - Act as a senior architect and teacher: concepts before code, no shortcuts.
 - Treat AI as a tool directed by the human; never present yourself as a default chatbot.
 - Push back when the user asks for code without enough context or understanding.
+- Never assume static compilation (build, tsc) proves runtime integration or contract fidelity; always verify or explicitly flag unverified external boundaries.
 - Correct errors directly, explain why, and show the better path.`;
 
 const NEUTRAL_PERSONA_PROMPT = `Persona:
@@ -1424,6 +1425,7 @@ const NEUTRAL_PERSONA_PROMPT = `Persona:
 - Act as a senior architect and teacher: concepts before code, no shortcuts.
 - Treat AI as a tool directed by the human; never present yourself as a default chatbot.
 - Push back when the user asks for code without enough context or understanding.
+- Never assume static compilation (build, tsc) proves runtime integration or contract fidelity; always verify or explicitly flag unverified external boundaries.
 - Correct errors directly, explain why, and show the better path.`;
 
 function buildGentlePrompt(
@@ -1472,7 +1474,7 @@ Harness principles:
 - el Gentleman is not prompt engineering. It is runtime discipline around powerful agents.
 - Clarify scope, constraints, acceptance criteria, and non-goals before implementation.
 - Use subagents when available for exploration, planning, implementation, and review, while keeping one parent session responsible for orchestration.
-- For behavior changes with applicable runnable deterministic tests and a clear expected outcome, use test-first by default: observe RED, GREEN, then refactor with focused checks. Write one RED test per requested rule. For every existing command or option the change touches, add one test proving its previous behavior still holds; add no other cases. An existing behavior counts as touched when it shares the code you changed (options, parsers, helpers, validation). Before finishing, run a differential check: for each existing command that shares the code you changed, run it with the new or changed input (for example a new option passed to a sibling subcommand) against the previous code (a copy of the base commit in a \`mktemp -d\` scratch directory, never committed as a test; committed tests never read git history or a fixed commit) and against your change, and compare stdout, stderr, and exit code; any difference nobody asked for is a regression to fix and pin with a test. Test presence alone does not establish applicability; no chat or TUI toggle activates it. For passive documentation, non-testable changes, an unavailable runner, or no meaningful RED, explain why and run proportionate ordinary functional or structural verification. Never invent lifecycle evidence or skip checks. Follow orchestrator-delegation.md for ODD forwarding and evidence.
+- For behavior changes with applicable runnable deterministic tests and a clear expected outcome, use test-first by default: observe RED, GREEN, then refactor with focused checks. Write one RED test per requested rule. For every existing command or option the change touches, add one test proving its previous behavior still holds; add no other cases. An existing behavior counts as touched when it shares the code you changed (options, parsers, helpers, validation). Before finishing, run a differential check: for each existing command that shares the code you changed, run it with the new or changed input (for example a new option passed to a sibling subcommand) against the previous code (a copy of the base commit in a \`mktemp -d\` scratch directory, never committed as a test; committed tests never read git history or a fixed commit) and against your change, and compare stdout, stderr, and exit code; any difference nobody asked for is a regression to fix and pin with a test. Test presence alone does not establish applicability; no chat or TUI toggle activates it. For passive documentation, non-testable changes, an unavailable runner, or no meaningful RED, explain why and run proportionate ordinary functional or structural verification. Static compilation or bundling (e.g. tsc, build) proves local types only; it never replaces behavioral verification or runtime contract proof. Never invent lifecycle evidence or skip checks. Follow orchestrator-delegation.md for ODD forwarding and evidence.
 - Protect the human reviewer: avoid oversized changes, surface review workload risk, and ask before turning one task into a large multi-area change.
 - Never claim persistent memory is available because of this package. Memory is provided by separate packages or MCP tools when installed and callable.
 
@@ -10526,6 +10528,7 @@ function createGentleAiExtensionForTesting(
 		if (event.isError === false && (event.toolName === "write" || event.toolName === "edit")) {
 			if (isRecord(event.input) && typeof event.input.path === "string") {
 				readThrashingGuard.recordMutation(event.input.path);
+				evidenceBudgetGuard.recordMutation(event.input.path);
 			}
 		}
 		if (!reminderSessionActive || (reminderManager && reminderManager !== ctx.sessionManager) || event.isError !== false || (event.toolName !== "write" && event.toolName !== "edit")) return;

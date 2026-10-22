@@ -93,11 +93,20 @@ test("EvidenceBudgetGuard blocks extensive inline multi-file exploration", () =>
 	assert.equal(guard.checkRead({ toolName: "read", input: { path: "package.json" } }), undefined);
 	assert.equal(guard.checkRead({ toolName: "read", input: { path: "tests/foo.test.ts" } }), undefined);
 
-	// resetTurn clears the budget for the new turn
+	// Evidence budget persists across assistant turns (resetTurn is a no-op for evidence budget)
+	// to enforce the ODD rule on sequential lookups across iterations.
 	guard.resetTurn();
+	const stillBlockedAfterTurn = guard.checkRead({ toolName: "read", input: { path: "src/mod6.rs" } });
+	assert.ok(stillBlockedAfterTurn?.block, "must remain blocked across assistant turns");
+
+	// Record mutation (inline implementation) clears the guard
+	guard.recordMutation("src/mod1.rs");
 	assert.equal(guard.checkRead({ toolName: "read", input: { path: "src/mod1.rs" } }), undefined);
 
-	// Record delegation clears the guard
+	// Record delegation (subagent dispatch) clears the guard
+	for (let i = 1; i <= EXPLORE_READ_BUDGET_THRESHOLD + 1; i++) {
+		guard.checkRead({ toolName: "read", input: { path: `src/mod${i}.rs` } });
+	}
 	guard.recordDelegation();
 	assert.equal(guard.checkRead({ toolName: "read", input: { path: "src/mod1.rs" } }), undefined);
 });
@@ -227,11 +236,17 @@ test("Gentle AI tool_call hook intercepts context backstop, evidence budget, and
 	assert.ok(blockedExplore?.block, "hook must block 6th distinct source read");
 	assert.match(blockedExplore.reason, /Evidence-budget rule triggered/);
 
-	// turn_start resets the evidence budget for the next turn
+	// turn_start does NOT wipe the evidence budget; sequential lookups across turns accumulate
 	const turnStart = handlers.get("turn_start")!;
 	await turnStart({}, ctxNormal);
-	const allowedNextTurn = await toolCall({ toolName: "read", input: { path: "src/file6.ts" } }, ctxNormal);
-	assert.equal(allowedNextTurn, undefined, "turn_start must reset evidence budget for next turn");
+	const blockedNextTurn = await toolCall({ toolName: "read", input: { path: "src/file6.ts" } }, ctxNormal);
+	assert.ok(blockedNextTurn?.block, "turn_start must NOT clear evidence budget across assistant turns");
+
+	// Recording a mutation (edit/write) clears the evidence budget
+	const toolResult = handlers.get("tool_result")!;
+	await toolResult({ isError: false, toolName: "edit", input: { path: "src/file1.ts" }, content: [] }, ctxNormal);
+	const allowedAfterMutation = await toolCall({ toolName: "read", input: { path: "src/file1.ts" } }, ctxNormal);
+	assert.equal(allowedAfterMutation, undefined, "mutation must clear evidence budget");
 });
 
 test("EvidenceBudgetGuard audits grep, find and bash code searches and blocks session introspection", () => {
@@ -251,15 +266,15 @@ test("EvidenceBudgetGuard audits grep, find and bash code searches and blocks se
 	});
 	assert.ok(editArtifactBlocked?.block, "must block bash reading temp edit artifact");
 
-	// Grep and bash code searches count towards evidence budget
+	// Grep, find, ls, bash code searches (including git diff), lens read_symbol and symbol_search count towards evidence budget
 	const freshGuard = new EvidenceBudgetGuard();
 	assert.equal(freshGuard.checkRead({ toolName: "grep", input: { pattern: "borrador", path: "src/app/" } }), undefined);
 	assert.equal(freshGuard.checkRead({ toolName: "find", input: { pattern: "*.service.ts", path: "src/app/" } }), undefined);
-	assert.equal(freshGuard.checkRead({ toolName: "bash", input: { command: "git grep -n 'canProcessOC' src/app/" } }), undefined);
-	assert.equal(freshGuard.checkRead({ toolName: "bash", input: { command: "git log -n 5 internal/ports.go" } }), undefined);
+	assert.equal(freshGuard.checkRead({ toolName: "ls", input: { path: "src/app/core" } }), undefined);
+	assert.equal(freshGuard.checkRead({ toolName: "bash", input: { command: "git diff HEAD~1 internal/ports.go" } }), undefined);
 
 	// 5th distinct exploration call: blocked (> 4 distinct threshold)
-	const blocked = freshGuard.checkRead({ toolName: "read", input: { path: "src/app/core/pedido.ts" } });
+	const blocked = freshGuard.checkRead({ toolName: "symbol_search", input: { query: "canProcessOC" } });
 	assert.ok(blocked?.block, "must block 5th exploration call (> 4 distinct threshold)");
 	assert.match(blocked.reason, /Evidence-budget rule triggered/);
 });

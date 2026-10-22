@@ -107,6 +107,24 @@ export class EvidenceBudgetGuard {
 
 			this.distinctReads.add(normalized);
 			this.totalReads += 1;
+		} else if (event.toolName === "read_symbol" || event.toolName === "read_enclosing") {
+			if (!isRecord(event.input) || typeof event.input.path !== "string") return undefined;
+			const normalized = event.input.path.replace(/\\/g, "/");
+			if (
+				normalized.startsWith("odd/") ||
+				normalized.startsWith("docs/") ||
+				normalized.endsWith(".md") ||
+				!isDevelopmentSurface(normalized) ||
+				/(?:^|\/)(?:tests?|__tests?__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(normalized)
+			) {
+				return undefined;
+			}
+			this.distinctReads.add(normalized);
+			this.totalReads += 1;
+		} else if (event.toolName === "symbol_search") {
+			if (!isRecord(event.input) || typeof event.input.query !== "string") return undefined;
+			this.distinctReads.add(`symbol_search:${event.input.query.slice(0, 40)}`);
+			this.totalReads += 1;
 		} else if (event.toolName === "grep") {
 			if (!isRecord(event.input)) return undefined;
 			const targetPath = typeof event.input.path === "string" ? event.input.path.replace(/\\/g, "/") : "";
@@ -123,6 +141,12 @@ export class EvidenceBudgetGuard {
 			const pattern = typeof event.input.pattern === "string" ? event.input.pattern : "find";
 			this.distinctReads.add(`find:${pattern}:${targetPath}`);
 			this.totalReads += 1;
+		} else if (event.toolName === "ls") {
+			if (!isRecord(event.input)) return undefined;
+			const targetPath = typeof event.input.path === "string" ? event.input.path.replace(/\\/g, "/") : ".";
+			if (targetPath.startsWith("odd/") || targetPath.startsWith("docs/")) return undefined;
+			this.distinctReads.add(`ls:${targetPath}`);
+			this.totalReads += 1;
 		} else if (event.toolName === "bash") {
 			if (!isRecord(event.input) || typeof event.input.command !== "string") return undefined;
 			const cmd = event.input.command.trim();
@@ -135,8 +159,8 @@ export class EvidenceBudgetGuard {
 				};
 			}
 
-			// Intercept shell-based code searches (git grep, git log, git show, cat, sed -n)
-			if (/\b(?:git\s+(?:grep|log|show)|grep\s+|find\s+|cat\s+|sed\s+-n)\b/.test(cmd) && !/\b(?:odd\/|docs\/|\.md\b)/.test(cmd)) {
+			// Intercept shell-based code searches (git grep, git log, git show, git diff, cat, sed -n)
+			if (/\b(?:git\s+(?:grep|log|show|diff)|grep\s+|find\s+|cat\s+|sed\s+-n)\b/.test(cmd) && !/\b(?:odd\/|docs\/|\.md\b)/.test(cmd)) {
 				this.distinctReads.add(`bash:${cmd.slice(0, 45)}`);
 				this.totalReads += 1;
 			} else {
@@ -159,8 +183,17 @@ export class EvidenceBudgetGuard {
 		this.reset();
 	}
 
-	resetTurn(): void {
+	recordMutation(_path?: string): void {
 		this.reset();
+	}
+
+	/**
+	 * Preserves the evidence budget across assistant turns/iterations in an agent run.
+	 * Sequential lookups across multiple iterations count toward the evidence budget
+	 * until the agent mutates a file (implementation) or delegates (subagent dispatch).
+	 */
+	resetTurn(): void {
+		// Intentionally a no-op: evidence budget accumulates across sequential turns.
 	}
 
 	reset(): void {

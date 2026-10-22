@@ -75,9 +75,20 @@ const PROCESS_MAX_BUFFER = MAX_OUTPUT_CHARS * 2;
 const FALLBACK_INSTRUCTIONS = "Use read, grep, and find for this exploration.";
 // query and explore read an existing index; on a slow filesystem (for example
 // WSL /mnt mounts) they could otherwise block the turn indefinitely (#1901).
-// init is the legitimately slow first index, so only the user's signal bounds it
-// unless an explicit initTimeoutMs is provided.
-const CODEGRAPH_QUERY_TIMEOUT_MS = 180_000;
+// init is a slow first index; bound both by default to 60 seconds (1 minute)
+// so subagents and sessions do not hang on large workspaces or slow mounts,
+// while allowing override via CODEGRAPH_INIT_TIMEOUT_MS (0 disables timeout).
+const CODEGRAPH_QUERY_TIMEOUT_MS = 60_000;
+export const DEFAULT_CODEGRAPH_INIT_TIMEOUT_MS = 60_000;
+
+export function resolveDefaultInitTimeoutMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
+	if (env.CODEGRAPH_INIT_TIMEOUT_MS !== undefined) {
+		const parsed = Number(env.CODEGRAPH_INIT_TIMEOUT_MS);
+		if (Number.isFinite(parsed) && parsed > 0) return parsed;
+		if (parsed === 0) return undefined;
+	}
+	return DEFAULT_CODEGRAPH_INIT_TIMEOUT_MS;
+}
 const execFileAsync = promisify(execFile);
 
 function resolveWorkspaceCwd(cwd: string): string {
@@ -401,8 +412,15 @@ export function createCodeGraphTool(
 	};
 }
 
-export function registerCodeGraphTool(pi: ExtensionAPI): void {
-	pi.registerTool(createCodeGraphTool());
+export function registerCodeGraphTool(
+	pi: ExtensionAPI,
+	options?: { initTimeoutMs?: number; queryTimeoutMs?: number },
+): void {
+	const initTimeoutMs = options?.initTimeoutMs !== undefined ? options.initTimeoutMs : resolveDefaultInitTimeoutMs();
+	pi.registerTool(createCodeGraphTool(runCodeGraphCommand, {
+		queryTimeoutMs: options?.queryTimeoutMs,
+		initTimeoutMs,
+	}));
 }
 
 export default function codeGraphTools(pi: ExtensionAPI): void {
