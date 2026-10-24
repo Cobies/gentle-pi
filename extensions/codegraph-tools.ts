@@ -380,6 +380,30 @@ export function createCodeGraphTool(
 		): Promise<{ content: { type: "text"; text: string }[]; details: { operation: CodeGraphOperation; cwd: string; args: string[]; localExclude?: CodeGraphLocalExclude } | CodeGraphFallbackDetails }> {
 			const cwd = resolveWorkspaceCwd(ctx.cwd);
 			assertSafeIndexDirectory(cwd);
+
+			// Auto-initialize when index is missing before querying or exploring
+			if ((parameters.operation === CODEGRAPH_OPERATION.QUERY || parameters.operation === CODEGRAPH_OPERATION.EXPLORE) && !indexExists(cwd)) {
+				const initArgs = commandArguments({ operation: CODEGRAPH_OPERATION.INIT }, cwd);
+				const initTimeout = initTimeoutMs !== undefined ? AbortSignal.timeout(initTimeoutMs) : undefined;
+				const initSignal = initTimeout && signal ? AbortSignal.any([signal, initTimeout]) : (initTimeout ?? signal);
+				try {
+					await runner(initArgs, { cwd, signal: initSignal, maxBuffer: PROCESS_MAX_BUFFER });
+					excludeIndexLocally(cwd);
+				} catch (initError: unknown) {
+					const details = codeGraphFailureDetails(initError, parameters.operation, cwd);
+					const localExclude = indexExists(cwd) ? excludeIndexLocally(cwd) : undefined;
+					if (localExclude) details.localExclude = localExclude;
+					const timedOut = initTimeout?.aborted === true && signal?.aborted !== true;
+					const text = timedOut
+						? `CodeGraph timed out during automatic initialization after ${initTimeoutMs} ms (a slow filesystem such as a WSL /mnt mount, or a very large workspace). ${FALLBACK_INSTRUCTIONS}`
+						: codeGraphFailureMessage(details.status);
+					return {
+						content: [{ type: "text" as const, text: withLocalExcludeNote(text, localExclude) }],
+						details,
+					};
+				}
+			}
+
 			const args = commandArguments(parameters, cwd);
 			const effectiveTimeoutMs = parameters.operation === "init" ? initTimeoutMs : queryTimeoutMs;
 			const timeout = effectiveTimeoutMs !== undefined ? AbortSignal.timeout(effectiveTimeoutMs) : undefined;

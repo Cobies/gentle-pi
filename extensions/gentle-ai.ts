@@ -1474,7 +1474,7 @@ Harness principles:
 - el Gentleman is not prompt engineering. It is runtime discipline around powerful agents.
 - Clarify scope, constraints, acceptance criteria, and non-goals before implementation.
 - Use subagents when available for exploration, planning, implementation, and review, while keeping one parent session responsible for orchestration.
-- For behavior changes with applicable runnable deterministic tests and a clear expected outcome, use test-first by default: observe RED, GREEN, then refactor with focused checks. Write one RED test per requested rule. For every existing command or option the change touches, add one test proving its previous behavior still holds; add no other cases. An existing behavior counts as touched when it shares the code you changed (options, parsers, helpers, validation). Before finishing, run a differential check: for each existing command that shares the code you changed, run it with the new or changed input (for example a new option passed to a sibling subcommand) against the previous code (a copy of the base commit in a \`mktemp -d\` scratch directory, never committed as a test; committed tests never read git history or a fixed commit) and against your change, and compare stdout, stderr, and exit code; any difference nobody asked for is a regression to fix and pin with a test. Test presence alone does not establish applicability; no chat or TUI toggle activates it. For passive documentation, non-testable changes, an unavailable runner, or no meaningful RED, explain why and run proportionate ordinary functional or structural verification. Static compilation or bundling (e.g. tsc, build) proves local types only; it never replaces behavioral verification or runtime contract proof. Never invent lifecycle evidence or skip checks. Follow orchestrator-delegation.md for ODD forwarding and evidence.
+- For behavior changes with applicable runnable deterministic tests and a clear expected outcome, use test-first by default: observe RED, GREEN, then refactor with focused checks. Write one RED test per requested rule. For every existing command or option the change touches, add one test proving its previous behavior still holds; add no other cases. An existing behavior counts as touched when it shares the code you changed (options, parsers, helpers, validation). Only when your diff changes shared code (options, parsers, helpers) that an existing command the request did not name also uses, run one differential check before finishing, as a single script: for each such command, run it with the new or changed input (for example a new option passed to a sibling subcommand) against the previous code (a copy of the base commit in a \`mktemp -d\` scratch directory, never committed as a test; committed tests never read git history or a fixed commit) and against your change, and compare stdout, stderr, and exit code; any difference nobody asked for is a regression to fix and pin with a test. Test presence alone does not establish applicability; no chat or TUI toggle activates it. For passive documentation, non-testable changes, an unavailable runner, or no meaningful RED, explain why and run proportionate ordinary functional or structural verification. Static compilation or bundling (e.g. tsc, build) proves local types only; it never replaces behavioral verification or runtime contract proof. Never invent lifecycle evidence or skip checks. Follow orchestrator-delegation.md for ODD forwarding and evidence.
 - Protect the human reviewer: avoid oversized changes, surface review workload risk, and ask before turning one task into a large multi-area change.
 - Never claim persistent memory is available because of this package. Memory is provided by separate packages or MCP tools when installed and callable.
 
@@ -2077,6 +2077,21 @@ function yoloConfiguredRestriction(cwd: string, keys: readonly GuardedCommandKey
 	return restriction;
 }
 
+/** Super Yolo ignores every configurable guardrail: only code-level denies survive. */
+const SUPER_YOLO_GUARDRAILS: RuntimeGuardrailsConfig = {
+	autonomousMode: true,
+	guardedCommands: { gitPush: "allow", gitRebase: "allow", gitBranchDeleteForce: "allow", npmPublish: "allow", piRemove: "allow" },
+};
+
+/**
+ * Super Yolo command decision: run everything without confirmation except the
+ * code-level catastrophic denies (root/home recursive removal, --no-preserve-root,
+ * hard-denied patterns). Configured guardrails are deliberately not consulted.
+ */
+function evaluateSuperYoloCommand(command: string): GuardAction {
+	return evaluateGuardedCommand(command, SUPER_YOLO_GUARDRAILS).action === "block" ? "block" : "allow";
+}
+
 async function confirmCommand(
 	command: string,
 	ctx: ExtensionContext,
@@ -2084,7 +2099,19 @@ async function confirmCommand(
 	herdrLifecycle: HerdrConfirmationLifecycle,
 	yoloActive = false,
 	autoGate?: () => Promise<ToolCallEventResult | undefined>,
+	superActive = false,
 ): Promise<ToolCallEventResult | undefined> {
+	if (superActive) {
+		// Sensitive-path and delivered-test guards already ran before this call;
+		// here only the code-level catastrophic denies remain.
+		if (evaluateSuperYoloCommand(command) === "block") {
+			return {
+				block: true,
+				reason: "Gentle AI safety policy blocked a catastrophic destructive shell command. Ask the user for an explicit safer plan.",
+			};
+		}
+		return autoGate?.();
+	}
 	const guardrailsConfig = loadRuntimeGuardrailsConfig(ctx.cwd);
 	const evaluation = evaluateGuardedCommand(command, guardrailsConfig);
 	// Configuration provenance is distinct from legacy autonomy resolution, which
@@ -3100,7 +3127,7 @@ interface OverlayComponent {
 
 type ModelPanelResult =
 	| { type: "save"; config: AgentModelConfig }
-	// `save`, then snapshot saved agent routing and the live orchestrator into
+	// `save`, then snapshot saved agent routing and the chosen orchestrator into
 	// the current profile without changing the global orchestrator defaults.
 	| { type: "save-profile"; config: AgentModelConfig }
 	| { type: "custom"; agent: string | "all"; config: AgentModelConfig }
@@ -3109,6 +3136,7 @@ type ModelPanelResult =
 	| { type: "cancel" };
 
 const SET_ALL_AGENTS = "Set all agents";
+const LEAVE_ORCHESTRATOR_UNTOUCHED = "leave untouched";
 
 const PANEL_TONE = {
 	BORDER: "border",
@@ -3139,6 +3167,7 @@ class SddModelPanel implements OverlayComponent {
 	private query = "";
 	private readonly draft: AgentModelConfig;
 	private readonly rows: string[];
+	private readonly agents: string[];
 	private readonly modelOptions: string[];
 	private readonly done: (result: ModelPanelResult) => void;
 	private readonly theme: Theme | undefined;
@@ -3157,7 +3186,8 @@ class SddModelPanel implements OverlayComponent {
 		terminalRows?: () => number,
 	) {
 		this.draft = cloneModelConfig(initialConfig);
-		this.rows = [SET_ALL_AGENTS, ...agents];
+		this.rows = [SET_ALL_AGENTS, PROFILE_ORCHESTRATOR_KEY, ...agents];
+		this.agents = [...agents];
 		this.modelOptions = modelOptions;
 		this.done = done;
 		this.theme = theme;
@@ -3280,6 +3310,7 @@ class SddModelPanel implements OverlayComponent {
 		}
 		if (matchesKey(data, "e")) {
 			this.selectedRow = this.rows[this.cursor] ?? SET_ALL_AGENTS;
+			if (this.selectedRow === PROFILE_ORCHESTRATOR_KEY && !this.draft[this.selectedRow]?.model) return;
 			this.mode = "effort";
 			this.effortCursor = 0;
 			return;
@@ -3361,7 +3392,7 @@ class SddModelPanel implements OverlayComponent {
 				return;
 			}
 			this.applyModelSelection(
-				selected === INHERIT_MODEL ? undefined : selected,
+				selected === INHERIT_MODEL || selected === LEAVE_ORCHESTRATOR_UNTOUCHED ? undefined : selected,
 			);
 			this.mode = "agents";
 			return;
@@ -3375,7 +3406,7 @@ class SddModelPanel implements OverlayComponent {
 	private applyModelSelection(model: string | undefined): void {
 		const row = this.rows[this.cursor];
 		if (row === SET_ALL_AGENTS) {
-			for (const name of this.rows.slice(1)) this.setModel(name, model);
+			for (const name of this.agents) this.setModel(name, model);
 			return;
 		}
 		if (!row) return;
@@ -3385,7 +3416,7 @@ class SddModelPanel implements OverlayComponent {
 	private applyThinkingSelection(thinking: ThinkingLevel | undefined): void {
 		const row = this.selectedRow;
 		if (row === SET_ALL_AGENTS) {
-			for (const name of this.rows.slice(1)) this.setThinking(name, thinking);
+			for (const name of this.agents) this.setThinking(name, thinking);
 			return;
 		}
 		this.setThinking(row, thinking);
@@ -3394,13 +3425,17 @@ class SddModelPanel implements OverlayComponent {
 	private applyInherit(): void {
 		const row = this.rows[this.cursor];
 		if (row === SET_ALL_AGENTS) {
-			for (const name of this.rows.slice(1)) this.clearEntry(name);
+			for (const name of this.agents) this.clearEntry(name);
 			return;
 		}
 		if (row) this.clearEntry(row);
 	}
 
 	private setModel(name: string, model: string | undefined): void {
+		if (name === PROFILE_ORCHESTRATOR_KEY && model === undefined) {
+			delete this.draft[name];
+			return;
+		}
 		const current = this.draft[name] ?? {};
 		if (model === undefined) delete current.model;
 		else current.model = model;
@@ -3409,6 +3444,7 @@ class SddModelPanel implements OverlayComponent {
 	}
 
 	private setThinking(name: string, thinking: ThinkingLevel | undefined): void {
+		if (name === PROFILE_ORCHESTRATOR_KEY && !this.draft[name]?.model) return;
 		const current = this.draft[name] ?? {};
 		if (thinking === undefined) delete current.thinking;
 		else current.thinking = thinking;
@@ -3417,13 +3453,17 @@ class SddModelPanel implements OverlayComponent {
 	}
 
 	private clearEntry(name: string): void {
-		this.draft[name] = {};
+		if (name === PROFILE_ORCHESTRATOR_KEY) delete this.draft[name];
+		else this.draft[name] = {};
 	}
 
 	private filteredModelOptions(): string[] {
+		const options = this.selectedRow === PROFILE_ORCHESTRATOR_KEY
+			? this.modelOptions.map((option) => option === INHERIT_MODEL ? LEAVE_ORCHESTRATOR_UNTOUCHED : option)
+			: this.modelOptions;
 		const query = this.query.trim().toLowerCase();
-		if (!query) return this.modelOptions;
-		return this.modelOptions.filter((option) =>
+		if (!query) return options;
+		return options.filter((option) =>
 			option.toLowerCase().includes(query),
 		);
 	}
@@ -3480,13 +3520,13 @@ class SddModelPanel implements OverlayComponent {
 		// longer fits the minimum width once the profile key joins the save keys.
 		lines.push(
 			line(
-				`j/k scroll • enter model/save • e effort • i ${isProviderReviewRole(this.rows[this.cursor] ?? "") ? "Pi persisted defaults" : "inherit"} • c custom`,
+				`j/k scroll • enter model/save • e effort • i ${this.rows[this.cursor] === PROFILE_ORCHESTRATOR_KEY ? LEAVE_ORCHESTRATOR_UNTOUCHED : isProviderReviewRole(this.rows[this.cursor] ?? "") ? "Pi persisted defaults" : "inherit"} • c custom`,
 				"muted",
 			),
 		);
 		lines.push(
 			line(
-				`x export • r restore • ctrl+s save • u capture session in "${this.profileLabel}" • esc back`,
+				`x export • r restore • ctrl+s save agents • u save choice in "${this.profileLabel}" • esc back`,
 				"muted",
 			),
 		);
@@ -3586,11 +3626,9 @@ class SddModelPanel implements OverlayComponent {
 	}
 
 	private renderSetAllLabel(row: string): string {
-		const models = this.rows
-			.slice(1)
+		const models = this.agents
 			.map((name) => this.draft[name]?.model ?? routingDefaultLabel(name, "model"));
-		const efforts = this.rows
-			.slice(1)
+		const efforts = this.agents
 			.map((name) => this.draft[name]?.thinking ?? routingDefaultLabel(name, "effort"));
 		const firstModel = models[0] ?? "inherit";
 		const firstEffort = efforts[0] ?? "inherit";
@@ -3607,6 +3645,9 @@ class SddModelPanel implements OverlayComponent {
 	}
 
 	private renderAgentLabel(row: string): string {
+		if (row === PROFILE_ORCHESTRATOR_KEY && !this.draft[row]?.model) {
+			return `${this.renderText(row.padEnd(20), "text")} ${this.renderText(LEAVE_ORCHESTRATOR_UNTOUCHED, "status")}`;
+		}
 		const model = this.draft[row]?.model ?? routingDefaultLabel(row, "model");
 		const effort = this.draft[row]?.thinking ?? routingDefaultLabel(row, "effort");
 		return `${this.renderText(sanitizeTerminalText(row).padEnd(20), "text")} ${this.renderText("model=", "muted")}${this.renderText(model, "status")}${this.renderText(
@@ -3681,8 +3722,18 @@ async function handleModelsCommand(ctx: ExtensionContext, pi: ExtensionAPI): Pro
 		);
 		return;
 	}
-	let config = savedConfig.status === "valid" ? savedConfig.config : {};
-	const profileLabel = describeCurrentProfileTarget(resolveCurrentProfileTarget(ctx.cwd));
+	let config = savedConfig.status === "valid" ? cloneModelConfig(savedConfig.config) : {};
+	const store = readProfilesFileResult(profilesFilePath(gentleAiConfigHome()));
+	const target = resolveCurrentProfileTarget(ctx.cwd, store);
+	// Existing profiles own the initial choice, including absence. Reopens keep the draft.
+	delete config[PROFILE_ORCHESTRATOR_KEY];
+	if (store.status === "valid" && target && hasOwnProfile(store.file.profiles, target.name)) {
+		const entry = store.file.profiles[target.name][PROFILE_ORCHESTRATOR_KEY];
+		if (entry) config[PROFILE_ORCHESTRATOR_KEY] = { ...entry };
+	} else {
+		config = profileSnapshotFrom(config, liveOrchestratorSnapshot(ctx, pi) ?? readOrchestratorSettings(orchestratorSettingsPath()));
+	}
+	const profileLabel = describeCurrentProfileTarget(target);
 	let result = await showSddModelPanel(ctx, config, profileLabel);
 	while (result.type === "custom" || result.type === "export" || result.type === "restore") {
 		config = cloneModelConfig(result.config);
@@ -3712,7 +3763,10 @@ async function handleModelsCommand(ctx: ExtensionContext, pi: ExtensionAPI): Pro
 					result = await showSddModelPanel(ctx, config, profileLabel);
 					continue;
 				}
-				config = restored;
+				const orchestratorChoice = config[PROFILE_ORCHESTRATOR_KEY];
+				config = cloneModelConfig(restored);
+				delete config[PROFILE_ORCHESTRATOR_KEY];
+				if (orchestratorChoice) config[PROFILE_ORCHESTRATOR_KEY] = orchestratorChoice;
 				try {
 					const applyResult = await applyModelConfigAsync(ctx.cwd, restored);
 					ctx.ui.notify([
@@ -3774,18 +3828,21 @@ async function handleModelsCommand(ctx: ExtensionContext, pi: ExtensionAPI): Pro
 		result = await showSddModelPanel(ctx, config, profileLabel);
 	}
 	if (result.type !== "save" && result.type !== "save-profile") return;
-	writeModelConfig(ctx.cwd, result.config);
-	const applyResult = await applyModelConfigAsync(ctx.cwd, result.config);
+	// The panel's orchestrator is snapshot-only, never a global agent route.
+	const routing = cloneModelConfig(result.config);
+	delete routing[PROFILE_ORCHESTRATOR_KEY];
+	writeModelConfig(ctx.cwd, routing);
+	const applyResult = await applyModelConfigAsync(ctx.cwd, routing);
 	ctx.ui.notify(
 		[
 			"el Gentleman global model config saved.",
 			`Global config: ${modelConfigPath(ctx.cwd)}`,
 			`Agents updated: ${applyResult.updated}`,
-			...describeModelConfig(ctx.cwd, result.config),
+			...describeModelConfig(ctx.cwd, routing),
 		].join("\n"),
 		"info",
 	);
-	if (result.type === "save-profile") updateCurrentProfileFromSavedRouting(ctx, pi);
+	if (result.type === "save-profile") updateCurrentProfileFromSavedRouting(ctx, result.config[PROFILE_ORCHESTRATOR_KEY]);
 }
 
 /** The profile `u` in `/gentle:models` writes to, and why it is that one. */
@@ -3817,11 +3874,10 @@ function describeCurrentProfileTarget(target: CurrentProfileTarget | undefined):
 
 /**
  * The second half of `u` captures saved global agent routing (never the pin)
- * and the live session orchestrator. Without a live model it falls back to
- * persisted settings. The global save has already been reported, so every
- * outcome here speaks only about the profile.
+ * and the explicit panel choice, including key absence. The global save has
+ * already been reported, so every outcome here speaks only about the profile.
  */
-function updateCurrentProfileFromSavedRouting(ctx: ExtensionContext, pi: ExtensionAPI): void {
+function updateCurrentProfileFromSavedRouting(ctx: ExtensionContext, orchestrator: AgentRoutingEntry | undefined): void {
 	const path = profilesFilePath(gentleAiConfigHome());
 	const read = readProfilesFileResult(path);
 	if (read.status === "invalid") {
@@ -3831,16 +3887,9 @@ function updateCurrentProfileFromSavedRouting(ctx: ExtensionContext, pi: Extensi
 		);
 		return;
 	}
-	const snapshot = profileSnapshotFrom(
-		readGlobalEffectiveModelConfig(ctx.cwd),
-		readOrchestratorSettings(orchestratorSettingsPath()),
-	);
-	if (ctx.model) {
-		snapshot[PROFILE_ORCHESTRATOR_KEY] = {
-			model: `${ctx.model.provider}/${ctx.model.id}`,
-			thinking: pi.getThinkingLevel(),
-		};
-	}
+	const snapshot = cloneModelConfig(readGlobalEffectiveModelConfig(ctx.cwd));
+	delete snapshot[PROFILE_ORCHESTRATOR_KEY];
+	if (orchestrator?.model) snapshot[PROFILE_ORCHESTRATOR_KEY] = { ...orchestrator };
 	if (read.status === "missing") {
 		// The same seed `/gentle:profiles` performs on its first open, so pressing
 		// `u` before ever opening that panel lands on the same "current" profile.
@@ -9694,6 +9743,7 @@ export const __testing = {
 	guardedCommandTitle,
 	loadRuntimeGuardrailsConfig,
 	isReversibleYoloCommand,
+	evaluateSuperYoloCommand,
 	yoloConfiguredRestriction,
 	buildGentlePrompt,
 	nativeStatusUnsupported,
@@ -10444,7 +10494,7 @@ function createGentleAiExtensionForTesting(
 		// and forwards only systemPromptOptions, so the harness is delivered
 		// through the mutable appendSystemPrompt section instead of a replacement.
 		appendSystemPromptOnce(event.systemPromptOptions, `${gentlePrompt}${reviewContractPrompt}`);
-		updateYoloPrompt(event.systemPromptOptions, isPrimarySession && await yolo.active(ctx));
+		updateYoloPrompt(event.systemPromptOptions, isPrimarySession && await yolo.active(ctx), isPrimarySession && await yolo.superActive(ctx));
 		updateAutoPrompt(event.systemPromptOptions, isPrimarySession && await yolo.mode(ctx) === "auto");
 		return undefined;
 	});
@@ -10585,7 +10635,11 @@ function createGentleAiExtensionForTesting(
 			const turnBudgetDenied = turnToolCallGuard.checkCall(event);
 			if (turnBudgetDenied) return turnBudgetDenied;
 		}
-		const yoloActive = primaryToolCall && await yolo.active(ctx);
+		// One early mode read settles the session binding (and its one-time epoch
+		// bump) before the guarded region below captures its own epoch.
+		const settledMode = primaryToolCall ? await yolo.mode(ctx) : "normal";
+		const yoloActive = primaryToolCall && settledMode === "yolo";
+		const superYoloActive = primaryToolCall && settledMode === "super-yolo";
 		const sensitivePathDenied = evaluateSensitivePathTool(
 			event.toolName,
 			event.input,
@@ -10652,7 +10706,7 @@ function createGentleAiExtensionForTesting(
 			return { block: true, reason: "Permission mode changed during tool admission. This action was not run; retry under the current mode." };
 		}
 		const autoGate = permissionMode === "auto" ? gate : undefined;
-		return await confirmCommand(command, ctx, pi.events, herdrLifecycle, yoloActive, autoGate);
+		return await confirmCommand(command, ctx, pi.events, herdrLifecycle, yoloActive, autoGate, superYoloActive);
 	});
 
 	for (const owner of ["delegation", "review"] as const) {
@@ -10671,7 +10725,7 @@ function createGentleAiExtensionForTesting(
 	}
 
 	pi.registerCommand("gentle:models", {
-		description: "Configure global per-agent models for el Gentleman.",
+		description: "Configure global agent models and choose a profile orchestrator.",
 		handler: async (_args, ctx) => {
 			await handleModelsCommand(ctx, pi);
 		},
