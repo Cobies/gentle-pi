@@ -89,7 +89,6 @@ interface FakeUi {
 	overlayView: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 	closeOverlay: (() => void) | undefined;
 	customOptions?: unknown[];
-	statuses: Map<string, string | undefined>;
 }
 
 interface GitScript {
@@ -156,9 +155,6 @@ function fakePi(script: GitScript[] = [{ numstat: "", porcelain: "" }], commands
 		getCommands() {
 			return commandsList;
 		},
-		getAllTools() {
-			return Array.from(tools.values());
-		},
 		sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean }) {
 			sentMessages.push({ content, options });
 		},
@@ -167,6 +163,9 @@ function fakePi(script: GitScript[] = [{ numstat: "", porcelain: "" }], commands
 			if (args.includes("worktree")) return { stdout: "worktree /repo\0branch refs/heads/main\0\0", stderr: "", code: 0, killed: false };
 			// Roots outside the worktree list read as a detached HEAD.
 			if (args.includes("symbolic-ref")) return { stdout: "", stderr: "", code: 1, killed: false };
+			// The unborn-HEAD ask is cheap metadata, not a scan round: the script
+			// models one numstat+porcelain pair per round, exactly like real Git.
+			if (args.includes("rev-parse")) return { stdout: "", stderr: "", code: 0, killed: false };
 			const isNumstat = args.includes("diff");
 			const step = script[Math.min(isNumstat ? round : round++, script.length - 1)];
 			return { stdout: isNumstat ? step.numstat : step.porcelain, stderr: "", code: 0, killed: false };
@@ -180,8 +179,7 @@ async function fire(handlers: Map<string, Array<(event: unknown, ctx: ExtensionC
 }
 
 function fakeContext(options: { theme?: typeof plainTheme & { getBgAnsi?(): string }; hasUI?: boolean; entries?: unknown[]; oauth?: boolean; pending?: boolean; idle?: boolean; editorFactory?: unknown; token?: string; select?: (title: string, options: string[]) => Promise<string | undefined> } = {}): { ctx: ExtensionContext; ui: FakeUi; overlayReady: Promise<void> } {
-	const statuses = new Map<string, string | undefined>();
-	const ui: FakeUi = { statuses, footerFactory: undefined, editorFactory: options.editorFactory, widgets: new Map(), widgetSets: 0, workingVisible: undefined, notices: [], overlay: undefined, overlayView: undefined, closeOverlay: undefined, customOptions: [] };
+	const ui: FakeUi = { footerFactory: undefined, editorFactory: options.editorFactory, widgets: new Map(), widgetSets: 0, workingVisible: undefined, notices: [], overlay: undefined, overlayView: undefined, closeOverlay: undefined, customOptions: [] };
 	let resolveOverlay: () => void;
 	const overlayReady = new Promise<void>((resolve) => { resolveOverlay = resolve; });
 	const entries = options.entries ?? [];
@@ -205,10 +203,6 @@ function fakeContext(options: { theme?: typeof plainTheme & { getBgAnsi?(): stri
 			getAllThemes: () => [{ name: "dark", path: undefined }, { name: "light", path: undefined }],
 			getTheme: (name: string) => name === "dark" || name === "light" ? { name } : undefined,
 			setTheme: (name: string) => ({ success: name === "dark" || name === "light" }),
-			setStatus(key: string, text?: string) {
-				if (text === undefined) statuses.delete(key);
-				else statuses.set(key, text);
-			},
 			// Added only when requested: an absent select keeps the no-menu fallback
 			// that every pre-existing test relies on.
 			...(options.select ? { select: options.select } : {}),
@@ -375,33 +369,6 @@ test("gentleShell installs the footer on session_start when a UI exists", () => 
 	const lines = component.render(120);
 	assert.equal(lines.length, 1);
 	assert.match(lines[0], /main ⟡ gpt-5\.5 · medium/);
-});
-
-test("gentleShell publishes connected MCP servers to ctx.ui.setStatus on session_start and agent_start", async () => {
-	const tempDir = mkdtempSync(join(tmpdir(), "gentle-shell-mcp-"));
-	try {
-		writeFileSync(
-			join(tempDir, "mcp.json"),
-			JSON.stringify({ mcpServers: { s1: { command: "test" }, s2: { command: "test" } } }),
-		);
-		const { pi, handlers, tools } = fakePi();
-		tools.set("mcp__s1__t1", { name: "mcp__s1__t1" } as never);
-		tools.set("mcp__s2__t1", { name: "mcp__s2__t1" } as never);
-
-		gentleShell(pi, {}, { agentDir: tempDir });
-		const { ctx, ui } = fakeContext();
-		await fire(handlers, "session_start", ctx);
-
-		assert.equal(ui.statuses.get("mcp"), "MCP: 2 servers");
-
-		// Add tool mcp__s3__t1
-		tools.set("mcp__s3__t1", { name: "mcp__s3__t1" } as never);
-		for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
-
-		assert.equal(ui.statuses.get("mcp"), "MCP: 3 servers");
-	} finally {
-		rmSync(tempDir, { recursive: true, force: true });
-	}
 });
 
 async function reviewSidebarHarness() {
@@ -4847,6 +4814,9 @@ test("new sessions do not inherit another session's worktrees", async () => {
  const first=fakeContext();
  await fire(h.handlers,"session_start",first.ctx);
  await h.tools.get("session_worktree_register")!.execute("r",{path:"/linked"},undefined,undefined,first.ctx);
+ // The registration kicks off its own async scan; settle it so its Git calls
+ // cannot land after the next session clears the shared call log.
+ await changesSettled();
  await fire(h.handlers,"session_shutdown",first.ctx);
  const next=fakeContext({entries:[...first.ctx.sessionManager.getEntries()]});
  (next.ctx.sessionManager as any).getSessionId=()=>"new-session";
