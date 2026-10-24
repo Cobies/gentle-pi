@@ -37,6 +37,7 @@ import { inferOddPhase } from "../lib/odd-phase-inference.ts";
 import { isInteractiveMode } from "../lib/rpc-host.ts";
 import { gentlePiConfigHome } from "../lib/agent-home.ts";
 import { isNanAdaptiveReasoningModel } from "../lib/nan-provider.ts";
+import { computeMcpStatus } from "../lib/mcp-config-guard.ts";
 import { resolveAnimationPolicy, writeAnimationPolicy, type AnimationPolicy } from "../lib/animation-policy.ts";
 import { resolveVimPolicy, writeVimPolicy, type VimPolicy } from "../lib/vim-policy.ts";
 import { resolveHistoryCapture, writeHistoryCapturePolicy } from "../lib/history-capture-policy.ts";
@@ -45,6 +46,16 @@ import { createVimEditorAdapter, isAuditedPiEditorVersion } from "../lib/vim-edi
 import { VimNormalEngine } from "../lib/vim-normal-engine.ts";
 import { VimOperatorEngine, type OperatorResult } from "../lib/vim-operator-engine.ts";
 import { VimVisualEngine } from "../lib/vim-visual-engine.ts";
+
+interface StatusUi {
+	setStatus?: (key: string, text?: string) => void;
+}
+
+function setUiStatus(ctx: ExtensionContext, key: string, text: string | undefined): void {
+	// SAFETY: ExtensionUIContext in Pi provides setStatus at runtime to publish footer/bar statuses, but SDK types omit it.
+	const ui = ctx.ui as unknown as StatusUi;
+	ui.setStatus?.(key, text);
+}
 
 // Canonical entrypoint and index patterns across POSIX and Windows separators.
 // Exported for cross-platform unit testing of candidate path resolution.
@@ -163,6 +174,7 @@ interface BuildOptions {
 export type DevBinaryNotice = { state: "active"; path: string; sha256: string } | { state: "invalid"; reason: string };
 
 export interface ShellDeps {
+	agentDir?: string;
 	activeProfile(): string | undefined;
 	fetch: typeof fetch;
 	now(): number;
@@ -1723,6 +1735,20 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	// store and the profile reader cannot drift onto two different stores.
 	const usageConfigHome = gentlePiConfigHome(env);
 	const usageFetchTimeout = usageFetchTimeoutMs(env);
+
+	const refreshMcpStatus = (ctx: ExtensionContext) => {
+		if (!ctx.hasUI) return;
+		try {
+			const summary = computeMcpStatus({
+				agentDir: deps.agentDir,
+				cwd: ctx.cwd,
+				tools: pi.getAllTools?.() ?? [],
+			});
+			setUiStatus(ctx, "mcp", summary.statusText);
+		} catch {
+			// Status is cosmetic and nonblocking
+		}
+	};
 	// The subagent routing in force for this session, through the same single
 	// rule launches use (gentle-shell#1064): explicit Enter binding, then the
 	// profile frozen at startup, then the live p → P → G only in follow mode.
@@ -2039,6 +2065,15 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		registry?.close();
 		currentContext = ctx;
 		changes = undefined;
+		refreshMcpStatus(ctx);
+		const mcpInitTimer = setTimeout(() => {
+			if (currentContext === ctx) {
+				refreshMcpStatus(ctx);
+				renderHost?.invalidateSidebar?.();
+				renderHost?.requestRender();
+			}
+		}, 1_000);
+		mcpInitTimer.unref?.();
 		registry = new SessionWorktreeRegistry(pi, ctx.sessionManager, ctx.cwd, deps.resolveWorktree);
 		registry.start();
 		applyCardStyle();
@@ -2722,6 +2757,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		},
 	});
 	pi.on("agent_start", (_event, ctx) => {
+		refreshMcpStatus(ctx);
 		// A turn can start any other way (the user sending the draft, an
 		// extension, a shortcut) before the aborted run's own agent_settled
 		// below has delivered the pending text. Nothing is sent from here: Pi
@@ -2751,6 +2787,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		}
 	});
 	pi.on("agent_settled", (_event, ctx) => {
+		refreshMcpStatus(ctx);
 		// Pi clears its own run-active flag before emitting agent_settled, so
 		// this is normally idle; if a run is somehow still in flight the prompt
 		// stays working and the pending text waits for the next settle.

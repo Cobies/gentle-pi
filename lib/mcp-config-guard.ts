@@ -85,3 +85,100 @@ export function removeBuiltinMcpExclusion(agentDir: string = getAgentDir()): boo
 		return false;
 	}
 }
+
+export interface McpServerSummary {
+	configured: number;
+	connected: number;
+	isExcluded: boolean;
+	statusText: string | undefined;
+}
+
+/**
+ * Reads configured and enabled MCP server names across global and project configurations.
+ */
+export function readConfiguredMcpServerNames(agentDir: string = getAgentDir(), cwd?: string): Set<string> {
+	const servers = new Set<string>();
+	const paths = [join(agentDir, "mcp.json")];
+	if (cwd) {
+		paths.push(join(cwd, ".pi", "mcp.json"));
+	}
+	for (const p of paths) {
+		try {
+			if (existsSync(p)) {
+				const data = JSON.parse(readFileSync(p, "utf8"));
+				const mcpServers = data?.mcpServers;
+				if (mcpServers && typeof mcpServers === "object" && !Array.isArray(mcpServers)) {
+					for (const [name, config] of Object.entries(mcpServers)) {
+						if (config && typeof config === "object" && (config as { enabled?: boolean }).enabled === false) {
+							servers.delete(name);
+						} else {
+							servers.add(name);
+						}
+					}
+				}
+			}
+		} catch {
+			// Ignore parse/read errors
+		}
+	}
+	return servers;
+}
+
+/**
+ * Extracts unique connected MCP server names from a list of tools.
+ * Pi registers tools from MCP servers with names matching `mcp__<server>__<tool>`.
+ */
+export function extractConnectedMcpServerNames(tools: Array<{ name: string }>): Set<string> {
+	const connected = new Set<string>();
+	for (const tool of tools) {
+		const match = /^mcp__(.+?)__/.exec(tool.name);
+		if (match) {
+			connected.add(match[1]);
+		}
+	}
+	return connected;
+}
+
+/**
+ * Computes MCP status summary and user-facing status line text.
+ */
+export function computeMcpStatus(options: {
+	agentDir?: string;
+	cwd?: string;
+	tools?: Array<{ name: string }>;
+} = {}): McpServerSummary {
+	const agentDir = options.agentDir ?? getAgentDir();
+	const configStatus = inspectMcpConfigStatus(agentDir);
+	const configuredServers = readConfiguredMcpServerNames(agentDir, options.cwd);
+	const configured = configuredServers.size;
+	const connectedServers = extractConnectedMcpServerNames(options.tools ?? []);
+	const connected = connectedServers.size;
+	const isExcluded = configStatus.isBuiltinMcpExcluded;
+
+	let statusText: string | undefined;
+	if (isExcluded) {
+		if (configured > 0) {
+			statusText = "MCP: disabled";
+		} else {
+			statusText = undefined;
+		}
+	} else if (connected > 0) {
+		if (configured > connected) {
+			statusText = `MCP: ${connected}/${configured} servers`;
+		} else {
+			statusText = `MCP: ${connected} ${connected === 1 ? "server" : "servers"}`;
+		}
+	} else if (configured > 0) {
+		statusText = `MCP: ${configured} ${configured === 1 ? "server" : "servers"}`;
+	} else {
+		statusText = undefined;
+	}
+
+	return {
+		configured,
+		connected,
+		isExcluded,
+		statusText,
+	};
+}
+

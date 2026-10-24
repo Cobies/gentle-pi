@@ -89,6 +89,7 @@ interface FakeUi {
 	overlayView: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 	closeOverlay: (() => void) | undefined;
 	customOptions?: unknown[];
+	statuses: Map<string, string | undefined>;
 }
 
 interface GitScript {
@@ -155,6 +156,9 @@ function fakePi(script: GitScript[] = [{ numstat: "", porcelain: "" }], commands
 		getCommands() {
 			return commandsList;
 		},
+		getAllTools() {
+			return Array.from(tools.values());
+		},
 		sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean }) {
 			sentMessages.push({ content, options });
 		},
@@ -176,7 +180,8 @@ async function fire(handlers: Map<string, Array<(event: unknown, ctx: ExtensionC
 }
 
 function fakeContext(options: { theme?: typeof plainTheme & { getBgAnsi?(): string }; hasUI?: boolean; entries?: unknown[]; oauth?: boolean; pending?: boolean; idle?: boolean; editorFactory?: unknown; token?: string; select?: (title: string, options: string[]) => Promise<string | undefined> } = {}): { ctx: ExtensionContext; ui: FakeUi; overlayReady: Promise<void> } {
-	const ui: FakeUi = { footerFactory: undefined, editorFactory: options.editorFactory, widgets: new Map(), widgetSets: 0, workingVisible: undefined, notices: [], overlay: undefined, overlayView: undefined, closeOverlay: undefined, customOptions: [] };
+	const statuses = new Map<string, string | undefined>();
+	const ui: FakeUi = { statuses, footerFactory: undefined, editorFactory: options.editorFactory, widgets: new Map(), widgetSets: 0, workingVisible: undefined, notices: [], overlay: undefined, overlayView: undefined, closeOverlay: undefined, customOptions: [] };
 	let resolveOverlay: () => void;
 	const overlayReady = new Promise<void>((resolve) => { resolveOverlay = resolve; });
 	const entries = options.entries ?? [];
@@ -200,6 +205,10 @@ function fakeContext(options: { theme?: typeof plainTheme & { getBgAnsi?(): stri
 			getAllThemes: () => [{ name: "dark", path: undefined }, { name: "light", path: undefined }],
 			getTheme: (name: string) => name === "dark" || name === "light" ? { name } : undefined,
 			setTheme: (name: string) => ({ success: name === "dark" || name === "light" }),
+			setStatus(key: string, text?: string) {
+				if (text === undefined) statuses.delete(key);
+				else statuses.set(key, text);
+			},
 			// Added only when requested: an absent select keeps the no-menu fallback
 			// that every pre-existing test relies on.
 			...(options.select ? { select: options.select } : {}),
@@ -366,6 +375,33 @@ test("gentleShell installs the footer on session_start when a UI exists", () => 
 	const lines = component.render(120);
 	assert.equal(lines.length, 1);
 	assert.match(lines[0], /main ⟡ gpt-5\.5 · medium/);
+});
+
+test("gentleShell publishes connected MCP servers to ctx.ui.setStatus on session_start and agent_start", async () => {
+	const tempDir = mkdtempSync(join(tmpdir(), "gentle-shell-mcp-"));
+	try {
+		writeFileSync(
+			join(tempDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { s1: { command: "test" }, s2: { command: "test" } } }),
+		);
+		const { pi, handlers, tools } = fakePi();
+		tools.set("mcp__s1__t1", { name: "mcp__s1__t1" } as never);
+		tools.set("mcp__s2__t1", { name: "mcp__s2__t1" } as never);
+
+		gentleShell(pi, {}, { agentDir: tempDir });
+		const { ctx, ui } = fakeContext();
+		await fire(handlers, "session_start", ctx);
+
+		assert.equal(ui.statuses.get("mcp"), "MCP: 2 servers");
+
+		// Add tool mcp__s3__t1
+		tools.set("mcp__s3__t1", { name: "mcp__s3__t1" } as never);
+		for (const handler of handlers.get("agent_start") ?? []) handler({}, ctx);
+
+		assert.equal(ui.statuses.get("mcp"), "MCP: 3 servers");
+	} finally {
+		rmSync(tempDir, { recursive: true, force: true });
+	}
 });
 
 async function reviewSidebarHarness() {
