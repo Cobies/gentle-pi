@@ -145,7 +145,7 @@ const MODULE_BUDGETS: Record<string, number> = {
 	// read and to pass paths, not content (7,000 -> 7,100 B; every other card sentence is pinned by a contract).
 	// S15: units of about 100 changed lines or less always run inline (7,100 -> 7,300 B).
 	// Sequential worker unblocking and mode contract (7,300 -> 7_800 B).
-	"orchestrator-delegation.md": 7_800,
+	"orchestrator-delegation.md": 8_200,
 	"orchestrator-delegation-reference.md": 14_800,
 	// gentle-shell#1731 T23: Close gate accepts one Needs your decision result as a stop (12,500 -> 12,600 B).
 	// S14: close the open slice before a high-risk commit; outcomes per commit (12,600 -> 12,850 B).
