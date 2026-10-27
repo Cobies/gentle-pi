@@ -24,14 +24,11 @@ function workspace(withDocument: boolean): string {
 	return root;
 }
 
-test("S16: a writer launch without a feature-document task is rejected with an inline instruction", (t) => {
+test("universal delegation: a writer launch without a feature-document task is admitted by default", (t) => {
 	const root = workspace(false);
 	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const denied = rejectUndocumentedWriterLaunch({ agent: "gentle-ai-worker", task: `Implement annual budgets.${surfaces}` }, { root, contextUsage: { tokens: 20_000, contextWindow: 400_000 } });
-	assert.ok(denied?.block, "the launch must be blocked");
-	assert.match(denied.reason, /write this unit inline yourself/);
-	assert.match(denied.reason, /do not retry/);
-	assert.match(denied.reason, /never create a feature document only to launch writers/);
+	const admitted = rejectUndocumentedWriterLaunch({ agent: "gentle-ai-worker", task: `Implement annual budgets.${surfaces}` }, { root, contextUsage: { tokens: 20_000, contextWindow: 400_000 } });
+	assert.equal(admitted, undefined, "universal delegation allows writer launches without a feature document");
 });
 
 test("S16: a writer naming a task of an existing feature document is admitted", (t) => {
@@ -43,38 +40,36 @@ test("S16: a writer naming a task of an existing feature document is admitted", 
 	assert.equal(rejectUndocumentedWriterLaunch(viaContext, { root, contextUsage: { tokens: 20_000, contextWindow: 400_000 } }), undefined);
 });
 
-test("S16: a Spec reference to a missing document, or one escaping the root, is rejected", (t) => {
+test("universal delegation: a Spec reference to a missing document or escaping root does not block writer admission", (t) => {
 	const root = workspace(false);
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	for (const spec of ["odd/tasks/ledger.md", "odd/tasks/../../etc/passwd.md"]) {
-		const denied = rejectUndocumentedWriterLaunch({ agent: "gentle-ai-worker", task: `Spec: ${spec}, T1${surfaces}` }, { root, contextUsage: { tokens: 20_000, contextWindow: 400_000 } });
-		assert.ok(denied?.block, `${spec} must not admit a writer`);
+		const admitted = rejectUndocumentedWriterLaunch({ agent: "gentle-ai-worker", task: `Spec: ${spec}, T1${surfaces}` }, { root, contextUsage: { tokens: 20_000, contextWindow: 400_000 } });
+		assert.equal(admitted, undefined, `${spec} is admitted by default`);
 	}
 });
 
-test("S16: the measured context backstop admits a writer without a document", (t) => {
+test("universal delegation: writers are admitted regardless of context tokens", (t) => {
 	const root = workspace(false);
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const input = { agent: "gentle-ai-worker", task: `Implement annual budgets.${surfaces}` };
 	assert.equal(rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens: 150_000, contextWindow: 1_000_000 } }), undefined);
-	assert.ok(rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens: 149_999, contextWindow: 1_000_000 } })?.block, "below the backstop does not admit");
-	assert.ok(rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens: null, contextWindow: 400_000 } })?.block, "unknown context usage does not admit");
-	assert.ok(rejectUndocumentedWriterLaunch(input, { root, contextUsage: undefined })?.block, "missing context usage does not admit");
+	assert.equal(rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens: 149_999, contextWindow: 1_000_000 } }), undefined);
+	assert.equal(rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens: null, contextWindow: 400_000 } }), undefined);
+	assert.equal(rejectUndocumentedWriterLaunch(input, { root, contextUsage: undefined }), undefined);
 });
 
-// Harness roadmap R1: the admission uses the same threshold as the runtime notice, min(absolute cap, fraction x
-// window), so a small context window reaches the backstop at 15% of its size instead of a fixed 150,000 tokens.
-test("S16: the admission backstop scales with the measured context window and honors the environment", (t) => {
+test("universal delegation: admission admits across varying context usage and environments", (t) => {
 	const root = workspace(false);
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const input = { agent: "gentle-ai-worker", task: `Implement annual budgets.${surfaces}` };
 	const decide = (tokens: number, contextWindow: number, env?: NodeJS.ProcessEnv) => rejectUndocumentedWriterLaunch(input, { root, contextUsage: { tokens, contextWindow }, env })?.block ?? false;
-	assert.equal(decide(19_200, 128_000), false, "15% of a small window admits");
-	assert.equal(decide(19_199, 128_000), true);
-	assert.equal(decide(150_000, 1_000_000), false, "a large window keeps the absolute cap");
-	assert.equal(decide(149_999, 1_000_000), true);
-	assert.equal(decide(120_000, 1_000_000), true);
-	assert.equal(decide(120_000, 1_000_000, { [CONTEXT_BACKSTOP_TOKENS_ENV]: "100000" }), false, "the cap is overridable");
+	assert.equal(decide(19_200, 128_000), false);
+	assert.equal(decide(19_199, 128_000), false);
+	assert.equal(decide(150_000, 1_000_000), false);
+	assert.equal(decide(149_999, 1_000_000), false);
+	assert.equal(decide(120_000, 1_000_000), false);
+	assert.equal(decide(120_000, 1_000_000, { [CONTEXT_BACKSTOP_TOKENS_ENV]: "100000" }), false);
 });
 
 test("Turn budget exceeded admits a writer without a pre-existing feature document", (t) => {
@@ -108,22 +103,18 @@ function launchThroughHook(input: Record<string, unknown>, cwd: string, tokens: 
 	} as unknown as ExtensionContext);
 }
 
-test("S16: the orchestrator tool_call hook blocks an undocumented writer and admits a documented one", async (t) => {
+test("universal delegation: the orchestrator tool_call hook admits writers by default", async (t) => {
 	const bare = workspace(false);
 	const documented = workspace(true);
 	t.after(() => { rmSync(bare, { recursive: true, force: true }); rmSync(documented, { recursive: true, force: true }); });
-	const blocked = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", task: `Implement annual budgets.${surfaces}` }, bare, 20_000);
-	assert.equal(blocked?.block, true);
-	assert.match(blocked?.reason ?? "", /write this unit inline yourself/);
+	const admittedBare = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", task: `Implement annual budgets.${surfaces}` }, bare, 20_000);
+	assert.equal(admittedBare?.block, undefined, "writer launch in bare workspace is admitted by default");
 	const admitted = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", task: `Spec: odd/tasks/ledger.md, T1. Read until ## Log.${surfaces}` }, documented, 20_000);
 	assert.equal(admitted?.block, undefined);
 	const explorer = await launchThroughHook({ agent: "gentle-ai-explore", mode: "task", task: "Map src/budget.ts" }, bare, 20_000);
 	assert.equal(explorer?.block, undefined, "read-only subagents are unaffected");
-	// The hook passes the measured window, not only the tokens: 19.2k of a 128k window is at the backstop.
 	const smallWindow = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", task: `Implement annual budgets.${surfaces}` }, bare, 19_200, {}, 128_000);
-	assert.equal(smallWindow?.block, undefined, "15% of the measured window admits");
-	const envCap = await launchThroughHook({ agent: "gentle-ai-worker", mode: "background", task: `Implement annual budgets.${surfaces}` }, bare, 19_200, { GENTLE_PI_CONTEXT_BACKSTOP_FRACTION: "0.9" }, 128_000);
-	assert.equal(envCap?.block, true, "the hook reads the session environment");
+	assert.equal(smallWindow?.block, undefined);
 });
 
 // Verifier B1: the delegation card tells the parent to write `Spec: odd/tasks/<feature>.md (read until "## Log").
@@ -140,7 +131,7 @@ test("S16: the delegation card format and a comma-free task reference are admitt
 	}
 });
 
-test("S16: a Spec mention inside prose, outside odd/tasks, or through a symlink leaving the root is rejected", (t) => {
+test("universal delegation: a Spec mention in prose or symlink does not block writer launch", (t) => {
 	const root = workspace(true);
 	const outside = mkdtempSync(join(tmpdir(), "writer-admission-outside-"));
 	t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
@@ -152,7 +143,7 @@ test("S16: a Spec mention inside prose, outside odd/tasks, or through a symlink 
 		"Spec: odd/tasks/../../README.md, T1",
 		"Spec: odd/tasks/link-out.md, T1",
 	]) {
-		assert.ok(rejectUndocumentedWriterLaunch({ agent: "gentle-ai-worker", task: `${task}${surfaces}` }, { root, contextUsage: { tokens: 0, contextWindow: 400_000 } })?.block, task);
+		assert.equal(rejectUndocumentedWriterLaunch({ agent: "gentle-ai-worker", task: `${task}${surfaces}` }, { root, contextUsage: { tokens: 0, contextWindow: 400_000 } }), undefined);
 	}
 });
 

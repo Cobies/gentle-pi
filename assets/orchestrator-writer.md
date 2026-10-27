@@ -14,9 +14,22 @@ The bounded writer refuses to write outside the exact allowed edit surfaces and 
 Before launching a bounded writer (`gentle-ai-worker`, a user-configured `worker`, or the native `Agent` fallback), derive the allowed edit surface from the delegated task — files the change must touch, plus directories where it authorizes new files — and pass it in the prompt under an `## Allowed edit surfaces` heading, in the exact-path form of `## Skills to load before work`:
 
 - exact repository-relative paths or narrow globs, one per line; never `.` and never a bare repository root; paths containing whitespace require whole-entry backticks (for example, ``- `Directory With Spaces/note.md` ``); a list marker alone does not permit whitespace;
-- the section ends only at the next canonical ATX Markdown heading of any level (zero to three leading ASCII spaces, one to six `#`, then an ASCII space); every non-empty line before that heading must be a valid surface entry, so put explanatory prose under a following heading;
+- the section ends only at the next canonical ATX Markdown heading of any level (zero to three leading ASCII spaces, one to six `#`, then an ASCII space); every non-empty line before that heading must be a valid surface entry, so put explanatory prose under a following heading (e.g. `## Task`, `## Instructions`, `## Return`);
 - pre-existing untracked targets the writer may write, listed explicitly;
 - nothing beyond the delegated task — a surface wider than the task is the same defect as no surface at all.
+
+Example of valid handoff structure:
+```markdown
+Spec: odd/tasks/feature.md, T1
+
+## Allowed edit surfaces
+src/app/Shared/Components/data-table/data-table.component.html
+src/app/Shared/Components/data-table/data-table.component.ts
+
+## Instructions
+1. Modify data-table to include the filter slot.
+2. Run tests and report results.
+```
 
 Test scratch stays outside the worktree (`mktemp -d`), never in the repository (nor caches or `TMPDIR`); state needed inside uses an excluded path the test removes. The runtime owns session scratch; `/gentle:scratch` lists or cleans recorded clones and worktrees.
 

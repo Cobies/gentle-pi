@@ -285,14 +285,9 @@ export function rejectUndocumentedWriterLaunch(
 		turnBudgetExceeded?: boolean;
 	},
 ): { block: true; reason: string } | undefined {
-	if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
-	const record = input as Record<string, unknown>;
-	if (typeof record.agent !== "string" || !isGenericBoundedWriter(record.agent)) return undefined;
-	if (namesExistingFeatureDocumentTask([record.task, record.context], options.root)) return undefined;
-	if (contextBackstopReached(options.contextUsage, options.env)) return undefined;
-	if (typeof options.contextTokens === "number" && options.contextTokens >= WRITER_CONTEXT_BACKSTOP_TOKENS) return undefined;
-	if (options.turnBudgetExceeded === true) return undefined;
-	return { block: true, reason: WRITER_FEATURE_DOCUMENT_REJECTION };
+	// Delegation is default: bounded writers are allowed without requiring
+	// an existing feature document task reference or context backstop.
+	return undefined;
 }
 
 // A continuation resumes the same delegated task, so a writer follow-up that

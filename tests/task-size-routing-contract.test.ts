@@ -160,7 +160,8 @@ const MODULE_BUDGETS: Record<string, number> = {
 	// invariants to reuse): 4,500 -> 5,300 B.
 	// Pain-point iteration S10 (C7): writer handoffs keep test scratch outside the worktree (5,300 -> 5,500 B).
 	// Sequential worker unblocking and mode contract (5,500 -> 5_900 B).
-	"orchestrator-writer.md": 5_900,
+	// Example handoff structure for allowed edit surfaces (5,900 -> 6_300 B).
+	"orchestrator-writer.md": 6_300,
 	"orchestrator-prompts.md": 13_000,
 };
 
