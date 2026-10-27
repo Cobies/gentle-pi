@@ -2391,7 +2391,11 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			if ((Object.hasOwn(params, "repository_root") && typeof params.repository_root !== "string") || (Object.hasOwn(params, "workspace_root") && typeof params.workspace_root !== "string")) throw new Error("Root selectors must be strings.");
 			if (Object.hasOwn(params, "sdd_change") || Object.hasOwn(params, "remediation") || Object.hasOwn(params, "research_selection") || retiredSddAgent(String(params.agent))) return text("Error: retired SDD delegation is not supported.", { error: "retired SDD delegation" });
 			const { agents } = discoverAgents(roots(ctx));
-			const agent = agents.find((candidate) => candidate.name === params.agent);
+			const requestedAgent = typeof params.agent === "string" ? params.agent.trim() : "";
+			const agent = agents.find((candidate) => candidate.name === requestedAgent)
+				?? (requestedAgent && !requestedAgent.startsWith("gentle-ai-")
+					? agents.find((candidate) => candidate.name === `gentle-ai-${requestedAgent}`)
+					: undefined);
 			if (!agent) return text(`Error: no subagent named "${String(params.agent)}". Known: ${agents.map((candidate) => candidate.name).join(", ") || "none"}`, { error: "unknown agent" });
 			const mode = (params.mode as AgentMode | undefined) ?? agent.mode ?? resolveDefaultSubagentMode({
 				configuredDefault: loadAgentsConfig(roots(ctx)).defaultMode,
