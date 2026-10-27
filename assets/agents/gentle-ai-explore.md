@@ -1,6 +1,7 @@
 ---
 name: gentle-ai-explore
 description: Read-only local and web exploration on its configured economical model.
+mode: task
 tools:
   - read
   - grep

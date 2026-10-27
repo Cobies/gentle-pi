@@ -8,6 +8,7 @@ export const READ_THRASHING_THRESHOLD = 5;
 export const EXPLORE_READ_BUDGET_THRESHOLD = 4;
 export const TURN_TOOL_CALL_LIMIT = 25;
 export const SUBAGENT_POLL_LIMIT = 2;
+export const SUBAGENT_CROSS_TURN_POLL_LIMIT = 3;
 
 /**
  * Resolves current context tokens accurately, handling edge cases where
@@ -310,35 +311,58 @@ export class TurnToolCallGuard {
 
 /**
  * Bounds reactive polling loops where the parent orchestrator repeatedly checks
- * subagent_status or subagent_result in the same turn instead of waiting for
- * the background completion notification event.
+ * subagent_status or subagent_result instead of waiting for the background
+ * completion notification event. Tracks both tight in-turn loops and cross-turn
+ * polling sequences across consecutive turns.
  */
 export class SubagentPollingGuard {
 	private pollCount = 0;
+	private consecutiveTurnPollCount = 0;
+	private turnHadPoll = false;
 
 	checkPoll(event: { toolName: string; input?: unknown }): { block: true; reason: string } | undefined {
 		if (event.toolName !== "subagent_status" && event.toolName !== "subagent_result") {
 			return undefined;
 		}
 		this.pollCount += 1;
+		this.turnHadPoll = true;
+
 		if (this.pollCount > SUBAGENT_POLL_LIMIT) {
 			return {
 				block: true,
 				reason: `Subagent polling blocked: Do not poll subagent_status or subagent_result in a tight loop (${this.pollCount} calls this turn). End your turn and wait for the completion notification event, or launch subagents with mode: "task" for synchronous delegation.`,
 			};
 		}
+
+		if (this.consecutiveTurnPollCount + 1 > SUBAGENT_CROSS_TURN_POLL_LIMIT) {
+			return {
+				block: true,
+				reason: `Subagent polling blocked: Do not poll subagent_status or subagent_result across consecutive turns (${this.consecutiveTurnPollCount + 1} turns with status checks). End your turn and wait for the background completion notification event (gentle-agents.result), or launch subagents with mode: "task" for synchronous delegation.`,
+			};
+		}
+
 		return undefined;
 	}
 
 	resetTurn(): void {
+		if (this.turnHadPoll) {
+			this.consecutiveTurnPollCount += 1;
+		} else {
+			this.consecutiveTurnPollCount = 0;
+		}
 		this.pollCount = 0;
+		this.turnHadPoll = false;
 	}
 
 	recordDelegation(): void {
 		this.pollCount = 0;
+		this.consecutiveTurnPollCount = 0;
+		this.turnHadPoll = false;
 	}
 
 	reset(): void {
 		this.pollCount = 0;
+		this.consecutiveTurnPollCount = 0;
+		this.turnHadPoll = false;
 	}
 }

@@ -296,3 +296,29 @@ test("SubagentPollingGuard bounds reactive status polling loops in a turn", () =
 	guard.resetTurn();
 	assert.equal(guard.checkPoll({ toolName: "subagent_status", input: { task_id: "t1" } }), undefined);
 });
+
+test("SubagentPollingGuard bounds cross-turn polling loops across consecutive turns", () => {
+	const guard = new SubagentPollingGuard();
+
+	// Turn 1: 1 status check -> allowed
+	assert.equal(guard.checkPoll({ toolName: "subagent_status", input: { task_id: "t1" } }), undefined);
+	guard.resetTurn();
+
+	// Turn 2: 1 status check -> allowed
+	assert.equal(guard.checkPoll({ toolName: "subagent_status", input: { task_id: "t1" } }), undefined);
+	guard.resetTurn();
+
+	// Turn 3: 1 status check -> allowed
+	assert.equal(guard.checkPoll({ toolName: "subagent_status", input: { task_id: "t1" } }), undefined);
+	guard.resetTurn();
+
+	// Turn 4: 1 status check -> blocked by SUBAGENT_CROSS_TURN_POLL_LIMIT (3 turns allowed)
+	const blocked = guard.checkPoll({ toolName: "subagent_status", input: { task_id: "t1" } });
+	assert.ok(blocked?.block, "must block cross-turn polling on 4th consecutive polling turn");
+	assert.match(blocked.reason, /across consecutive turns/);
+
+	// A turn without polling breaks the consecutive streak
+	guard.resetTurn();
+	guard.resetTurn(); // Turn without poll
+	assert.equal(guard.checkPoll({ toolName: "subagent_status", input: { task_id: "t1" } }), undefined);
+});
