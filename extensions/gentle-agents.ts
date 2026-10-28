@@ -19,6 +19,7 @@ import { createJobRegistry, isStandaloneSleep, type JobExecOperations, type JobR
 import { JOB_GLYPH, JOB_NOTICE_TYPE, jobDetails, jobNoticeText, monitorEventsText, monitorStoppedText, registerBackgroundJobTools } from "../lib/background-jobs-tools.ts";
 import { createMonitorController, mergeMonitorBatches, type MonitorNotice } from "../lib/background-monitor.ts";
 import { JobsView } from "../lib/jobs-view.ts";
+import { JOBS_FINISHED_TTL_MS } from "../lib/jobs-widget.ts";
 import { JOBS_SIDEBAR_EVENT, JOBS_STATUS_KEY } from "../lib/jobs-sidebar-state.ts";
 import { Text, type Component, type TUI } from "@earendil-works/pi-tui";
 import { invalidateSidebar } from "../lib/shell-sidebar-layout.ts";
@@ -30,6 +31,7 @@ import { createAgentMessageQueue, type PendingAgentMessage } from "../lib/agents
 import { AGENT_MODE, PROFILE_SOURCE, discoverAgents, formatModelRef, loadAgentsConfig, resolveAgentProfile, unmatchedProfileKeys, withPinnedModelProfiles, type AgentDefinition, type AgentMode, type ProfileSource } from "../lib/agents-config.ts";
 import { freezeSessionProfileAtStartup, inheritedProfileDriftNotice, resolveSessionProfile, sessionProfileRoutingAt, type InheritedProfileOptions, type SessionProfileResolution } from "../lib/session-profile-freeze.ts";
 import { resolveProfilePin, resolveUnversionedProjectProfile } from "../lib/agent-profile-pin.ts";
+import { requireSessionProfileAuthority } from "../lib/session-profile-authority.ts";
 import { resolveBackgroundSubagentsPolicy } from "../lib/background-subagents-policy.ts";
 import { installBackgroundCacheWarming } from "../lib/background-cache-warming.ts";
 import { isFinished, MISSING_TOOLS_NOTE_PREFIX, TASK_EVENT, TASK_STATUS, TaskStore, type AskRequest, type SubagentSpecialization, type TaskRecord } from "../lib/agents-protocol.ts";
@@ -1273,11 +1275,22 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	// Structured descriptions feed Status; native hosts keep the compact count.
 	const refreshJobStatus = () => {
 		const sessionId = activeSessionId();
-		const running = jobs.list(sessionId ?? "").filter((job) => job.status === "running")
+		const sessionJobs = jobs.list(sessionId ?? "");
+		const running = sessionJobs.filter((job) => job.status === "running")
 			.sort((a, b) => b.startedAt - a.startedAt);
+		// Finished tails ride the same snapshot so the sidebar card can linger
+		// them briefly, like the Agents card's results; failed jobs ride too,
+		// painting the ✗ glyph like a nonzero exit.
+		const finished = sessionJobs.filter((job) => (job.status === "exited" || job.status === "stopped" || job.status === "failed") && job.endedAt !== undefined && deps.now() - job.endedAt < JOBS_FINISHED_TTL_MS)
+			.sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)).slice(0, 3);
 		try { parentCtx?.ui.setStatus(JOBS_STATUS_KEY, running.length === 0 ? undefined : `${JOB_GLYPH} ${running.length} job${running.length === 1 ? "" : "s"}`); } catch { /* Status is cosmetic. */ }
 		if (sessionId) {
-			try { pi.events.emit(JOBS_SIDEBAR_EVENT, { sessionId, snapshot: { jobs: running.map(({ id, label, startedAt }) => ({ id, label, startedAt })) } }); } catch { /* Display only. */ }
+			try {
+				pi.events.emit(JOBS_SIDEBAR_EVENT, { sessionId, snapshot: { jobs: [
+					...running.map(({ id, label, startedAt }) => ({ id, label, startedAt })),
+					...finished.map(({ id, label, startedAt, status, endedAt, exitCode }) => ({ id, label, startedAt, status, endedAt, exitCode })),
+				] } });
+			} catch { /* Display only. */ }
 		}
 	};
 
@@ -1657,7 +1670,11 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			ctx.ui.notify(`Could not read the task's session: ${error instanceof Error ? error.message : String(error)}`, "warning");
 			return;
 		}
-		if (!openInExternalEditor(overlayHost, transcriptPath)) ctx.ui.notify("No editor configured. Set $VISUAL or $EDITOR.", "warning");
+		try {
+			if (!openInExternalEditor(overlayHost, transcriptPath)) ctx.ui.notify("No editor configured. Set $VISUAL or $EDITOR.", "warning");
+		} catch (error) {
+			ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+		}
 	};
 
 	const writeTranscript = async (task: TaskRecord): Promise<string> => {
@@ -1786,6 +1803,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		// bound session used to kill its own non-git writer mid-preparation because
 		// admission still read only the pin/global layers). Slice 3b-ii: the same
 		// read covers the frozen inherited profile and `follow` mode.
+		requireSessionProfileAuthority(ctx.sessionManager);
 		const profileConfigHome = gentlePiConfigHome(deps.env);
 		const sessionProfile = resolveSessionProfile({
 			sessionId: ctx.sessionManager.getSessionId(),
@@ -1807,6 +1825,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			admittedModel = `${catalogModel.provider}/${catalogModel.id}`;
 			if (!current() || !await prepareBoundSessionRepository(originalManager, originalCwd, signal) || !current() || safeBootstrapDirectory(originalCwd) !== root || resolveSessionWorktree(originalCwd, originalCwd)?.root !== root) throw new Error("Writer repository preparation was unavailable or its session/target changed.");
 		}
+		requireSessionProfileAuthority(originalManager);
 		const parentCwd = ctx.sessionManager.getCwd();
 		// An explicit target is validated before any queue or session-dir writes.
 		const parentIdentity = deps.resolveWorktree(parentCwd, parentCwd);
@@ -1853,6 +1872,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		// included; only `follow` reads the defaults of the target. The profile is
 		// resolved here, at task-request creation, so queued and running children
 		// keep the routing frozen into their requests even if the session rebinds.
+		requireSessionProfileAuthority(originalManager);
 		// The routing target this launch reads (#1064), reused to name the winning
 		// layer (#2180) so both answers come from one resolution.
 		const routingTarget = {
@@ -2379,6 +2399,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			},
 		},
 		async (params, ctx, signal, onUpdate) => {
+			requireSessionProfileAuthority(ctx.sessionManager);
 			const work = Object.hasOwn(params, "work") ? decodeWorkDescriptor(params.work) : undefined;
 			const manager = ctx.sessionManager, sessionId = manager.getSessionId();
 			if (typeof params.agent !== "string" || !params.agent.trim() || typeof params.task !== "string" || !params.task.trim() || (params.context !== undefined && typeof params.context !== "string") || (params.label !== undefined && typeof params.label !== "string")) throw new Error("Subagent dispatch requires a named agent, non-empty task and string context/label.");
@@ -2475,6 +2496,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		"Resume a finished subagent task in its own session with a follow-up prompt.",
 		{ required: ["task_id", "prompt"], properties: { task_id: { type: "string" }, prompt: { type: "string" }, label: { type: "string", description: "Three to six words naming the follow-up." }, mode: { type: "string", enum: ["task", "background"] } } },
 		async (params, ctx, signal, onUpdate) => {
+			requireSessionProfileAuthority(ctx.sessionManager);
 			if (Object.hasOwn(params, "sdd_change") || Object.hasOwn(params, "remediation") || Object.hasOwn(params, "research_selection")) return text("Error: retired SDD delegation is not supported.", { error: "retired SDD delegation" });
 			const previous = await resolveTask(String(params.task_id));
 			if (!previous) return unknownTask(params.task_id, ctx);

@@ -207,7 +207,7 @@ function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (t
 		cwd,
 		hasUI: true,
 		mode: "tui",
-		sessionManager: { getSessionId: () => "s1", getCwd: () => cwd, getEntries: () => [], getBranch: () => [] },
+		sessionManager: { getSessionId: () => "s1", getCwd: () => cwd, getEntries: () => [], getBranch: () => [], getSessionFile: () => undefined },
 		ui: {
 			notify: (message: string) => dialogs.push(`notify:${message}`),
 			custom: (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: unknown) => void) => Overlay, options: unknown) =>
@@ -3473,7 +3473,7 @@ test("session_start freezes the inherited pin: a later pin change does not move 
 	assert.equal(await session.launch(), "openai/alpha:minimal");
 	assert.equal(await session.launch(), "openai/alpha:minimal");
 	assert.deepEqual(session.driftNotices(), [
-		'notify:el Gentleman: the default profile changed to "local" (local), this session keeps "frontier" (local). Press Enter on a profile in /gentle:profiles to adopt it.',
+		'notify:el Gentleman: the default profile changed to "local" (local), this session keeps "frontier" (local). Open /gentle:profiles and choose Use in this session to adopt one.',
 	], "one notice for one change, across two launches");
 	base.writeStore(DRIFT_PROFILES, "local");
 	base.writeDeclaration("local");
@@ -3502,7 +3502,7 @@ test("a session with no profile anywhere keeps today's routing even after a pin 
 	base.writePin("frontier");
 	assert.equal(await session.launch(), "openai-codex/gpt-5.6-terra:low");
 	assert.deepEqual(session.driftNotices(), [
-		'notify:el Gentleman: the default profile changed to "frontier" (local), this session keeps no profile. Press Enter on a profile in /gentle:profiles to adopt it.',
+		'notify:el Gentleman: the default profile changed to "frontier" (local), this session keeps no profile. Open /gentle:profiles and choose Use in this session to adopt one.',
 	]);
 });
 
@@ -4520,8 +4520,8 @@ test("the card follows the active session: after /new the earlier session's task
 	await tools.get("subagent_run")!.execute("c1", { agent: "explore", task: "Long job", mode: "background" }, undefined, undefined, ctx);
 	await tick();
 	assert.match(widget()![1], /◐  explore  Long job/);
-	const sessions = ctx as unknown as { sessionManager: { getSessionId(): string; getCwd(): string; getBranch(): []; getEntries(): [] } };
-	sessions.sessionManager = { getSessionId: () => "s2", getCwd: () => cwd, getBranch: () => [], getEntries: () => [] };
+	const sessions = ctx as unknown as { sessionManager: { getSessionId(): string; getCwd(): string; getBranch(): []; getEntries(): []; getSessionFile(): undefined } };
+	sessions.sessionManager = { getSessionId: () => "s2", getCwd: () => cwd, getBranch: () => [], getEntries: () => [], getSessionFile: () => undefined };
 	await fire("session_start", ctx, { type: "session_start", reason: "new" });
 	assert.deepEqual(widget(), [], "the new session starts with an empty card");
 	assert.match((await tools.get("subagent_list_tasks")!.execute("c2", {}, undefined, undefined, ctx)).content[0].text, /No subagent tasks in this session/);
@@ -4533,7 +4533,7 @@ test("the card follows the active session: after /new the earlier session's task
 	assert.doesNotMatch(overlay.render(80).map(stripAnsi).join("\n"), /◐ Subagent explore/, "retained children of a replaced session do not imply an open orchestrator");
 	overlay.handleInput("\x1b");
 	await opened;
-	sessions.sessionManager = { getSessionId: () => "s1", getCwd: () => cwd, getBranch: () => [], getEntries: () => [] };
+	sessions.sessionManager = { getSessionId: () => "s1", getCwd: () => cwd, getBranch: () => [], getEntries: () => [], getSessionFile: () => undefined };
 	await fire("session_start", ctx, { type: "session_start", reason: "resume" });
 	assert.match(widget()![1], /◐  explore  Long job/, "resuming the first session shows its task again");
 });
@@ -6493,7 +6493,7 @@ test("a subdirectory session cwd and workspace_root of the same worktree share o
 	const env: NodeJS.ProcessEnv = {};
 	gentleAgents(h.pi, env, { ...runtime.deps, resolveWorktree, env, agentHome: profile });
 	const { ctx } = fakeContext();
-	Object.assign(ctx, { cwd: sub, sessionManager: { getSessionId: () => "s1", getCwd: () => sub, getEntries: () => [], getBranch: () => [] } });
+	Object.assign(ctx, { cwd: sub, sessionManager: { getSessionId: () => "s1", getCwd: () => sub, getEntries: () => [], getBranch: () => [], getSessionFile: () => undefined } });
 	await h.fire("session_start", ctx);
 	const task = "Write it.\n\n## Allowed edit surfaces\nsrc/app.ts\n\n## Return\nReport";
 	try {
@@ -6654,7 +6654,7 @@ test("/gentle:jobs opens this session's jobs overlay, stops the selected job, an
 	gentleAgents(pi, {}, { ...deps().deps, jobShell: jobs.shell, jobOutputDir: () => jobs.dir });
 	const { ctx, overlays } = fakeContext();
 	const statuses: Array<string | undefined> = [];
-	const snapshots: Array<{ sessionId: string; snapshot: { jobs: Array<{ id: string; label: string; startedAt: number }> } }> = [];
+	const snapshots: Array<{ sessionId: string; snapshot: { jobs: Array<{ id: string; label: string; startedAt: number; status?: string }> } }> = [];
 	const unsubscribe = pi.events.on("gentle-ai:jobs-sidebar", (value) => { snapshots.push(value as typeof snapshots[number]); });
 	Object.assign(ctx.ui, { setStatus: (key: string, value: string | undefined) => { if (key === "gentle-jobs") statuses.push(value); } });
 	try {
@@ -6672,7 +6672,7 @@ test("/gentle:jobs opens this session's jobs overlay, stops the selected job, an
 		view.handleInput("s");
 		assert.equal(jobs.runs[0]!.signal?.aborted, true, "s stops the selected job");
 		assert.equal(statuses.at(-1), undefined, "the footer count clears when nothing runs");
-		assert.deepEqual(snapshots.at(-1)?.snapshot.jobs, [], "the Status descriptions clear when nothing runs");
+		assert.deepEqual(snapshots.at(-1)?.snapshot.jobs.map(({ status }) => status), ["stopped"], "the finished tail keeps the stopped job visible once the count clears");
 		await jobIo();
 		const notices = sent.filter((entry) => entry.message.customType === "gentle-jobs.notice");
 		assert.equal(notices.length, 1, "the agent was told it would be notified, so a human stop is reported once");
