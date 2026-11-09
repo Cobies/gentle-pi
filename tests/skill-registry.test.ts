@@ -1662,14 +1662,24 @@ function sharedCacheFixture() {
 	};
 }
 
-function runSharedCacheProcess(root: string, cwd: string, resolved: ResolvedSkill[]): SharedCacheResult {
+function runSharedCacheProcess(
+	root: string,
+	cwd: string,
+	resolved: ResolvedSkill[],
+	via: "regenerate" | "apply" = "regenerate",
+): SharedCacheResult {
+	// "apply" is the real before_agent_start path (Pi's own resolution, which
+	// may be an explicit empty batch); "regenerate" is what a watcher poll does.
+	const call = via === "apply"
+		? `__testing.applyResolvedSkillsUpdate(${JSON.stringify(cwd)}, ${JSON.stringify(resolved)})`
+		: `__testing.regenerateRegistry(${JSON.stringify(cwd)}, false, ${JSON.stringify(resolved)})`;
 	const child = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
 		import { join } from "node:path";
 		const root = ${JSON.stringify(root)};
 		process.env.HOME = join(root, "home");
 		process.env.USERPROFILE = process.env.HOME;
 		const { __testing } = await import(${JSON.stringify(registryExtensionUrl)});
-		const result = await __testing.regenerateRegistry(${JSON.stringify(cwd)}, false, ${JSON.stringify(resolved)});
+		const result = await ${call};
 		console.log("RESULT " + JSON.stringify(result));
 	`], {
 		encoding: "utf8",
@@ -1943,3 +1953,163 @@ test("files-only fingerprint excludes resolved skills and an empty resolved set 
 	);
 });
 
+// R8 (gentle-shell#3020): the resolved rows live in the shared cache, not only
+// their digest. A files-driven rewrite by a session with no opinion of its own
+// must keep rendering the peer's Pi-resolved section instead of erasing it and
+// forcing the peer to republish on the next poll.
+test("a files-driven rewrite by a session with no resolved skills preserves the peer's rows (#3020)", async (t) => {
+	const fixture = sharedCacheFixture();
+	t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+	const resolvedPath = join(fixture.root, "pkg", "skills", "prompted", "SKILL.md");
+	const resolved: ResolvedSkill[] = [
+		{
+			name: "prompted",
+			description: "Trigger: prompted session authority.",
+			filePath: resolvedPath,
+			sourceInfo: { scope: "project", origin: "package" },
+		},
+	];
+
+	const published = runSharedCacheProcess(fixture.root, fixture.cwd, resolved);
+	assert.equal(published.regenerated, true, "the prompted process must publish first");
+	assert.match(readFileSync(fixture.registry, "utf8"), new RegExp(escapeRegExp(resolvedPath)));
+
+	// A real skill edit is a genuine reason for anyone to rewrite.
+	writeFileSync(fixture.skill, "---\nname: loose\ndescription: Shared cache loose skill, edited.\n---\n");
+	const cacheBefore = managedFileSnapshot(fixture.cache);
+
+	const idle = runSharedCacheProcess(fixture.root, fixture.cwd, []);
+	assert.equal(idle.regenerated, true, "a changed skill file must still regenerate");
+	assert.equal(idle.reason, "fingerprint-changed");
+	assert.notEqual(managedFileSnapshot(fixture.cache).bytes, cacheBefore.bytes);
+
+	const registryAfterIdle = readFileSync(fixture.registry, "utf8");
+	assert.match(
+		registryAfterIdle,
+		new RegExp(escapeRegExp(resolvedPath)),
+		"a session with no resolved skills must not erase the peer's Pi-resolved rows",
+	);
+	assert.match(
+		registryAfterIdle,
+		/Pi-resolved runtime authority \(before_agent_start\.systemPromptOptions\.skills\): 1 skill\(s\)/,
+		"the resolved authority count must survive the files-driven rewrite",
+	);
+	const cacheAfterIdle = JSON.parse(readFileSync(fixture.cache, "utf8")) as {
+		fingerprint?: string;
+		resolvedFingerprint?: string;
+		resolved?: unknown[];
+	};
+	assert.match(cacheAfterIdle.fingerprint ?? "", /^[0-9a-f]{40}$/);
+	assert.match(cacheAfterIdle.resolvedFingerprint ?? "", /^[0-9a-f]{40}$/, "the peer's digest must be kept");
+	assert.equal(cacheAfterIdle.resolved?.length, 1, "the peer's rows must be kept so they can be re-rendered");
+
+	// The peer must not have to republish to keep its own rows: it is a cache hit.
+	const peerPoll = runSharedCacheProcess(fixture.root, fixture.cwd, resolved);
+	assert.equal(peerPoll.regenerated, false, "the peer must not republish after a peer's files-driven rewrite");
+	assert.equal(peerPoll.reason, "cache-hit");
+	assert.match(readFileSync(fixture.registry, "utf8"), new RegExp(escapeRegExp(resolvedPath)));
+});
+
+// R8 (gentle-shell#3020): a cache that carries a resolved digest without its
+// rows (a hand-edited record, or a writer that stored only the digest) must not
+// be able to suppress the owning session forever. It republishes once, then
+// goes quiet again -- bounded, and self-healing.
+test("a cache that lost its resolved rows lets the owning session republish once (#3020)", async (t) => {
+	const fixture = sharedCacheFixture();
+	t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+	const resolvedPath = join(fixture.root, "pkg", "skills", "prompted", "SKILL.md");
+	const resolved: ResolvedSkill[] = [
+		{
+			name: "prompted",
+			description: "Trigger: prompted session authority.",
+			filePath: resolvedPath,
+			sourceInfo: { scope: "project", origin: "package" },
+		},
+	];
+
+	assert.equal(runSharedCacheProcess(fixture.root, fixture.cwd, resolved).regenerated, true);
+	const written = JSON.parse(readFileSync(fixture.cache, "utf8")) as {
+		fingerprint: string;
+		resolvedFingerprint: string;
+	};
+	assert.equal(typeof written.resolvedFingerprint, "string");
+	// Digest kept, rows gone: the shape a digest-only writer would leave behind.
+	writeFileSync(
+		fixture.cache,
+		JSON.stringify({ fingerprint: written.fingerprint, resolvedFingerprint: written.resolvedFingerprint }, null, 2),
+	);
+
+	// A files-driven rewrite by a session with no opinion cannot invent the rows.
+	writeFileSync(fixture.skill, "---\nname: loose\ndescription: Edited loose skill.\n---\n");
+	assert.equal(runSharedCacheProcess(fixture.root, fixture.cwd, []).regenerated, true, "a changed skill file still writes");
+
+	const healing = runSharedCacheProcess(fixture.root, fixture.cwd, resolved);
+	assert.equal(healing.regenerated, true, "the owning session must republish a lost resolved section");
+	assert.equal(healing.reason, "fingerprint-changed");
+	assert.match(
+		readFileSync(fixture.registry, "utf8"),
+		new RegExp(escapeRegExp(resolvedPath)),
+		"the republished registry must carry the Pi-resolved rows again",
+	);
+	const healedCache = JSON.parse(readFileSync(fixture.cache, "utf8")) as { resolved?: unknown[] };
+	assert.equal(healedCache.resolved?.length, 1, "the republished cache must carry the rows again");
+
+	const quiet = runSharedCacheProcess(fixture.root, fixture.cwd, resolved);
+	assert.equal(quiet.regenerated, false, "the repair must be bounded to one publish");
+	assert.equal(quiet.reason, "cache-hit");
+});
+
+// R9 (gentle-shell#3020 review R4-001): an empty resolved batch from Pi's own
+// resolution is an authority claim -- "this session now resolves nothing" -- and
+// must withdraw the published section. A watcher poll holds no such authority,
+// so the same empty list from a poll must leave the peer's section alone.
+test("an explicit empty resolved batch withdraws the published section, a poll never does (#3020)", async (t) => {
+	const fixture = sharedCacheFixture();
+	t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+	const resolvedPath = join(fixture.root, "pkg", "skills", "prompted", "SKILL.md");
+	const resolved: ResolvedSkill[] = [
+		{
+			name: "prompted",
+			description: "Trigger: prompted session authority.",
+			filePath: resolvedPath,
+			sourceInfo: { scope: "project", origin: "package" },
+		},
+	];
+	const resolvedAuthorityLine = /Pi-resolved runtime authority \(before_agent_start\.systemPromptOptions\.skills\): 1 skill\(s\)/;
+
+	assert.equal(runSharedCacheProcess(fixture.root, fixture.cwd, resolved, "apply").regenerated, true);
+	const published = readFileSync(fixture.registry, "utf8");
+	assert.match(published, new RegExp(escapeRegExp(resolvedPath)));
+	assert.match(published, resolvedAuthorityLine);
+
+	// A poll from a session that simply holds no set must not withdraw anything.
+	const poll = runSharedCacheProcess(fixture.root, fixture.cwd, []);
+	assert.equal(poll.regenerated, false, "a poll without a resolved set must stay a cache hit");
+	assert.equal(poll.reason, "cache-hit");
+	assert.match(readFileSync(fixture.registry, "utf8"), new RegExp(escapeRegExp(resolvedPath)));
+
+	// Pi's own resolution now reports zero skills: the stale authority must go.
+	const withdrawal = runSharedCacheProcess(fixture.root, fixture.cwd, [], "apply");
+	assert.equal(withdrawal.regenerated, true, "an explicit empty batch must withdraw the resolved section");
+	assert.equal(withdrawal.reason, "fingerprint-changed");
+	const withdrawn = readFileSync(fixture.registry, "utf8");
+	assert.doesNotMatch(withdrawn, new RegExp(escapeRegExp(resolvedPath)), "the withdrawn rows must be gone");
+	assert.doesNotMatch(withdrawn, resolvedAuthorityLine, "the stale authority count must be gone");
+	const cacheAfter = JSON.parse(readFileSync(fixture.cache, "utf8")) as {
+		fingerprint?: string;
+		resolvedFingerprint?: string;
+		resolved?: unknown[];
+	};
+	assert.equal(cacheAfter.resolvedFingerprint, undefined, "the withdrawn digest must not survive");
+	assert.equal(cacheAfter.resolved, undefined, "the withdrawn rows must not survive");
+
+	// And the withdrawal is bounded: repeating it says nothing new.
+	const repeat = runSharedCacheProcess(fixture.root, fixture.cwd, [], "apply");
+	assert.equal(repeat.regenerated, false, "a repeated empty batch must not rewrite again");
+	assert.equal(repeat.reason, "cache-hit");
+
+	// A different session that still resolves a set may publish it again.
+	const republish = runSharedCacheProcess(fixture.root, fixture.cwd, resolved, "apply");
+	assert.equal(republish.regenerated, true, "another session may still publish its own resolved set");
+	assert.match(readFileSync(fixture.registry, "utf8"), new RegExp(escapeRegExp(resolvedPath)));
+});

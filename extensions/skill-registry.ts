@@ -352,7 +352,9 @@ function isResolvedSkill(value: unknown): value is ResolvedSkill {
 
 async function applyResolvedSkillsUpdate(cwd: string, skills: ResolvedSkill[]): Promise<RegenResult> {
 	lastResolvedSkills = skills.map(trimResolvedSkill);
-	return regenerateRegistry(cwd, false, lastResolvedSkills);
+	// R9: this is Pi's own resolution for this session, so an empty batch here
+	// means "this session resolves nothing", never "no opinion".
+	return regenerateRegistry(cwd, false, lastResolvedSkills, false, "explicit");
 }
 
 function toResolvedEntry(skill: ResolvedSkill, cwd: string): SkillEntry | undefined {
@@ -402,9 +404,12 @@ function markdownCell(value: string): string {
 interface CacheRecord {
 	fingerprint: string;
 	resolvedFingerprint?: string;
+	// R8: the trimmed rows behind that digest, so a process with no opinion of
+	// its own can render a peer's Pi-resolved section instead of erasing it.
+	resolved?: ResolvedSkill[];
 }
 
-function isCacheFile(value: unknown): value is { fingerprint: string; resolvedFingerprint?: unknown } {
+function isCacheFile(value: unknown): value is { fingerprint: string; resolvedFingerprint?: unknown; resolved?: unknown } {
 	return (
 		typeof value === "object" &&
 		value !== null &&
@@ -415,9 +420,21 @@ function isCacheFile(value: unknown): value is { fingerprint: string; resolvedFi
 
 function cachedResolvedFingerprint(value: unknown): string | undefined {
 	if (!isCacheFile(value)) return undefined;
+	// R8: a digest without its rows cannot be rendered by a process that has no
+	// opinion of its own. Treat it as unpublished so the owning session asserts
+	// its section again instead of losing it for the rest of the session.
+	if (cachedResolvedRows(value).length === 0) return undefined;
 	return typeof value.resolvedFingerprint === "string" && value.resolvedFingerprint.length > 0
 		? value.resolvedFingerprint
 		: undefined;
+}
+
+// R8: only a fully valid row batch is trusted; a partial or corrupt record is
+// treated as "nothing published" rather than rendered half-way.
+function cachedResolvedRows(value: unknown): ResolvedSkill[] {
+	if (!isCacheFile(value) || !Array.isArray(value.resolved)) return [];
+	if (!value.resolved.every(isResolvedSkill)) return [];
+	return value.resolved.map(trimResolvedSkill);
 }
 
 // R5/R7: per process and per cwd, the last resolved digest this process
@@ -651,11 +668,17 @@ async function quarantineLegacyProjectRegistry(cwd: string, notifyWarning: (mess
 	}
 }
 
+// R9: only Pi's runtime resolution may claim a resolved set, including the
+// claim "this session now resolves nothing". A watcher poll or a manual read
+// has no such authority: it passes "none" and never speaks for the section.
+type ResolvedAuthority = "explicit" | "none";
+
 async function regenerateRegistry(
 	cwd: string,
 	force: boolean,
 	resolved: ResolvedSkill[] = [],
 	intentional = false,
+	resolvedAuthority: ResolvedAuthority = "none",
 ): Promise<RegenResult> {
 	const existingDirs = await uniqueExistingDirs([
 		...projectSkillDirs(cwd),
@@ -670,19 +693,28 @@ async function regenerateRegistry(
 	// R1: skill bytes alone decide whether the rendered registry is stale.
 	const fp = await fingerprint(files);
 	// R2/R4: an empty local set is "no opinion" and has no digest to publish.
-	const localResolvedFp = resolvedFingerprint(resolved);
-	let cached: string | undefined;
+	const localResolvedFp = resolvedFingerprint(resolved);	let cached: string | undefined;
 	let cachedResolvedFp: string | undefined;
+	let cachedRows: ResolvedSkill[] = [];
 	if (await pathExists(cachePath)) {
 		try {
 			const parsed: unknown = JSON.parse(await readFile(cachePath, "utf8"));
 			cached = isCacheFile(parsed) ? parsed.fingerprint : undefined;
 			cachedResolvedFp = cachedResolvedFingerprint(parsed);
+			cachedRows = cachedResolvedRows(parsed);
 		} catch {
 			cached = undefined;
 			cachedResolvedFp = undefined;
+			cachedRows = [];
 		}
 	}
+	// R9: an explicit empty batch is an authority claim, not silence. A session
+	// that lost every Pi-resolved skill must be able to withdraw the section a
+	// peer still advertises; a poll that merely holds no set must not.
+	const withdrawsResolved = resolvedAuthority === "explicit" && resolved.length === 0;
+	// R8: render the peer's published rows when this process has no opinion of
+	// its own, so a files-driven rewrite never empties the resolved section.
+	const effectiveResolved = resolved.length > 0 || withdrawsResolved ? resolved : cachedRows;
 	const cwdKey = comparablePath(cwd);
 	// R5: publish the resolved section only for a set that is neither already
 	// published by a peer nor by this process, so two prompted sessions do not
@@ -691,9 +723,19 @@ async function regenerateRegistry(
 		localResolvedFp !== undefined &&
 		localResolvedFp !== cachedResolvedFp &&
 		localResolvedFp !== publishedResolvedFingerprints.get(cwdKey);
+	// R9: withdrawing is a one-time statement -- once the shared record carries
+	// no resolved section, the same empty batch says nothing new.
+	const shouldWithdrawResolved = withdrawsResolved && cachedResolvedFp !== undefined;
 	// R6: cache hit means nothing to say -- no files change, an existing
-	// registry, and no pending resolved publish. `force` still bypasses it all.
-	if (!force && cached === fp && !shouldPublishResolved && (await pathExists(registryPath))) {
+	// registry, and no pending resolved publish or withdrawal. `force` still
+	// bypasses it all.
+	if (
+		!force &&
+		cached === fp &&
+		!shouldPublishResolved &&
+		!shouldWithdrawResolved &&
+		(await pathExists(registryPath))
+	) {
 		return { regenerated: false, skillCount: 0, reason: "cache-hit" };
 	}
 	if (!intentional) {
@@ -706,7 +748,7 @@ async function regenerateRegistry(
 		if (entry) entries.push(entry);
 	}
 	const resolvedEntries: SkillEntry[] = [];
-	for (const skill of resolved) {
+	for (const skill of effectiveResolved) {
 		const entry = toResolvedEntry(skill, cwd);
 		if (entry) resolvedEntries.push(entry);
 	}
@@ -714,7 +756,7 @@ async function regenerateRegistry(
 		resolvedEntries,
 		entries,
 		cwd,
-		resolved.map((skill) => skill.filePath),
+		effectiveResolved.map((skill) => skill.filePath),
 	);
 	const sources = existingDirs.map((d) => {
 		const rel = relative(cwd, d);
@@ -725,11 +767,15 @@ async function regenerateRegistry(
 		await mkdir(join(cwd, ".atl"), { recursive: true });
 		await writeFile(registryPath, md);
 		// R3: record both digests. R4: a process with no opinion preserves the
-		// resolved section a peer already published instead of erasing it.
-		const recordedResolvedFp = localResolvedFp ?? cachedResolvedFp;
+		// resolved section a peer already published instead of erasing it. R9: a
+		// withdrawal erases it on purpose.
+		const recordedResolvedFp = withdrawsResolved ? undefined : (localResolvedFp ?? cachedResolvedFp);
 		const record: CacheRecord = recordedResolvedFp === undefined
 			? { fingerprint: fp }
 			: { fingerprint: fp, resolvedFingerprint: recordedResolvedFp };
+		if (recordedResolvedFp !== undefined && effectiveResolved.length > 0) {
+			record.resolved = effectiveResolved.map(trimResolvedSkill);
+		}
 		await writeFile(cachePath, JSON.stringify(record, null, 2));
 	} catch (error) {
 		if (isStorageUnavailableError(error)) {
@@ -750,6 +796,7 @@ async function regenerateRegistry(
 	}
 	// R7: remember what this process published for this cwd.
 	if (localResolvedFp !== undefined) publishedResolvedFingerprints.set(cwdKey, localResolvedFp);
+	else if (withdrawsResolved) publishedResolvedFingerprints.delete(cwdKey);
 	return {
 		regenerated: true,
 		skillCount: deduped.length,
